@@ -1,0 +1,31 @@
+From: Carol Davis <carol@company.org>
+To: bob@example.com, alice@example.com
+Cc: dave@example.com
+Subject: Q1 Report
+Date: Tue, 11 Mar 2025 14:00:00 +0000
+Message-ID: <msg003@company.org>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset="utf-8"
+
+Q1 Report attached. Key highlights:
+- Revenue up 15%
+- New customers: 42
+
+--boundary123
+Content-Type: text/html; charset="utf-8"
+
+<html>
+<body>
+<h1>Q1 Report</h1>
+<p>Key highlights:</p>
+<ul>
+<li>Revenue up <strong>15%</strong></li>
+<li>New customers: <strong>42</strong></li>
+</ul>
+</body>
+</html>
+
+--boundary123--

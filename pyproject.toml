@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "email-manager"
+version = "0.1.0"
+description = "Personal email data pipeline with AI-powered categorisation and CRM"
+requires-python = ">=3.11"
+dependencies = [
+    "imapclient>=3.0",
+    "beautifulsoup4>=4.12",
+    "html2text>=2024.2",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "click>=8.1",
+    "rich>=13.0",
+    "anthropic>=0.40",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "google-api-python-client>=2.0",
+    "google-auth-httplib2>=0.2",
+    "google-auth-oauthlib>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+email-manager = "email_manager.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/email_manager"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

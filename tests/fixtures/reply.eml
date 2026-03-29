@@ -1,0 +1,15 @@
+From: Bob Jones <bob@example.com>
+To: Alice Smith <alice@example.com>
+Subject: Re: Project Alpha kickoff
+Date: Mon, 10 Mar 2025 10:30:00 +0000
+Message-ID: <msg002@example.com>
+In-Reply-To: <msg001@example.com>
+References: <msg001@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Hi Alice,
+
+Sounds great! I'll review the scope document and send my feedback by Wednesday.
+
+Cheers,
+Bob

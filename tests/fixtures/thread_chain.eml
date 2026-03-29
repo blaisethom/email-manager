@@ -1,0 +1,12 @@
+From: Dave Wilson <dave@example.com>
+To: Alice Smith <alice@example.com>, Bob Jones <bob@example.com>
+Subject: Re: Re: Project Alpha kickoff
+Date: Tue, 11 Mar 2025 08:00:00 +0000
+Message-ID: <msg004@example.com>
+In-Reply-To: <msg002@example.com>
+References: <msg001@example.com> <msg002@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Adding myself to this thread. I can help with the technical review.
+
+-Dave
