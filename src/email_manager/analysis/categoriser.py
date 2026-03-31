@@ -18,17 +18,18 @@ def categorise_emails(
     backend: LLMBackend,
     batch_size: int = 10,
     on_progress: callable = None,
+    limit: int | None = None,
 ) -> int:
     # Get emails not yet categorised
-    unprocessed = fetchall(
-        conn,
-        """SELECT e.id, e.message_id, e.subject, e.from_address, e.from_name,
-                  e.body_text, e.date
-           FROM emails e
-           LEFT JOIN pipeline_runs pr ON e.id = pr.email_id AND pr.stage = 'categorise'
-           WHERE pr.id IS NULL
-           ORDER BY e.date DESC""",
-    )
+    sql = """SELECT e.id, e.message_id, e.subject, e.from_address, e.from_name,
+                    e.body_text, e.date
+             FROM emails e
+             LEFT JOIN pipeline_runs pr ON e.id = pr.email_id AND pr.stage = 'categorise'
+             WHERE pr.id IS NULL OR pr.status = 'error'
+             ORDER BY e.date DESC"""
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    unprocessed = fetchall(conn, sql)
 
     if not unprocessed:
         return 0
@@ -109,6 +110,14 @@ def _process_batch(
             """INSERT OR REPLACE INTO pipeline_runs (stage, email_id, status, model_used, started_at, completed_at)
             VALUES (?, ?, ?, ?, ?, ?)""",
             ("categorise", email_id, "complete", backend.model_name, now, now),
+        )
+
+    # Mark any emails the AI didn't return results for as complete too
+    for row in batch:
+        conn.execute(
+            """INSERT OR IGNORE INTO pipeline_runs (stage, email_id, status, model_used, started_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            ("categorise", row["id"], "complete", backend.model_name, now, now),
         )
 
 

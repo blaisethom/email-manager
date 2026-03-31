@@ -13,15 +13,16 @@ def summarise_threads(
     conn: sqlite3.Connection,
     backend: LLMBackend,
     on_progress: callable = None,
+    limit: int | None = None,
 ) -> int:
     # Get threads that need summarisation (no summary yet, or new emails since last summary)
-    threads = fetchall(
-        conn,
-        """SELECT t.thread_id, t.subject, t.participants, t.email_count
-           FROM threads t
-           WHERE t.summary IS NULL AND t.email_count > 0
-           ORDER BY t.last_date DESC""",
-    )
+    sql = """SELECT t.thread_id, t.subject, t.participants, t.email_count
+             FROM threads t
+             WHERE t.summary IS NULL AND t.email_count > 0
+             ORDER BY t.last_date DESC"""
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    threads = fetchall(conn, sql)
 
     if not threads:
         return 0
@@ -73,8 +74,12 @@ def summarise_threads(
 
             total_processed += 1
 
-        except Exception:
-            pass  # Skip failed threads silently
+        except Exception as e:
+            # Set a placeholder so we don't retry endlessly; user can NULL it to retry
+            conn.execute(
+                "UPDATE threads SET summary = ?, summary_model = ? WHERE thread_id = ?",
+                (f"[error: {str(e)[:100]}]", backend.model_name, thread_row["thread_id"]),
+            )
 
         conn.commit()
 

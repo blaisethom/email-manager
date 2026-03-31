@@ -8,14 +8,14 @@ from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.console import Console
 
-from email_manager.config import Config
+from email_manager.config import EmailAccount
 from email_manager.db import fetchone
 from email_manager.ingestion.parser import parse_raw_email, email_to_db_row
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 
-def _get_gmail_service(config: Config):
+def _get_gmail_service(config: EmailAccount):
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -48,15 +48,21 @@ def _get_gmail_service(config: Config):
     return build("gmail", "v1", credentials=creds)
 
 
-def sync_emails(conn: sqlite3.Connection, config: Config) -> int:
+def _sync_state_key(config: EmailAccount) -> str:
+    """Per-account key for the sync_state table."""
+    return f"gmail:{config.name}" if config.name else "gmail"
+
+
+def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> int:
     service = _get_gmail_service(config)
     console = Console()
+    state_key = _sync_state_key(config)
 
     # Check if we have a stored historyId for incremental sync
     state = fetchone(
         conn,
         "SELECT last_uid, uidvalidity FROM sync_state WHERE folder = ?",
-        ("gmail",),
+        (state_key,),
     )
 
     if state and state["last_uid"]:
@@ -70,7 +76,7 @@ def sync_emails(conn: sqlite3.Connection, config: Config) -> int:
     return _sync_full(service, conn, config, console)
 
 
-def _sync_full(service, conn: sqlite3.Connection, config: Config, console: Console) -> int:
+def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console: Console) -> int:
     console.print("Performing full Gmail sync...")
 
     # List all message IDs
@@ -152,13 +158,14 @@ def _sync_full(service, conn: sqlite3.Connection, config: Config, console: Conso
 
             progress.advance(task)
 
-    # Store sync state (reuse sync_state table: folder="gmail", last_uid=historyId)
+    # Store sync state (reuse sync_state table: folder=state_key, last_uid=historyId)
     if latest_history_id:
+        state_key = _sync_state_key(config)
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO sync_state (folder, uidvalidity, last_uid, last_sync)
             VALUES (?, ?, ?, ?)""",
-            ("gmail", 0, int(latest_history_id), now),
+            (state_key, 0, int(latest_history_id), now),
         )
 
     conn.commit()
@@ -166,7 +173,7 @@ def _sync_full(service, conn: sqlite3.Connection, config: Config, console: Conso
 
 
 def _sync_incremental(
-    service, conn: sqlite3.Connection, start_history_id: int, config: Config, console: Console
+    service, conn: sqlite3.Connection, start_history_id: int, config: EmailAccount, console: Console
 ) -> int:
     console.print(f"Incremental Gmail sync from historyId {start_history_id}...")
 
@@ -246,11 +253,12 @@ def _sync_incremental(
             progress.advance(task)
 
     # Update sync state
+    state_key = _sync_state_key(config)
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """INSERT OR REPLACE INTO sync_state (folder, uidvalidity, last_uid, last_sync)
         VALUES (?, ?, ?, ?)""",
-        ("gmail", 0, int(latest_history_id), now),
+        (state_key, 0, int(latest_history_id), now),
     )
     conn.commit()
 

@@ -38,4 +38,7 @@ class ClaudeBackend:
             ],
         )
         raw = "{" + response.content[0].text
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse JSON from Claude API. Response ({len(raw)} chars): {raw[:300]}") from e

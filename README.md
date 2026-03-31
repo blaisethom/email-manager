@@ -1,6 +1,6 @@
 # Email Manager
 
-A personal email data pipeline that syncs your emails into a local SQLite database, uses AI to categorise them into projects, extracts entities, summarises threads, builds a contact CRM, and provides an interactive chat agent for exploring and refining your email data.
+A personal email data pipeline that syncs your emails into a local SQLite database, uses AI to categorise them into projects, extracts entities, builds contact memories, summarises threads, and provides an interactive chat agent for exploring and refining your email data.
 
 All data stays local. You choose the AI backend.
 
@@ -10,15 +10,25 @@ All data stays local. You choose the AI backend.
 # Install
 uv sync
 
-# Configure
+# Configure accounts
+cp accounts.json.example accounts.json
+# Edit accounts.json with your email accounts
+
+# Configure AI
 cp .env.example .env
-# Edit .env with your email and AI settings
+# Edit .env with your AI backend settings
 
 # Sync emails
 email-manager sync
 
+# Run base analysis (no AI needed)
+email-manager analyse --stage extract_base
+
 # Run AI analysis
 email-manager analyse
+
+# Generate contact memories
+email-manager memory --all --limit 10
 
 # Explore interactively
 email-manager chat
@@ -27,34 +37,65 @@ email-manager chat
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────────────────────┐
-│  Email       │     │   SQLite     │     │  AI Backend              │
-│  Sources     │────>│   Database   │<───>│  (Claude/CLI/Ollama)     │
-│  IMAP/Gmail  │     │              │     └──────────────────────────┘
-└─────────────┘     │  emails      │              │
-                    │  threads     │     ┌────────┴─────────────────┐
-                    │  contacts    │     │  Pipeline Stages         │
-                    │  projects    │     │  1. Categorise           │
-                    │  entities    │     │  2. Extract Entities     │
-                    │  pipeline_   │     │  3. Summarise Threads    │
-                    │    runs      │     │  4. Build CRM            │
-                    └──────────────┘     └──────────────────────────┘
-                          │
-                    ┌─────┴──────┐
-                    │  CLI / Chat │
-                    │  Agent      │
-                    └────────────┘
+┌──────────────────┐     ┌──────────────┐     ┌──────────────────────────┐
+│  Email Accounts  │     │   SQLite     │     │  AI Backend              │
+│  Gmail / IMAP    │────>│   Database   │<───>│  (Claude/CLI/Ollama)     │
+│  (multi-account) │     │              │     └──────────────────────────┘
+└──────────────────┘     │  emails      │              │
+                         │  threads     │     ┌────────┴─────────────────┐
+                         │  contacts    │     │  Pipeline Stages         │
+                         │  co_email_   │     │  1. Extract Base (no AI) │
+                         │    stats     │     │  2. Contact Memory       │
+                         │  contact_    │     │  3. Extract Entities     │
+                         │    memories  │     │  4. Categorise           │
+                         │  projects    │     │  5. Summarise Threads    │
+                         │  entities    │     └──────────────────────────┘
+                         └──────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    │  CLI / Chat Agent   │
+                    │  Memory System      │
+                    └─────────────────────┘
 ```
 
 ### Data Flow
 
-1. **Sync** — Emails are fetched from your mail server (IMAP or Gmail API) and stored as-is in SQLite. Incremental sync means only new emails are fetched on subsequent runs.
-2. **Analyse** — The AI pipeline processes emails in stages. Each stage is independently resumable — if interrupted, it picks up where it left off.
-3. **Explore** — CLI commands and the interactive chat agent let you query, reorganise, and refine the data.
+1. **Sync** — Emails are fetched from all configured accounts (Gmail API, IMAP) and stored in SQLite. Incremental sync means only new emails are fetched on subsequent runs.
+2. **Extract Base** — Contacts, companies, and co-email statistics are extracted from email headers. No AI needed.
+3. **Analyse** — The AI pipeline processes emails in stages: contact memories, entity extraction, categorisation, thread summarisation. Each stage is independently resumable.
+4. **Explore** — CLI commands and the interactive chat agent let you query, reorganise, and refine the data.
 
-## Email Sources
+## Multi-Account Setup
 
-### Gmail (recommended)
+Configure multiple email accounts in `accounts.json`:
+
+```json
+[
+  {
+    "name": "personal-gmail",
+    "backend": "gmail",
+    "gmail_credentials_path": "data/gmail_credentials.json",
+    "gmail_token_path": "data/gmail_token.json",
+    "gmail_labels": []
+  },
+  {
+    "name": "work-imap",
+    "backend": "imap",
+    "imap_host": "imap.example.com",
+    "imap_user": "user@example.com",
+    "imap_password": "your-app-password",
+    "imap_port": 993,
+    "imap_use_ssl": true,
+    "imap_folders": ["*"]
+  }
+]
+```
+
+Set `imap_folders` to `["*"]` to auto-discover and sync all folders. All accounts feed into the same database, so analysis works across everything.
+
+**Backwards compatible:** If no `accounts.json` exists, falls back to the single-account `.env` configuration.
+
+### Gmail
 
 Uses the Gmail API with OAuth2. Supports incremental sync via Gmail's `historyId` mechanism.
 
@@ -62,32 +103,26 @@ Uses the Gmail API with OAuth2. Supports incremental sync via Gmail's `historyId
 2. Create a project, enable the Gmail API
 3. Create OAuth 2.0 credentials (Desktop application type)
 4. Download the JSON file to `data/gmail_credentials.json`
-5. Set in `.env`:
-   ```
-   EMAIL_BACKEND=gmail
-   GMAIL_CREDENTIALS_PATH=data/gmail_credentials.json
-   ```
-6. Run `email-manager sync` — a browser window will open for OAuth consent on first run. The token is saved locally for future use.
+5. Run `email-manager sync` — a browser window will open for OAuth consent on first run. The token is saved locally for future use.
 
 ### IMAP
 
-Works with any email provider that supports IMAP (Fastmail, ProtonMail Bridge, self-hosted, etc.).
+Works with any email provider that supports IMAP (Fastmail, Yahoo, ProtonMail Bridge, self-hosted, etc.). Uses UID-based incremental sync with UIDVALIDITY tracking.
 
-```
-EMAIL_BACKEND=imap
-IMAP_HOST=imap.example.com
-IMAP_USER=user@example.com
-IMAP_PASSWORD=your-password
-IMAP_PORT=993
-IMAP_USE_SSL=true
-IMAP_FOLDERS=INBOX,Sent
-```
+### Yahoo Mail
 
-Uses UID-based incremental sync with UIDVALIDITY tracking.
+Yahoo is fully supported with automatic handling of its quirks:
+
+- **Export endpoint** — Automatically uses `export.imap.mail.yahoo.com` (100k messages/folder) instead of the standard endpoint (10k limit)
+- **Rate limiting** — Exponential backoff on rate limit errors, 1-second pause between batches
+- **Connection drops** — Auto-reconnect with resume from last saved position
+- **Batch size** — Smaller batches (50 vs 100) to stay under Yahoo's limits
+- **Server errors** — `[SERVERBUG]` errors trigger retry, falling back to individual message fetches
+- **App passwords** — Required since May 2024. Generate one at Yahoo Account > Security > App Passwords
 
 ## AI Backends
 
-Three backends, all behind a common interface. Switch between them by changing `AI_BACKEND` in `.env`.
+Three backends, all behind a common `LLMBackend` protocol. Switch between them by changing `AI_BACKEND` in `.env`.
 
 | Backend | Setting | Auth | Best for |
 |---|---|---|---|
@@ -97,7 +132,7 @@ Three backends, all behind a common interface. Switch between them by changing `
 
 ### Claude CLI
 
-If you have the [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) installed and authenticated, this is the simplest option — no API key needed:
+If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated, this is the simplest option — no API key needed:
 
 ```
 AI_BACKEND=claude-cli
@@ -115,46 +150,75 @@ OLLAMA_URL=http://localhost:11434
 
 ## Pipeline
 
-The analysis pipeline has four stages, each independently resumable:
+The analysis pipeline has five stages. Each is independently resumable — if interrupted, re-running skips already-processed items.
 
-| Stage | What it does |
-|---|---|
-| `categorise` | Assigns each email to 1-3 projects using AI. Creates projects automatically. |
-| `extract_entities` | Extracts people, companies, topics, and action items from each email. |
-| `summarise_threads` | Generates summaries for email threads. |
-| `build_crm` | Aggregates contact statistics (email counts, companies, first/last seen). SQL-based, no AI needed. |
+| Stage | AI? | What it does |
+|---|---|---|
+| `extract_base` | No | Extracts contacts, companies, and co-email pair statistics from email headers |
+| `contact_memory` | Yes | Generates AI memory profiles for contacts (relationship, discussions, key facts) |
+| `extract_entities` | Yes | Extracts people, companies, topics, and action items from email body text |
+| `categorise` | Yes | Assigns each email to 1-3 projects. Creates projects automatically |
+| `summarise_threads` | Yes | Generates summaries for email threads |
 
-Run all stages:
 ```bash
-email-manager analyse
-```
-
-Run a specific stage:
-```bash
-email-manager analyse --stage categorise
-email-manager analyse --stage build_crm
+email-manager analyse                           # run all stages
+email-manager analyse --stage extract_base      # run one stage (no AI needed)
+email-manager analyse --stage categorise -n 100 # process 100 most recent emails
+email-manager run                               # sync + analyse in one command
 ```
 
 ### Resumability
 
-Each stage tracks its progress in the `pipeline_runs` table. If interrupted, re-running the same stage skips already-processed emails. To reprocess everything:
+Each stage tracks progress in the `pipeline_runs` table. To reprocess:
 
 ```sql
--- Via the chat agent or sqlite3 CLI
 DELETE FROM pipeline_runs WHERE stage = 'categorise';
 ```
 
 ### Batching
 
-Emails are sent to the AI in configurable batches (default 10) to reduce API calls. If a batch fails, individual emails are retried. Set batch size in `.env`:
+AI stages batch emails (default 10) to reduce API calls. Failed batches are retried individually.
 
 ```
 AI_BATCH_SIZE=10
 ```
 
+## Contact Memory System
+
+The memory system generates AI-powered profiles for each contact, including:
+- **Relationship type** — colleague, vendor, client, friend, manager, etc.
+- **Summary** — 2-4 sentence overview of all interactions
+- **Discussions** — Each topic/project with status (active, resolved, waiting)
+- **Key facts** — Extracted from email content ("Based in London", "Prefers async communication")
+
+### Swappable backends and strategies
+
+Two independent abstractions:
+
+**Storage backends** (`MEMORY_BACKEND` in `.env`):
+- `sqlite` — Stored in `contact_memories` table, queryable by the chat agent
+- `markdown` — One `.md` file per contact in `data/memories/`, human-readable
+- `both` (default) — Writes to both
+
+**Generation strategies** (`MEMORY_STRATEGY` in `.env`):
+- `default` — Single AI call with 30 recent emails, co-email network, projects, threads
+- `detailed` — Two AI calls: first identifies all discussions in depth, then builds the profile with 50 emails
+
+### Usage
+
+```bash
+email-manager memory                              # list all existing memories
+email-manager memory alice@example.com            # show or generate for one contact
+email-manager memory alice@example.com --force    # regenerate
+email-manager memory --all --limit 20             # top 20 contacts by email count
+email-manager memory --strategy detailed          # use detailed strategy
+```
+
+Memories are incremental — they detect when a contact's emails have changed and only regenerate when needed.
+
 ## Database
 
-SQLite with WAL mode. Stored at `data/email_manager.db` by default.
+SQLite with WAL mode and 30-second busy timeout. Stored at `data/email_manager.db`.
 
 ### Key Tables
 
@@ -162,10 +226,12 @@ SQLite with WAL mode. Stored at `data/email_manager.db` by default.
 |---|---|
 | `emails` | Raw email data — message ID, headers, body, folder, timestamps. Immutable after insert. |
 | `sync_state` | Per-folder sync cursor (UIDVALIDITY + last UID for IMAP, historyId for Gmail). |
-| `threads` | Thread groupings computed from References/In-Reply-To headers, with AI-generated summaries. |
+| `contacts` | Aggregated contact info — name, company, email counts, first/last seen. |
+| `co_email_stats` | Co-emailing statistics for every pair of addresses that appear on the same email. |
+| `contact_memories` | AI-generated memory profiles — relationship, discussions, key facts. |
+| `threads` | Thread groupings computed from References/In-Reply-To headers, with AI summaries. |
 | `projects` | AI-discovered or user-created project categories. |
 | `email_projects` | Many-to-many mapping of emails to projects, with confidence scores. |
-| `contacts` | Aggregated contact info — name, company, email counts, first/last seen. |
 | `entities` | Extracted entities (person, company, topic, action_item) per email. |
 | `pipeline_runs` | Tracks which emails have been processed by which pipeline stage. |
 
@@ -179,11 +245,14 @@ Threads are computed using a union-find algorithm:
 ## CLI Commands
 
 ```
-email-manager sync                              Fetch new emails from IMAP or Gmail
-email-manager sync --backend gmail              Override backend for this run
-email-manager analyse                           Run all AI analysis stages
-email-manager analyse --stage categorise        Run a specific stage
-email-manager run                               Sync + analyse in one command
+email-manager accounts                          List configured email accounts
+email-manager sync                              Sync all accounts
+email-manager sync --account personal-gmail     Sync one account
+email-manager sync --list-folders               List available IMAP folders
+email-manager analyse                           Run all analysis stages
+email-manager analyse --stage extract_base      Run one stage
+email-manager analyse --stage categorise -n 50  Process N most recent items
+email-manager run                               Sync + analyse
 email-manager list                              Show recent emails
 email-manager list --limit 50                   Show more emails
 email-manager search "quarterly report"         Full-text search
@@ -191,6 +260,13 @@ email-manager projects                          List projects with email counts
 email-manager threads                           List threads with summaries
 email-manager contacts                          List contacts by frequency
 email-manager contact alice@example.com         Detail view for one contact
+email-manager coemail                           Top co-emailing pairs
+email-manager coemail alice@example.com         Who does alice co-email with most
+email-manager entities                          List extracted entities
+email-manager entities --type person            Filter by entity type
+email-manager memory                            List contact memories
+email-manager memory alice@example.com          View/generate one contact's memory
+email-manager memory --all --limit 10           Generate for top 10 contacts
 email-manager status                            Sync state, pipeline progress, stats
 email-manager chat                              Interactive AI agent
 ```
@@ -202,21 +278,22 @@ email-manager chat                              Interactive AI agent
 - **Query your data** — "Show me all emails from Sarah in the last month", "What are my biggest projects?"
 - **Refine project structure** — "Merge 'Q4 Planning' and 'Q4 Budget Review' into one project", "Rename project X to Y"
 - **Explore contacts** — "Tell me about my interactions with alice@example.com"
-- **Discuss the data model** — "What departments should I organise these projects into?", "Help me structure my projects into workstreams"
+- **View contact memories** — "What's my relationship with bob@company.com?"
+- **Discuss the data model** — "What departments should I organise these projects into?"
 - **Run SQL** — "How many emails did I get per month this year?" (read-only queries only)
 
-The agent has access to tools for querying and modifying your email data. For Claude API and Claude CLI backends, it uses native tool calling. For Ollama, it uses ReAct-style prompting.
+The agent has access to 11 tools for querying and modifying your email data. For Claude API and Claude CLI backends, it uses native tool calling. For Ollama, it uses ReAct-style prompting.
 
 ## Project Structure
 
 ```
 src/email_manager/
 ├── cli.py                  CLI entrypoint (Click)
-├── config.py               Settings from .env (Pydantic)
+├── config.py               Settings, multi-account config (Pydantic)
 ├── db.py                   SQLite schema and helpers
 ├── models.py               Data models (Email, Contact, Thread, Project)
 ├── ingestion/
-│   ├── imap_client.py      IMAP sync with incremental UID tracking
+│   ├── imap_client.py      IMAP sync with Yahoo resilience
 │   ├── gmail_client.py     Gmail API sync with historyId tracking
 │   ├── parser.py           Raw email bytes → structured Email objects
 │   └── threading.py        Thread detection (union-find algorithm)
@@ -225,20 +302,29 @@ src/email_manager/
 │   ├── claude_backend.py   Claude API implementation
 │   ├── claude_cli_backend.py  Claude CLI subprocess implementation
 │   ├── ollama_backend.py   Ollama HTTP implementation
-│   ├── prompts.py          All prompt templates
+│   ├── prompts.py          Prompt templates
 │   └── factory.py          Backend selection
+├── memory/
+│   ├── base.py             ContactMemory dataclass, MemoryBackend + MemoryStrategy protocols
+│   ├── factory.py          Backend and strategy selection
+│   ├── sqlite_backend.py   SQLite memory storage
+│   ├── markdown_backend.py Markdown file memory storage
+│   └── strategies/
+│       ├── default.py      Default strategy (single AI call)
+│       └── detailed.py     Detailed strategy (two AI calls)
 ├── pipeline/
 │   ├── runner.py           Pipeline orchestrator
 │   ├── stages.py           Stage registry
 │   └── batch.py            Batching utilities
 ├── analysis/
+│   ├── base_extract.py     No-AI extraction (contacts, entities, co-email stats)
+│   ├── contact_memory.py   Contact memory generation pipeline
 │   ├── categoriser.py      Email → project assignment
-│   ├── entities.py         Entity extraction
-│   ├── summariser.py       Thread summarisation
-│   └── crm.py              Contact relationship aggregation
+│   ├── entities.py         AI entity extraction
+│   └── summariser.py       Thread summarisation
 └── agent/
     ├── repl.py             Interactive chat (Claude API / CLI / generic)
-    ├── tools.py            Agent tool definitions and handlers
+    ├── tools.py            11 agent tool definitions and handlers
     └── context.py          Conversation memory management
 ```
 

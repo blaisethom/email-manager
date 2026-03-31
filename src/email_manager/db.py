@@ -108,6 +108,32 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 CREATE INDEX IF NOT EXISTS idx_pipeline_status ON pipeline_runs(stage, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_email_stage ON pipeline_runs(email_id, stage);
 
+CREATE TABLE IF NOT EXISTS co_email_stats (
+    email_a         TEXT NOT NULL,
+    email_b         TEXT NOT NULL,
+    co_email_count  INTEGER DEFAULT 0,
+    first_co_email  TEXT,
+    last_co_email   TEXT,
+    PRIMARY KEY (email_a, email_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_co_email_a ON co_email_stats(email_a);
+CREATE INDEX IF NOT EXISTS idx_co_email_b ON co_email_stats(email_b);
+
+CREATE TABLE IF NOT EXISTS contact_memories (
+    email           TEXT PRIMARY KEY,
+    name            TEXT,
+    relationship    TEXT,
+    summary         TEXT,
+    discussions     TEXT,
+    key_facts       TEXT,
+    model_used      TEXT,
+    strategy_used   TEXT,
+    version         INTEGER DEFAULT 1,
+    generated_at    TEXT,
+    emails_hash     TEXT
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -117,10 +143,11 @@ CREATE TABLE IF NOT EXISTS schema_version (
 def get_db(config: Config) -> sqlite3.Connection:
     db_path = config.db_abs_path
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     _init_schema(conn)
     return conn
 

@@ -32,7 +32,9 @@ Database schema (key tables):
 - projects: name, description, department, workstream
 - email_projects: email_id, project_id, confidence, assigned_by
 - threads: thread_id, subject, email_count, first_date, last_date, summary
-- entities: email_id, entity_type, value, context, confidence"""
+- entities: email_id, entity_type, value, context, confidence
+- contact_memories: email, name, relationship, summary, discussions (JSON), key_facts (JSON), strategy_used
+- co_email_stats: email_a, email_b, co_email_count, first_co_email, last_co_email"""
 
 
 def run_repl(conn: sqlite3.Connection, backend: LLMBackend, console: Console) -> None:

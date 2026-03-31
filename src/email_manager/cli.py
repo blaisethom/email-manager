@@ -19,43 +19,109 @@ def cli(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.option("--account", "-a", default=None, help="Sync only this account (by name)")
 @click.option("--folders", "-f", multiple=True, help="Override folders to sync (IMAP only)")
-@click.option("--backend", "-b", type=click.Choice(["imap", "gmail"]), default=None, help="Override email backend")
+@click.option("--list-folders", is_flag=True, help="List available folders on IMAP accounts and exit")
 @click.pass_context
-def sync(ctx: click.Context, folders: tuple[str, ...], backend: str | None) -> None:
-    """Fetch new emails from IMAP or Gmail."""
+def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool) -> None:
+    """Fetch new emails from all configured accounts."""
     from email_manager.ingestion.threading import compute_threads
 
     config: Config = ctx.obj["config"]
-    if backend:
-        config.email_backend = backend
-    if folders:
-        config.imap_folders = list(folders)
-
     console = Console()
     conn = get_db(config)
 
+    accounts = config.get_accounts()
+    if account:
+        accounts = [a for a in accounts if a.name == account]
+        if not accounts:
+            console.print(f"[red]No account named '{account}'. Available: {', '.join(a.name for a in config.get_accounts())}[/red]")
+            conn.close()
+            raise SystemExit(1)
+
+    if list_folders:
+        for acct in accounts:
+            label = acct.name or acct.backend
+            if acct.backend == "gmail":
+                console.print(f"\n[bold]{label}[/bold] (Gmail — uses labels, not folders)")
+            else:
+                from email_manager.ingestion.imap_client import _connect_with_retry, _list_folders
+                console.print(f"\n[bold]{label}[/bold] ({acct.imap_host})")
+                client = _connect_with_retry(acct)
+                try:
+                    folder_list = _list_folders(client)
+                    for f in folder_list:
+                        console.print(f"  {f}")
+                    console.print(f"  [dim]({len(folder_list)} folders)[/dim]")
+                finally:
+                    try:
+                        client.logout()
+                    except Exception:
+                        pass
+        conn.close()
+        return
+
+    total_new = 0
     try:
-        if config.email_backend == "gmail":
-            from email_manager.ingestion.gmail_client import sync_emails as gmail_sync
-            console.print("Syncing via Gmail API...")
-            new_count = gmail_sync(conn, config)
-        else:
-            from email_manager.ingestion.imap_client import sync_emails as imap_sync
-            if not config.imap_host:
-                console.print("[red]Error: IMAP_HOST not configured. See .env.example[/red]")
-                raise SystemExit(1)
-            console.print(f"Connecting to {config.imap_host}...")
-            new_count = imap_sync(conn, config)
+        for acct in accounts:
+            if folders:
+                acct.imap_folders = list(folders)
 
-        console.print(f"[green]Fetched {new_count} new email(s)[/green]")
+            label = acct.name or acct.backend
+            console.print(f"\n[bold]Syncing account: {label}[/bold]")
 
-        if new_count > 0:
-            console.print("Computing threads...")
+            if acct.backend == "gmail":
+                from email_manager.ingestion.gmail_client import sync_emails as gmail_sync
+                console.print(f"  Syncing via Gmail API...")
+                new_count = gmail_sync(conn, acct)
+            else:
+                from email_manager.ingestion.imap_client import sync_emails as imap_sync
+                if not acct.imap_host:
+                    console.print(f"  [red]Error: IMAP_HOST not configured for account '{label}'[/red]")
+                    continue
+                from email_manager.ingestion.imap_client import _is_yahoo
+                host = "export.imap.mail.yahoo.com" if _is_yahoo(acct.imap_host) else acct.imap_host
+                console.print(f"  Connecting to {host}...")
+                new_count = imap_sync(conn, acct)
+
+            console.print(f"  [green]Fetched {new_count} new email(s)[/green]")
+            total_new += new_count
+
+        if total_new > 0:
+            console.print("\nComputing threads...")
             updated = compute_threads(conn)
             console.print(f"[green]Updated {updated} thread assignment(s)[/green]")
+        else:
+            console.print(f"\n[green]Total: {total_new} new email(s) across {len(accounts)} account(s)[/green]")
     finally:
         conn.close()
+
+
+@cli.command()
+@click.pass_context
+def accounts(ctx: click.Context) -> None:
+    """List configured email accounts."""
+    config: Config = ctx.obj["config"]
+    console = Console()
+    accts = config.get_accounts()
+
+    if not accts:
+        console.print("[dim]No accounts configured. See accounts.json.example[/dim]")
+        return
+
+    table = Table(title="Email Accounts")
+    table.add_column("Name", width=20)
+    table.add_column("Backend", width=10)
+    table.add_column("Details", width=40)
+
+    for acct in accts:
+        if acct.backend == "gmail":
+            details = f"credentials: {acct.gmail_credentials_path}"
+        else:
+            details = f"{acct.imap_user}@{acct.imap_host}:{acct.imap_port}"
+        table.add_row(acct.name or "(unnamed)", acct.backend, details)
+
+    console.print(table)
 
 
 @cli.command(name="list")
@@ -149,16 +215,17 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--stage", "-s", type=click.Choice(["categorise", "extract_entities", "summarise_threads", "build_crm"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--stage", "-s", type=click.Choice(["extract_base", "contact_memory", "extract_entities", "categorise", "summarise_threads"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
 @click.pass_context
-def analyse(ctx: click.Context, stage: tuple[str, ...]) -> None:
+def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None) -> None:
     """Run AI analysis pipeline on synced emails."""
     from email_manager.pipeline.runner import run_pipeline
 
     config: Config = ctx.obj["config"]
     console = Console()
     stages = list(stage) if stage else None
-    run_pipeline(config, stages=stages, console=console)
+    run_pipeline(config, stages=stages, console=console, limit=limit)
 
 
 @cli.command()
@@ -214,6 +281,132 @@ def projects(ctx: click.Context, limit: int) -> None:
             (row["first_date"] or "")[:10],
             (row["last_date"] or "")[:10],
             row["department"] or "",
+        )
+
+    console.print(table)
+
+
+@cli.command()
+@click.option("--type", "-t", "entity_type", default=None, type=click.Choice(["person", "company", "topic", "action_item"]), help="Filter by entity type")
+@click.option("--limit", "-n", default=30)
+@click.pass_context
+def entities(ctx: click.Context, entity_type: str | None, limit: int) -> None:
+    """List extracted entities."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+
+    if entity_type:
+        rows = fetchall(
+            conn,
+            """SELECT ent.entity_type, ent.value, ent.context, ent.confidence,
+                      e.subject, e.date
+               FROM entities ent
+               JOIN emails e ON ent.email_id = e.id
+               WHERE ent.entity_type = ?
+               ORDER BY ent.confidence DESC
+               LIMIT ?""",
+            (entity_type, limit),
+        )
+    else:
+        rows = fetchall(
+            conn,
+            """SELECT ent.entity_type, ent.value, ent.context, ent.confidence,
+                      e.subject, e.date
+               FROM entities ent
+               JOIN emails e ON ent.email_id = e.id
+               ORDER BY ent.confidence DESC
+               LIMIT ?""",
+            (limit,),
+        )
+
+    conn.close()
+
+    console = Console()
+    if not rows:
+        console.print("[dim]No entities found. Run 'email-manager analyse --stage extract_entities' first.[/dim]")
+        return
+
+    # Also show a summary count by type
+    config2 = Config()
+    conn2 = get_db(config2)
+    counts = fetchall(conn2, "SELECT entity_type, COUNT(*) as cnt FROM entities GROUP BY entity_type ORDER BY cnt DESC")
+    conn2.close()
+    if counts:
+        console.print("[bold]Entity counts:[/bold]")
+        for c in counts:
+            console.print(f"  {c['entity_type']}: {c['cnt']}")
+        console.print()
+
+    table = Table(title=f"Entities{f' ({entity_type})' if entity_type else ''}")
+    table.add_column("Type", width=12)
+    table.add_column("Value", width=25)
+    table.add_column("Confidence", width=6, justify="right")
+    table.add_column("Email Subject", width=35)
+    table.add_column("Context", width=40)
+
+    for row in rows:
+        table.add_row(
+            row["entity_type"],
+            row["value"][:25],
+            f"{row['confidence']:.0%}" if row["confidence"] else "—",
+            (row["subject"] or "")[:35],
+            (row["context"] or "")[:40],
+        )
+
+    console.print(table)
+
+
+@cli.command()
+@click.argument("email_address", required=False)
+@click.option("--limit", "-n", default=30)
+@click.pass_context
+def coemail(ctx: click.Context, email_address: str | None, limit: int) -> None:
+    """Show co-emailing stats. Optionally filter by one address to see who they co-email with most."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+
+    if email_address:
+        rows = fetchall(
+            conn,
+            """SELECT email_a, email_b, co_email_count, first_co_email, last_co_email
+               FROM co_email_stats
+               WHERE email_a = ? OR email_b = ?
+               ORDER BY co_email_count DESC LIMIT ?""",
+            (email_address.lower(), email_address.lower(), limit),
+        )
+    else:
+        rows = fetchall(
+            conn,
+            """SELECT email_a, email_b, co_email_count, first_co_email, last_co_email
+               FROM co_email_stats
+               ORDER BY co_email_count DESC LIMIT ?""",
+            (limit,),
+        )
+
+    conn.close()
+
+    console = Console()
+    if not rows:
+        console.print("[dim]No co-email stats found. Run 'email-manager analyse --stage extract_base' first.[/dim]")
+        return
+
+    total = fetchone(get_db(config), "SELECT COUNT(*) as cnt FROM co_email_stats")
+    console.print(f"[bold]{total['cnt']}[/bold] co-email pairs total\n")
+
+    table = Table(title=f"Co-email stats{f' for {email_address}' if email_address else ' (top pairs)'}")
+    table.add_column("Person A", width=30)
+    table.add_column("Person B", width=30)
+    table.add_column("Count", width=8, justify="right")
+    table.add_column("First", width=12)
+    table.add_column("Last", width=12)
+
+    for row in rows:
+        table.add_row(
+            row["email_a"][:30],
+            row["email_b"][:30],
+            str(row["co_email_count"]),
+            (row["first_co_email"] or "")[:10],
+            (row["last_co_email"] or "")[:10],
         )
 
     console.print(table)
@@ -418,6 +611,131 @@ def status(ctx: click.Context) -> None:
         console.print(table)
 
     conn.close()
+
+
+@cli.command()
+@click.argument("email_address", required=False)
+@click.option("--all", "process_all", is_flag=True, help="Process all contacts")
+@click.option("--force", is_flag=True, help="Regenerate even if up to date")
+@click.option("--limit", "-n", default=None, type=int, help="Process top N contacts by email count")
+@click.option("--strategy", type=click.Choice(["default", "detailed"]), default=None, help="Override memory strategy")
+@click.pass_context
+def memory(ctx: click.Context, email_address: str | None, process_all: bool, force: bool, limit: int | None, strategy: str | None) -> None:
+    """View or generate contact memory profiles."""
+    from email_manager.ai.factory import get_backend
+    from email_manager.analysis.contact_memory import build_contact_memories
+    from email_manager.memory.factory import get_memory_backends, get_memory_strategy
+
+    config: Config = ctx.obj["config"]
+    if strategy:
+        config.memory_strategy = strategy
+
+    conn = get_db(config)
+    console = Console()
+    memory_backends = get_memory_backends(config, conn)
+
+    if email_address:
+        # Show existing memory, or generate if missing
+        existing = memory_backends[0].load(email_address)
+
+        if existing and not force:
+            _display_memory(console, existing)
+        else:
+            backend = get_backend(config)
+            strat = get_memory_strategy(config)
+            console.print(f"Generating memory for {email_address} using [bold]{strat.name}[/bold] strategy...")
+            count = build_contact_memories(
+                conn, backend, memory_backends, strat,
+                email_address=email_address, console=console, force=force,
+            )
+            if count > 0:
+                mem = memory_backends[0].load(email_address)
+                if mem:
+                    _display_memory(console, mem)
+            else:
+                console.print("[dim]No memory generated (contact may not exist or no emails found).[/dim]")
+
+    elif process_all or limit:
+        backend = get_backend(config)
+        strat = get_memory_strategy(config)
+        console.print(f"Using strategy: [bold]{strat.name}[/bold] | AI: [bold]{backend.model_name}[/bold]")
+        count = build_contact_memories(
+            conn, backend, memory_backends, strat,
+            console=console, limit=limit, force=force,
+        )
+        console.print(f"\n[green]Generated {count} contact memories[/green]")
+
+    else:
+        # List all existing memories
+        all_memories = memory_backends[0].load_all()
+        if not all_memories:
+            console.print("[dim]No memories yet. Run 'email-manager memory --all --limit 10' to generate.[/dim]")
+            conn.close()
+            return
+
+        table = Table(title=f"Contact Memories ({len(all_memories)})")
+        table.add_column("Name", width=25)
+        table.add_column("Email", width=30)
+        table.add_column("Relationship", width=12)
+        table.add_column("Discussions", width=6, justify="right")
+        table.add_column("Strategy", width=10)
+        table.add_column("Generated", width=12)
+
+        for mem in all_memories:
+            table.add_row(
+                (mem.name or "")[:25],
+                mem.email[:30],
+                mem.relationship,
+                str(len(mem.discussions)),
+                mem.strategy_used,
+                mem.generated_at[:10] if mem.generated_at else "",
+            )
+        console.print(table)
+
+    conn.close()
+
+
+def _display_memory(console: Console, mem) -> None:
+    from rich.panel import Panel
+
+    # Header
+    rel_colors = {
+        "colleague": "blue", "manager": "magenta", "report": "cyan",
+        "vendor": "yellow", "client": "green", "friend": "bright_green",
+        "recruiter": "red", "service": "dim", "newsletter": "dim",
+    }
+    rel_color = rel_colors.get(mem.relationship, "white")
+
+    console.print(Panel(
+        f"[bold]{mem.name or mem.email}[/bold]  [{rel_color}]{mem.relationship}[/{rel_color}]\n"
+        f"[dim]{mem.email}[/dim]\n\n"
+        f"{mem.summary}",
+        title="Contact Memory",
+        subtitle=f"v{mem.version} | {mem.strategy_used} | {mem.model_used} | {mem.generated_at[:10] if mem.generated_at else ''}",
+    ))
+
+    # Discussions
+    if mem.discussions:
+        table = Table(title="Discussions")
+        table.add_column("Status", width=10)
+        table.add_column("Topic", width=30)
+        table.add_column("Summary", width=60)
+
+        status_icons = {"active": "[green]active[/green]", "waiting": "[yellow]waiting[/yellow]", "resolved": "[dim]resolved[/dim]"}
+        for d in mem.discussions:
+            status = d.get("status", "unknown")
+            table.add_row(
+                status_icons.get(status, status),
+                d.get("topic", "")[:30],
+                d.get("summary", "")[:60],
+            )
+        console.print(table)
+
+    # Key facts
+    if mem.key_facts:
+        console.print("\n[bold]Key Facts:[/bold]")
+        for fact in mem.key_facts:
+            console.print(f"  - {fact}")
 
 
 @cli.command()

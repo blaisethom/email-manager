@@ -20,14 +20,25 @@ class ClaudeCLIBackend:
     def complete_json(self, system: str, user: str, temperature: float = 0.0) -> dict:
         json_system = system + "\n\nYou MUST respond with valid JSON only. No markdown fences, no other text."
         raw = self._run_claude(json_system, user)
-        # Strip any markdown fences the CLI might add
         cleaned = raw.strip()
+        if not cleaned:
+            raise ValueError("Claude CLI returned empty response")
+        # Strip any markdown fences the CLI might add
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
-            # Remove first line (```json) and last line (```)
             lines = [l for l in lines if not l.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-        return json.loads(cleaned)
+            cleaned = "\n".join(lines).strip()
+        # Try to find JSON object in the response if there's surrounding text
+        if not cleaned.startswith("{"):
+            start = cleaned.find("{")
+            if start != -1:
+                end = cleaned.rfind("}") + 1
+                if end > start:
+                    cleaned = cleaned[start:end]
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse JSON from Claude CLI. Response ({len(raw)} chars): {raw[:300]}") from e
 
     def _run_claude(self, system: str, user: str) -> str:
         cmd = ["claude", "--print", "--system-prompt", system]

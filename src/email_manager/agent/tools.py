@@ -127,6 +127,17 @@ TOOL_DEFINITIONS = [
             "properties": {},
         },
     },
+    {
+        "name": "contact_memory",
+        "description": "Get the AI-generated memory profile for a contact: relationship type, discussion summaries with status, and key facts. Much richer than contact_summary.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email_address": {"type": "string", "description": "Contact's email address (partial match supported)"},
+            },
+            "required": ["email_address"],
+        },
+    },
 ]
 
 
@@ -438,4 +449,45 @@ TOOL_HANDLERS = {
     "run_sql": _run_sql,
     "set_project_details": _set_project_details,
     "get_stats": _get_stats,
+    "contact_memory": _contact_memory,
 }
+
+
+def _contact_memory(conn: sqlite3.Connection, args: dict) -> str:
+    email_addr = args["email_address"]
+
+    # Try loading from SQLite
+    from email_manager.memory.sqlite_backend import SQLiteMemoryBackend
+    backend = SQLiteMemoryBackend(conn)
+
+    # Partial match
+    mem = backend.load(email_addr)
+    if not mem:
+        row = fetchone(conn, "SELECT email FROM contact_memories WHERE email LIKE ?", (f"%{email_addr}%",))
+        if row:
+            mem = backend.load(row["email"])
+
+    if not mem:
+        return f"No memory found for '{email_addr}'. Generate one with: email-manager memory {email_addr}"
+
+    lines = [
+        f"Name: {mem.name or '—'}",
+        f"Email: {mem.email}",
+        f"Relationship: {mem.relationship}",
+        f"",
+        f"Summary: {mem.summary}",
+    ]
+
+    if mem.discussions:
+        lines.append(f"\nDiscussions ({len(mem.discussions)}):")
+        for d in mem.discussions:
+            lines.append(f"  [{d.get('status', '?')}] {d.get('topic', '?')}: {d.get('summary', '')}")
+
+    if mem.key_facts:
+        lines.append(f"\nKey Facts:")
+        for fact in mem.key_facts:
+            lines.append(f"  - {fact}")
+
+    lines.append(f"\nGenerated: {mem.generated_at[:10] if mem.generated_at else '?'} | Strategy: {mem.strategy_used} | Model: {mem.model_used}")
+
+    return "\n".join(lines)

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "personal-gmail",
+    "backend": "gmail",
+    "gmail_credentials_path": "data/gmail_credentials.json",
+    "gmail_token_path": "data/gmail_token_personal.json",
+    "gmail_labels": []
+  },
+  {
+    "name": "work-gmail",
+    "backend": "gmail",
+    "gmail_credentials_path": "data/gmail_credentials.json",
+    "gmail_token_path": "data/gmail_token_work.json",
+    "gmail_labels": []
+  },
+  {
+    "name": "work-imap",
+    "backend": "imap",
+    "imap_host": "imap.example.com",
+    "imap_user": "user@example.com",
+    "imap_password": "your-password",
+    "imap_port": 993,
+    "imap_use_ssl": true,
+    "imap_folders": ["INBOX", "Sent"]
+  }
+]
