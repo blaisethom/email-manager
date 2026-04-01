@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS emails (
     folder          TEXT,
     size_bytes      INTEGER,
     has_attachments INTEGER DEFAULT 0,
-    fetched_at      TEXT NOT NULL
+    fetched_at      TEXT NOT NULL,
+    gmail_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
@@ -158,9 +159,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     row = conn.execute(
         "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
     ).fetchone()
-    if row is None:
+    current_version = row[0] if row else 0
+    if current_version == 0:
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+        )
+        conn.commit()
+    if current_version < 2:
+        # Add gmail_id column if missing (migration v1 -> v2)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(emails)").fetchall()}
+        if "gmail_id" not in cols:
+            conn.execute("ALTER TABLE emails ADD COLUMN gmail_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_gmail_id ON emails(gmail_id)")
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
         )
         conn.commit()
 

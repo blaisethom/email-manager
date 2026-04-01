@@ -15,7 +15,7 @@ from email_manager.ingestion.parser import parse_raw_email, email_to_db_row
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 
-def _get_gmail_service(config: EmailAccount):
+def _get_gmail_service(config: EmailAccount, *, remote: bool = False):
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -40,7 +40,10 @@ def _get_gmail_service(config: EmailAccount):
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(credentials_path), SCOPES
             )
-            creds = flow.run_local_server(port=0)
+            if remote:
+                creds = _run_remote_auth(flow)
+            else:
+                creds = flow.run_local_server(port=0)
 
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(creds.to_json())
@@ -48,13 +51,55 @@ def _get_gmail_service(config: EmailAccount):
     return build("gmail", "v1", credentials=creds)
 
 
+AUTH_PORT = 8085
+
+
+def _run_remote_auth(flow: object):
+    """OAuth flow for headless/remote machines with no browser.
+
+    Starts a local server on a fixed port and prints the auth URL for the
+    user to open on another machine.  Works in two ways:
+
+    1. SSH tunnel (recommended):
+       ssh -L 8085:localhost:8085 user@remote-host
+       Then open the printed URL in your local browser.
+
+    2. Direct access (if the remote host is reachable):
+       Open the printed URL, replacing 'localhost' with the remote host's
+       IP/hostname.
+    """
+    console = Console()
+    console.print(
+        f"\n[bold yellow]Remote authentication mode[/bold yellow]\n\n"
+        f"The OAuth server will listen on port [bold]{AUTH_PORT}[/bold].\n\n"
+        f"[bold]Option 1 — SSH tunnel (recommended):[/bold]\n"
+        f"  From your local machine, run:\n"
+        f"  [cyan]ssh -L {AUTH_PORT}:localhost:{AUTH_PORT} <user>@<this-host>[/cyan]\n"
+        f"  Then open the URL below in your local browser.\n\n"
+        f"[bold]Option 2 — Direct access:[/bold]\n"
+        f"  Open the URL below, replacing 'localhost' with this machine's hostname/IP.\n"
+    )
+    creds = flow.run_local_server(
+        host="localhost",
+        bind_addr="0.0.0.0",
+        port=AUTH_PORT,
+        open_browser=False,
+    )
+    return creds
+
+
 def _sync_state_key(config: EmailAccount) -> str:
     """Per-account key for the sync_state table."""
     return f"gmail:{config.name}" if config.name else "gmail"
 
 
-def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> int:
-    service = _get_gmail_service(config)
+def authenticate(config: EmailAccount, *, remote: bool = False) -> None:
+    """Run the OAuth flow and persist the token, without syncing."""
+    _get_gmail_service(config, remote=remote)
+
+
+def sync_emails(conn: sqlite3.Connection, config: EmailAccount, *, remote: bool = False) -> int:
+    service = _get_gmail_service(config, remote=remote)
     console = Console()
     state_key = _sync_state_key(config)
 
@@ -78,6 +123,7 @@ def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> int:
 
 def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console: Console) -> int:
     console.print("Performing full Gmail sync...")
+    state_key = _sync_state_key(config)
 
     # List all message IDs
     message_ids = []
@@ -110,7 +156,23 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
         console.print("[dim]No messages found.[/dim]")
         return 0
 
-    # Fetch each message in raw format
+    # Filter out messages already fetched (by gmail_id)
+    existing = {
+        r[0]
+        for r in conn.execute(
+            "SELECT gmail_id FROM emails WHERE gmail_id IS NOT NULL"
+        ).fetchall()
+    }
+    to_fetch = [mid for mid in message_ids if mid not in existing]
+    skipped = len(message_ids) - len(to_fetch)
+    if skipped:
+        console.print(f"Skipping {skipped} already-fetched messages...")
+    if not to_fetch:
+        console.print("[dim]All messages already fetched.[/dim]")
+        return 0
+
+    # Fetch each message in raw format, committing in batches
+    BATCH_SIZE = 100
     new_count = 0
     latest_history_id = None
 
@@ -120,9 +182,9 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
         BarColumn(),
         TextColumn("{task.completed}/{task.total}"),
     ) as progress:
-        task = progress.add_task("Fetching messages", total=len(message_ids))
+        task = progress.add_task("Fetching messages", total=len(to_fetch))
 
-        for msg_id in message_ids:
+        for msg_id in to_fetch:
             try:
                 msg = (
                     service.users()
@@ -135,15 +197,18 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
 
                 em = parse_raw_email(raw_bytes, folder=label_folder)
                 row = email_to_db_row(em)
+                row["gmail_id"] = msg_id
                 conn.execute(
                     """INSERT OR IGNORE INTO emails
                     (message_id, thread_id, subject, from_address, from_name,
                      to_addresses, cc_addresses, date, body_text, body_html,
-                     raw_headers, folder, size_bytes, has_attachments, fetched_at)
+                     raw_headers, folder, size_bytes, has_attachments, fetched_at,
+                     gmail_id)
                     VALUES
                     (:message_id, :thread_id, :subject, :from_address, :from_name,
                      :to_addresses, :cc_addresses, :date, :body_text, :body_html,
-                     :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at)""",
+                     :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at,
+                     :gmail_id)""",
                     row,
                 )
                 new_count += 1
@@ -158,9 +223,12 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
 
             progress.advance(task)
 
-    # Store sync state (reuse sync_state table: folder=state_key, last_uid=historyId)
+            # Commit in batches so progress survives interruption
+            if new_count % BATCH_SIZE == 0 and new_count > 0:
+                conn.commit()
+
+    # Final commit
     if latest_history_id:
-        state_key = _sync_state_key(config)
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO sync_state (folder, uidvalidity, last_uid, last_sync)
@@ -230,15 +298,18 @@ def _sync_incremental(
 
                 em = parse_raw_email(raw_bytes, folder=label_folder)
                 row = email_to_db_row(em)
+                row["gmail_id"] = msg_id
                 conn.execute(
                     """INSERT OR IGNORE INTO emails
                     (message_id, thread_id, subject, from_address, from_name,
                      to_addresses, cc_addresses, date, body_text, body_html,
-                     raw_headers, folder, size_bytes, has_attachments, fetched_at)
+                     raw_headers, folder, size_bytes, has_attachments, fetched_at,
+                     gmail_id)
                     VALUES
                     (:message_id, :thread_id, :subject, :from_address, :from_name,
                      :to_addresses, :cc_addresses, :date, :body_text, :body_html,
-                     :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at)""",
+                     :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at,
+                     :gmail_id)""",
                     row,
                 )
                 new_count += 1

@@ -19,11 +19,42 @@ def cli(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.option("--account", "-a", default=None, help="Authenticate only this account (by name)")
+@click.option("--remote", is_flag=True, help="Headless mode — prints OAuth URL instead of opening a browser")
+@click.pass_context
+def auth(ctx: click.Context, account: str | None, remote: bool) -> None:
+    """Authenticate Gmail accounts (useful on remote/headless machines)."""
+    from email_manager.ingestion.gmail_client import authenticate
+
+    config: Config = ctx.obj["config"]
+    console = Console()
+
+    accounts = config.get_accounts()
+    gmail_accounts = [a for a in accounts if a.backend == "gmail"]
+    if account:
+        gmail_accounts = [a for a in gmail_accounts if a.name == account]
+        if not gmail_accounts:
+            console.print(f"[red]No Gmail account named '{account}'.[/red]")
+            raise SystemExit(1)
+
+    if not gmail_accounts:
+        console.print("[red]No Gmail accounts configured.[/red]")
+        raise SystemExit(1)
+
+    for acct in gmail_accounts:
+        label = acct.name or "gmail"
+        console.print(f"\n[bold]Authenticating: {label}[/bold]")
+        authenticate(acct, remote=remote)
+        console.print(f"[green]Token saved for {label}[/green]")
+
+
+@cli.command()
 @click.option("--account", "-a", default=None, help="Sync only this account (by name)")
 @click.option("--folders", "-f", multiple=True, help="Override folders to sync (IMAP only)")
 @click.option("--list-folders", is_flag=True, help="List available folders on IMAP accounts and exit")
+@click.option("--remote", is_flag=True, help="Headless mode for Gmail OAuth — prints URL instead of opening a browser")
 @click.pass_context
-def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool) -> None:
+def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool, remote: bool) -> None:
     """Fetch new emails from all configured accounts."""
     from email_manager.ingestion.threading import compute_threads
 
@@ -73,7 +104,7 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
             if acct.backend == "gmail":
                 from email_manager.ingestion.gmail_client import sync_emails as gmail_sync
                 console.print(f"  Syncing via Gmail API...")
-                new_count = gmail_sync(conn, acct)
+                new_count = gmail_sync(conn, acct, remote=remote)
             else:
                 from email_manager.ingestion.imap_client import sync_emails as imap_sync
                 if not acct.imap_host:
@@ -87,9 +118,13 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
             console.print(f"  [green]Fetched {new_count} new email(s)[/green]")
             total_new += new_count
 
-        if total_new > 0:
-            console.print("\nComputing threads...")
-            updated = compute_threads(conn)
+        unthreaded = conn.execute(
+            "SELECT COUNT(*) as cnt FROM emails WHERE thread_id IS NULL"
+        ).fetchone()["cnt"]
+
+        if total_new > 0 or unthreaded > 0:
+            console.print(f"\nComputing threads ({unthreaded} unthreaded emails)...")
+            updated = compute_threads(conn, console=console)
             console.print(f"[green]Updated {updated} thread assignment(s)[/green]")
         else:
             console.print(f"\n[green]Total: {total_new} new email(s) across {len(accounts)} account(s)[/green]")
