@@ -10,6 +10,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from email_manager.config import EmailAccount
 from email_manager.db import fetchone
 from email_manager.ingestion.parser import parse_raw_email, email_to_db_row
+from email_manager.ingestion.threading import insert_email_references
 
 # Defaults — Yahoo needs smaller values
 DEFAULT_BATCH_SIZE = 100
@@ -247,19 +248,29 @@ def _sync_folder(
 
 
 def _db_insert_email(conn: sqlite3.Connection, row: dict) -> None:
-    """Insert an email with retry on database lock."""
+    """Insert an email with retry on database lock, and populate email_references."""
+    import json
+
     _db_execute_with_retry(
         conn,
         """INSERT OR IGNORE INTO emails
-        (message_id, thread_id, subject, from_address, from_name,
+        (message_id, thread_id, subject, normalised_subject, from_address, from_name,
          to_addresses, cc_addresses, date, body_text, body_html,
          raw_headers, folder, size_bytes, has_attachments, fetched_at)
         VALUES
-        (:message_id, :thread_id, :subject, :from_address, :from_name,
+        (:message_id, :thread_id, :subject, :normalised_subject, :from_address, :from_name,
          :to_addresses, :cc_addresses, :date, :body_text, :body_html,
          :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at)""",
         row,
     )
+
+    # Populate email_references for the newly inserted email
+    inserted = conn.execute(
+        "SELECT id FROM emails WHERE message_id = ?", (row["message_id"],)
+    ).fetchone()
+    if inserted:
+        raw_headers = json.loads(row["raw_headers"]) if isinstance(row["raw_headers"], str) else row["raw_headers"]
+        insert_email_references(conn, inserted[0], raw_headers)
 
 
 def _db_execute_with_retry(conn: sqlite3.Connection, sql: str, params=None, retries: int = 5) -> None:
@@ -289,6 +300,54 @@ def _db_commit(conn: sqlite3.Connection, retries: int = 5) -> None:
                 time.sleep(DB_RETRY_DELAY * (attempt + 1))
             else:
                 raise
+
+
+def delete_messages(
+    config: EmailAccount, message_ids_by_folder: dict[str, list[str]]
+) -> tuple[list[str], list[str]]:
+    """Delete messages from IMAP by Message-ID, grouped by folder.
+
+    Args:
+        config: The IMAP account config.
+        message_ids_by_folder: {folder_name: [message_id, ...]}
+
+    Returns:
+        (succeeded_message_ids, failed_message_ids)
+    """
+    succeeded = []
+    failed = []
+    client = _connect_with_retry(config)
+    try:
+        for folder, msg_ids in message_ids_by_folder.items():
+            try:
+                client.select_folder(folder, readonly=False)
+            except Exception:
+                failed.extend(msg_ids)
+                continue
+
+            for mid in msg_ids:
+                try:
+                    # Search for the message by Message-ID header
+                    uids = client.search(["HEADER", "Message-ID", mid])
+                    if uids:
+                        client.set_flags(uids, [b"\\Deleted"])
+                        succeeded.append(mid)
+                    else:
+                        failed.append(mid)
+                except Exception:
+                    failed.append(mid)
+
+            try:
+                client.expunge()
+            except Exception:
+                pass
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+    return succeeded, failed
 
 
 def _fetch_batch_with_retry(

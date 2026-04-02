@@ -15,14 +15,14 @@ class TestDatabase:
         expected = {
             "emails", "sync_state", "contacts", "threads",
             "projects", "email_projects", "entities", "pipeline_runs",
-            "schema_version",
+            "schema_version", "email_references",
         }
         assert expected.issubset(table_names)
 
     def test_schema_version(self, test_db: sqlite3.Connection) -> None:
         row = fetchone(test_db, "SELECT version FROM schema_version")
         assert row is not None
-        assert row["version"] == 1
+        assert row["version"] == 3
 
     def test_insert_and_query_email(self, test_db: sqlite3.Connection) -> None:
         execute(

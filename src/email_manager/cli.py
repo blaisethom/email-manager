@@ -53,8 +53,9 @@ def auth(ctx: click.Context, account: str | None, remote: bool) -> None:
 @click.option("--folders", "-f", multiple=True, help="Override folders to sync (IMAP only)")
 @click.option("--list-folders", is_flag=True, help="List available folders on IMAP accounts and exit")
 @click.option("--remote", is_flag=True, help="Headless mode for Gmail OAuth — prints URL instead of opening a browser")
+@click.option("--rebuild-threads", is_flag=True, help="Force a full thread rebuild instead of incremental")
 @click.pass_context
-def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool, remote: bool) -> None:
+def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool, remote: bool, rebuild_threads: bool) -> None:
     """Fetch new emails from all configured accounts."""
     from email_manager.ingestion.threading import compute_threads
 
@@ -122,9 +123,9 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
             "SELECT COUNT(*) as cnt FROM emails WHERE thread_id IS NULL"
         ).fetchone()["cnt"]
 
-        if total_new > 0 or unthreaded > 0:
+        if rebuild_threads or total_new > 0 or unthreaded > 0:
             console.print(f"\nComputing threads ({unthreaded} unthreaded emails)...")
-            updated = compute_threads(conn, console=console)
+            updated = compute_threads(conn, console=console, force_rebuild=rebuild_threads)
             console.print(f"[green]Updated {updated} thread assignment(s)[/green]")
         else:
             console.print(f"\n[green]Total: {total_new} new email(s) across {len(accounts)} account(s)[/green]")
@@ -771,6 +772,176 @@ def _display_memory(console: Console, mem) -> None:
         console.print("\n[bold]Key Facts:[/bold]")
         for fact in mem.key_facts:
             console.print(f"  - {fact}")
+
+
+@cli.command(name="delete-contact")
+@click.argument("email_address")
+@click.option("--account", "-a", required=True, help="Account to delete from (by name)")
+@click.option("--remote", is_flag=True, help="Headless mode for Gmail OAuth")
+@click.pass_context
+def delete_contact(ctx: click.Context, email_address: str, account: str, remote: bool) -> None:
+    """Delete all emails from/to a contact on the remote server and local database."""
+    from collections import defaultdict
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    # Resolve account
+    accounts = config.get_accounts()
+    acct = next((a for a in accounts if a.name == account), None)
+    if not acct:
+        console.print(f"[red]No account named '{account}'. Available: {', '.join(a.name for a in accounts)}[/red]")
+        conn.close()
+        raise SystemExit(1)
+
+    email_address = email_address.lower()
+    like_pattern = f'%"{email_address}"%'
+
+    # Gather stats
+    contact = fetchone(conn, "SELECT * FROM contacts WHERE email = ?", (email_address,))
+    sent = fetchone(
+        conn,
+        "SELECT COUNT(*) as cnt FROM emails WHERE from_address = ?",
+        (email_address,),
+    )["cnt"]
+    received = fetchone(
+        conn,
+        "SELECT COUNT(*) as cnt FROM emails WHERE from_address != ? AND (to_addresses LIKE ? OR cc_addresses LIKE ?)",
+        (email_address, like_pattern, like_pattern),
+    )["cnt"]
+    total = sent + received
+
+    if total == 0:
+        console.print(f"[dim]No emails found involving {email_address}.[/dim]")
+        conn.close()
+        return
+
+    # Display stats
+    name = contact["name"] if contact and contact["name"] else email_address
+    console.print(f"\n[bold]Contact:[/bold] {name}")
+    console.print(f"  Emails sent by them:     [bold]{sent}[/bold]")
+    console.print(f"  Emails received by them: [bold]{received}[/bold]")
+    console.print(f"  Total to delete:         [bold red]{total}[/bold red]")
+    if contact:
+        console.print(f"  First seen: {(contact['first_seen'] or '')[:10]}")
+        console.print(f"  Last seen:  {(contact['last_seen'] or '')[:10]}")
+    console.print(f"  Account:    [bold]{acct.name}[/bold] ({acct.backend})")
+
+    # Confirm
+    if not click.confirm(f"\nDelete all {total} emails involving {email_address} from {acct.backend}?", default=False):
+        console.print("[dim]Aborted.[/dim]")
+        conn.close()
+        return
+
+    # Collect emails to delete
+    rows = fetchall(
+        conn,
+        "SELECT id, message_id, gmail_id, folder FROM emails WHERE from_address = ? OR to_addresses LIKE ? OR cc_addresses LIKE ?",
+        (email_address, like_pattern, like_pattern),
+    )
+
+    deleted_ids: list[int] = []
+    failed_count = 0
+
+    if acct.backend == "gmail":
+        from email_manager.ingestion.gmail_client import trash_messages
+
+        # Split into gmail and non-gmail emails
+        gmail_rows = [r for r in rows if r["gmail_id"]]
+        non_gmail = [r for r in rows if not r["gmail_id"]]
+
+        if non_gmail:
+            console.print(f"[yellow]Skipping {len(non_gmail)} email(s) without Gmail IDs (likely from another account).[/yellow]")
+
+        if gmail_rows:
+            gmail_ids = [r["gmail_id"] for r in gmail_rows]
+            id_to_row = {r["gmail_id"]: r["id"] for r in gmail_rows}
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Trashing emails in Gmail", total=len(gmail_ids))
+
+                # Process in batches for progress updates
+                BATCH = 50
+                for i in range(0, len(gmail_ids), BATCH):
+                    batch = gmail_ids[i : i + BATCH]
+                    succeeded, failed = trash_messages(acct, batch, remote=remote)
+                    deleted_ids.extend(id_to_row[gid] for gid in succeeded)
+                    failed_count += len(failed)
+                    progress.advance(task, len(batch))
+
+    else:
+        from email_manager.ingestion.imap_client import delete_messages
+
+        # Group emails by folder for efficient IMAP deletion
+        by_folder: dict[str, list[str]] = defaultdict(list)
+        mid_to_id: dict[str, int] = {}
+        for r in rows:
+            folder = r["folder"] or "INBOX"
+            by_folder[folder].append(r["message_id"])
+            mid_to_id[r["message_id"]] = r["id"]
+
+        folder_list = list(by_folder.items())
+        total_msgs = sum(len(v) for v in by_folder.values())
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Deleting emails via IMAP", total=total_msgs)
+
+            for folder, msg_ids in folder_list:
+                succeeded, failed = delete_messages(acct, {folder: msg_ids})
+                deleted_ids.extend(mid_to_id[mid] for mid in succeeded)
+                failed_count += len(failed)
+                progress.advance(task, len(msg_ids))
+
+    # Delete local data only for emails successfully removed from remote
+    if deleted_ids:
+        # Process in chunks to avoid SQL variable limits
+        CHUNK = 500
+        for i in range(0, len(deleted_ids), CHUNK):
+            chunk = deleted_ids[i : i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            conn.execute(f"DELETE FROM entities WHERE email_id IN ({placeholders})", chunk)
+            conn.execute(f"DELETE FROM email_projects WHERE email_id IN ({placeholders})", chunk)
+            conn.execute(f"DELETE FROM email_references WHERE email_id IN ({placeholders})", chunk)
+            conn.execute(f"DELETE FROM pipeline_runs WHERE email_id IN ({placeholders})", chunk)
+            conn.execute(f"DELETE FROM emails WHERE id IN ({placeholders})", chunk)
+
+    # Clean up contact-level data if all emails were deleted
+    remaining = fetchone(
+        conn,
+        "SELECT COUNT(*) as cnt FROM emails WHERE from_address = ? OR to_addresses LIKE ? OR cc_addresses LIKE ?",
+        (email_address, like_pattern, like_pattern),
+    )["cnt"]
+
+    if remaining == 0:
+        conn.execute("DELETE FROM contacts WHERE email = ?", (email_address,))
+        conn.execute("DELETE FROM contact_memories WHERE email = ?", (email_address,))
+        conn.execute(
+            "DELETE FROM co_email_stats WHERE email_a = ? OR email_b = ?",
+            (email_address, email_address),
+        )
+
+    conn.commit()
+    conn.close()
+
+    console.print(f"\n[green]Deleted {len(deleted_ids)} email(s) from {acct.backend} and local database.[/green]")
+    if failed_count:
+        console.print(f"[yellow]{failed_count} email(s) failed to delete remotely and were kept locally.[/yellow]")
+    if remaining > 0 and failed_count == 0:
+        console.print(f"[dim]{remaining} email(s) from other accounts remain in the local database.[/dim]")
 
 
 @cli.command()

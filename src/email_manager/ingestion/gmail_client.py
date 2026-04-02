@@ -11,8 +11,9 @@ from rich.console import Console
 from email_manager.config import EmailAccount
 from email_manager.db import fetchone
 from email_manager.ingestion.parser import parse_raw_email, email_to_db_row
+from email_manager.ingestion.threading import insert_email_references
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 
 def _get_gmail_service(config: EmailAccount, *, remote: bool = False):
@@ -200,17 +201,23 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
                 row["gmail_id"] = msg_id
                 conn.execute(
                     """INSERT OR IGNORE INTO emails
-                    (message_id, thread_id, subject, from_address, from_name,
+                    (message_id, thread_id, subject, normalised_subject, from_address, from_name,
                      to_addresses, cc_addresses, date, body_text, body_html,
                      raw_headers, folder, size_bytes, has_attachments, fetched_at,
                      gmail_id)
                     VALUES
-                    (:message_id, :thread_id, :subject, :from_address, :from_name,
+                    (:message_id, :thread_id, :subject, :normalised_subject, :from_address, :from_name,
                      :to_addresses, :cc_addresses, :date, :body_text, :body_html,
                      :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at,
                      :gmail_id)""",
                     row,
                 )
+                # Populate email_references
+                inserted = conn.execute(
+                    "SELECT id FROM emails WHERE message_id = ?", (row["message_id"],)
+                ).fetchone()
+                if inserted:
+                    insert_email_references(conn, inserted[0], em.raw_headers)
                 new_count += 1
 
                 # Track the latest historyId for incremental sync
@@ -301,17 +308,23 @@ def _sync_incremental(
                 row["gmail_id"] = msg_id
                 conn.execute(
                     """INSERT OR IGNORE INTO emails
-                    (message_id, thread_id, subject, from_address, from_name,
+                    (message_id, thread_id, subject, normalised_subject, from_address, from_name,
                      to_addresses, cc_addresses, date, body_text, body_html,
                      raw_headers, folder, size_bytes, has_attachments, fetched_at,
                      gmail_id)
                     VALUES
-                    (:message_id, :thread_id, :subject, :from_address, :from_name,
+                    (:message_id, :thread_id, :subject, :normalised_subject, :from_address, :from_name,
                      :to_addresses, :cc_addresses, :date, :body_text, :body_html,
                      :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at,
                      :gmail_id)""",
                     row,
                 )
+                # Populate email_references
+                inserted = conn.execute(
+                    "SELECT id FROM emails WHERE message_id = ?", (row["message_id"],)
+                ).fetchone()
+                if inserted:
+                    insert_email_references(conn, inserted[0], em.raw_headers)
                 new_count += 1
 
                 h = msg.get("historyId")
@@ -334,6 +347,22 @@ def _sync_incremental(
     conn.commit()
 
     return new_count
+
+
+def trash_messages(
+    config: EmailAccount, gmail_ids: list[str], *, remote: bool = False
+) -> tuple[list[str], list[str]]:
+    """Move messages to Gmail trash. Returns (succeeded_ids, failed_ids)."""
+    service = _get_gmail_service(config, remote=remote)
+    succeeded = []
+    failed = []
+    for gid in gmail_ids:
+        try:
+            service.users().messages().trash(userId="me", id=gid).execute()
+            succeeded.append(gid)
+        except Exception:
+            failed.append(gid)
+    return succeeded, failed
 
 
 def _labels_to_folder(label_ids: list[str]) -> str:

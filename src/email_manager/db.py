@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS emails (
     message_id      TEXT UNIQUE NOT NULL,
     thread_id       TEXT,
     subject         TEXT,
+    normalised_subject TEXT,
     from_address    TEXT NOT NULL,
     from_name       TEXT,
     to_addresses    TEXT,
@@ -175,6 +176,99 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
         )
         conn.commit()
+    if current_version < 3:
+        _migrate_to_v3(conn)
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """Migration v2 -> v3: add normalised_subject, email_references table."""
+    import json
+    import re
+
+    SUBJECT_PREFIX_RE = re.compile(
+        r"^(\s*(Re|Fwd?|Fw)\s*(\[\d+\])?\s*:\s*)+", re.IGNORECASE
+    )
+
+    def _norm(subject: str | None) -> str:
+        if not subject:
+            return ""
+        return SUBJECT_PREFIX_RE.sub("", subject).strip().lower()
+
+    def _extract_ids(header_value: str) -> list[str]:
+        if not header_value:
+            return []
+        return re.findall(r"<([^>]+)>", header_value)
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(emails)").fetchall()}
+    if "normalised_subject" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN normalised_subject TEXT")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS email_references (
+        email_id        INTEGER NOT NULL REFERENCES emails(id),
+        referenced_id   TEXT NOT NULL,
+        PRIMARY KEY (email_id, referenced_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_refs_referenced ON email_references(referenced_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_norm_subject ON emails(normalised_subject)")
+
+    # Backfill normalised_subject in batches
+    BATCH = 5000
+    total = conn.execute("SELECT COUNT(*) FROM emails WHERE normalised_subject IS NULL").fetchone()[0]
+    processed = 0
+    while True:
+        rows = conn.execute(
+            "SELECT id, subject FROM emails WHERE normalised_subject IS NULL LIMIT ?",
+            (BATCH,),
+        ).fetchall()
+        if not rows:
+            break
+        conn.executemany(
+            "UPDATE emails SET normalised_subject = ? WHERE id = ?",
+            [(_norm(r[1]), r[0]) for r in rows],
+        )
+        conn.commit()
+        processed += len(rows)
+        if total > 0:
+            print(f"  [migration v3] normalised_subject: {processed}/{total}")
+
+    # Backfill email_references
+    total = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
+    existing_refs = conn.execute("SELECT COUNT(*) FROM email_references").fetchone()[0]
+    if existing_refs == 0 and total > 0:
+        processed = 0
+        offset = 0
+        while True:
+            rows = conn.execute(
+                "SELECT id, raw_headers FROM emails ORDER BY id LIMIT ? OFFSET ?",
+                (BATCH, offset),
+            ).fetchall()
+            if not rows:
+                break
+            ref_rows = []
+            for r in rows:
+                headers = json.loads(r[1]) if r[1] else {}
+                refs = _extract_ids(headers.get("references", ""))
+                in_reply = _extract_ids(headers.get("in_reply_to", ""))
+                seen = set()
+                for ref_id in refs + in_reply:
+                    if ref_id not in seen:
+                        ref_rows.append((r[0], ref_id))
+                        seen.add(ref_id)
+            if ref_rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO email_references (email_id, referenced_id) VALUES (?, ?)",
+                    ref_rows,
+                )
+            conn.commit()
+            processed += len(rows)
+            offset += BATCH
+            print(f"  [migration v3] email_references: {processed}/{total}")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v3] complete")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:

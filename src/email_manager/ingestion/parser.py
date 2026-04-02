@@ -139,10 +139,13 @@ def html_to_text(html: str) -> str:
 
 
 def email_to_db_row(em: Email) -> dict:
+    from email_manager.ingestion.threading import normalise_subject
+
     return {
         "message_id": em.message_id,
         "thread_id": em.thread_id,
         "subject": em.subject,
+        "normalised_subject": normalise_subject(em.subject),
         "from_address": em.from_address,
         "from_name": em.from_name,
         "to_addresses": json.dumps(em.to_addresses),
