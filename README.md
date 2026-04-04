@@ -1,6 +1,6 @@
 # Email Manager
 
-A personal email data pipeline that syncs your emails into a local SQLite database, uses AI to categorise them into projects, extracts entities, builds contact memories, summarises threads, and provides an interactive chat agent for exploring and refining your email data.
+A personal email data pipeline that syncs your emails into a local SQLite database, uses AI to categorise them into projects, builds contact memories, labels company relationships, summarises threads, and provides an interactive chat agent for exploring and refining your email data.
 
 All data stays local. You choose the AI backend.
 
@@ -45,11 +45,12 @@ email-manager chat
                          │  threads     │     ┌────────┴─────────────────┐
                          │  contacts    │     │  Pipeline Stages         │
                          │  co_email_   │     │  1. Extract Base (no AI) │
-                         │    stats     │     │  2. Contact Memory       │
-                         │  contact_    │     │  3. Extract Entities     │
+                         │    stats     │     │  2. Fetch Homepages      │
+                         │  contact_    │     │  3. Contact Memory       │
                          │    memories  │     │  4. Categorise           │
-                         │  projects    │     │  5. Summarise Threads    │
-                         │  entities    │     └──────────────────────────┘
+                         │  companies   │     │  5. Summarise Threads    │
+                         │  projects    │     │  6. Label Companies      │
+                         │              │     └──────────────────────────┘
                          └──────────────┘
                                │
                     ┌──────────┴──────────┐
@@ -62,8 +63,9 @@ email-manager chat
 
 1. **Sync** — Emails are fetched from all configured accounts (Gmail API, IMAP) and stored in SQLite. Incremental sync means only new emails are fetched on subsequent runs.
 2. **Extract Base** — Contacts, companies, and co-email statistics are extracted from email headers. No AI needed.
-3. **Analyse** — The AI pipeline processes emails in stages: contact memories, entity extraction, categorisation, thread summarisation. Each stage is independently resumable.
-4. **Explore** — CLI commands and the interactive chat agent let you query, reorganise, and refine the data.
+3. **Fetch Homepages** — Company homepage content is downloaded and converted to markdown for use by later stages. No AI needed.
+4. **Analyse** — The AI pipeline processes emails in stages: contact memories, categorisation, thread summarisation, and company labelling. Each stage is independently resumable.
+5. **Explore** — CLI commands and the interactive chat agent let you query, reorganise, and refine the data.
 
 ## Multi-Account Setup
 
@@ -150,19 +152,22 @@ OLLAMA_URL=http://localhost:11434
 
 ## Pipeline
 
-The analysis pipeline has five stages. Each is independently resumable — if interrupted, re-running skips already-processed items.
+The analysis pipeline has six stages. Each is independently resumable — if interrupted, re-running skips already-processed items.
 
 | Stage | AI? | What it does |
 |---|---|---|
 | `extract_base` | No | Extracts contacts, companies, and co-email pair statistics from email headers |
+| `fetch_homepages` | No | Downloads company homepages and converts to markdown (concurrent, 10 workers by default) |
 | `contact_memory` | Yes | Generates AI memory profiles for contacts (relationship, discussions, key facts) |
-| `extract_entities` | Yes | Extracts people, companies, topics, and action items from email body text |
 | `categorise` | Yes | Assigns each email to 1-3 projects. Creates projects automatically |
 | `summarise_threads` | Yes | Generates summaries for email threads |
+| `label_companies` | Yes | Assigns relationship labels (customer, vendor, partner, etc.) to companies using emails + homepage content |
 
 ```bash
 email-manager analyse                           # run all stages
 email-manager analyse --stage extract_base      # run one stage (no AI needed)
+email-manager analyse --stage fetch_homepages   # download company homepages
+email-manager analyse --stage label_companies   # classify company relationships
 email-manager analyse --stage categorise -n 100 # process 100 most recent emails
 email-manager run                               # sync + analyse in one command
 ```
@@ -216,6 +221,65 @@ email-manager memory --strategy detailed          # use detailed strategy
 
 Memories are incremental — they detect when a contact's emails have changed and only regenerate when needed.
 
+## Company Labelling
+
+The `label_companies` stage classifies each company's relationship to you (customer, vendor, partner, etc.) using AI analysis of email exchanges and homepage content.
+
+### Setup
+
+1. **Run prerequisite stages** — company labelling works best when homepages have been fetched:
+
+```bash
+email-manager analyse --stage extract_base
+email-manager analyse --stage fetch_homepages
+```
+
+2. **Configure labels** (optional) — copy the example config and customise:
+
+```bash
+cp company_labels.yaml.example company_labels.yaml
+```
+
+Edit `company_labels.yaml` to define labels relevant to your use case. Each label needs a name and description that guides the AI:
+
+```yaml
+labels:
+  - name: customer
+    description: A company that pays us for products or services.
+  - name: prospect
+    description: A company we are trying to sell to but is not yet a customer.
+  - name: vendor
+    description: A company that provides products or services to us.
+  - name: partner
+    description: A company we collaborate with on joint initiatives.
+```
+
+If no config file exists, a sensible set of defaults is used (customer, prospect, vendor, partner, investor, recruiter, service-provider, internal, other).
+
+The config is loaded from the first file found at: `company_labels.yaml`, `company_labels.yml`, `company_labels.json`, or the equivalent in `data/`. You can also set `COMPANY_LABELS_PATH` in `.env` to point to a specific file.
+
+3. **Run the stage:**
+
+```bash
+email-manager analyse --stage label_companies
+email-manager analyse --stage label_companies -n 50  # label top 50 companies by email count
+```
+
+### How it works
+
+For each unlabelled company, the AI receives:
+- The company's homepage content (markdown excerpt, up to 3000 chars)
+- Up to 20 recent email exchanges involving that company's domain
+- The account owner (auto-detected from the most frequent sender)
+
+It assigns 1-3 labels with confidence scores and reasoning. Labels are stored in the `company_labels` table.
+
+### Viewing labels
+
+```bash
+email-manager companies                         # shows companies with their labels
+```
+
 ## Database
 
 SQLite with WAL mode and 30-second busy timeout. Stored at `data/email_manager.db`.
@@ -227,12 +291,14 @@ SQLite with WAL mode and 30-second busy timeout. Stored at `data/email_manager.d
 | `emails` | Raw email data — message ID, headers, body, folder, timestamps. Immutable after insert. |
 | `sync_state` | Per-folder sync cursor (UIDVALIDITY + last UID for IMAP, historyId for Gmail). |
 | `contacts` | Aggregated contact info — name, company, email counts, first/last seen. |
+| `companies` | Companies extracted from email domains, with email counts and homepage fetch status. |
+| `company_contacts` | Maps companies to their contact email addresses. |
+| `company_labels` | AI-assigned relationship labels (customer, vendor, etc.) with confidence and reasoning. |
 | `co_email_stats` | Co-emailing statistics for every pair of addresses that appear on the same email. |
 | `contact_memories` | AI-generated memory profiles — relationship, discussions, key facts. |
 | `threads` | Thread groupings computed from References/In-Reply-To headers, with AI summaries. |
 | `projects` | AI-discovered or user-created project categories. |
 | `email_projects` | Many-to-many mapping of emails to projects, with confidence scores. |
-| `entities` | Extracted entities (person, company, topic, action_item) per email. |
 | `pipeline_runs` | Tracks which emails have been processed by which pipeline stage. |
 
 ### Email Threading
@@ -317,10 +383,11 @@ src/email_manager/
 │   ├── stages.py           Stage registry
 │   └── batch.py            Batching utilities
 ├── analysis/
-│   ├── base_extract.py     No-AI extraction (contacts, entities, co-email stats)
+│   ├── base_extract.py     No-AI extraction (contacts, companies, co-email stats)
+│   ├── homepage.py         Concurrent homepage fetcher (no AI)
+│   ├── company_labels.py   AI company relationship labelling
 │   ├── contact_memory.py   Contact memory generation pipeline
 │   ├── categoriser.py      Email → project assignment
-│   ├── entities.py         AI entity extraction
 │   └── summariser.py       Thread summarisation
 └── agent/
     ├── repl.py             Interactive chat (Claude API / CLI / generic)

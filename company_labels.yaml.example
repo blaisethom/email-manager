@@ -1,0 +1,32 @@
+# Company relationship labels configuration.
+# Copy this file to company_labels.yaml and customise the labels.
+# Each label needs a name and description. The description is given to the AI
+# as guidance for when to assign the label.
+
+labels:
+  - name: customer
+    description: A company that pays us for products or services.
+
+  - name: prospect
+    description: A company we are trying to sell to but is not yet a customer.
+
+  - name: vendor
+    description: A company that provides products or services to us.
+
+  - name: partner
+    description: A company we collaborate with on joint initiatives.
+
+  - name: investor
+    description: A company or fund that has invested in us or is considering investment.
+
+  - name: recruiter
+    description: A recruitment agency or headhunter.
+
+  - name: service-provider
+    description: A company providing professional services (legal, accounting, consulting).
+
+  - name: internal
+    description: Our own company or a subsidiary/division of it.
+
+  - name: other
+    description: Does not fit any of the above categories.

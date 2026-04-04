@@ -122,6 +122,7 @@ def _sync_folder_with_reconnect(
                 return _sync_folder(
                     client, conn, folder_name, progress,
                     batch_size=batch_size, is_yahoo=is_yahoo,
+                    account_name=config.name,
                 )
             finally:
                 try:
@@ -156,6 +157,7 @@ def _sync_folder(
     progress: Progress,
     batch_size: int = DEFAULT_BATCH_SIZE,
     is_yahoo: bool = False,
+    account_name: str = "",
 ) -> int:
     task = progress.add_task(f"Checking {folder_name}", total=None)
 
@@ -210,6 +212,7 @@ def _sync_folder(
             try:
                 em = parse_raw_email(raw, folder=folder_name)
                 row = email_to_db_row(em)
+                row["account_name"] = account_name
                 _db_insert_email(conn, row)
                 new_count += 1
                 max_processed_uid = max(max_processed_uid, uid)
@@ -256,11 +259,11 @@ def _db_insert_email(conn: sqlite3.Connection, row: dict) -> None:
         """INSERT OR IGNORE INTO emails
         (message_id, thread_id, subject, normalised_subject, from_address, from_name,
          to_addresses, cc_addresses, date, body_text, body_html,
-         raw_headers, folder, size_bytes, has_attachments, fetched_at)
+         raw_headers, folder, size_bytes, has_attachments, fetched_at, account_name)
         VALUES
         (:message_id, :thread_id, :subject, :normalised_subject, :from_address, :from_name,
          :to_addresses, :cc_addresses, :date, :body_text, :body_html,
-         :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at)""",
+         :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at, :account_name)""",
         row,
     )
 

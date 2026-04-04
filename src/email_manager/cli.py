@@ -6,8 +6,17 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from email_manager.config import Config
+from email_manager.config import Config, EmailAccount
 from email_manager.db import get_db, fetchall, fetchone
+
+
+def _gmail_token_email(acct: EmailAccount) -> str:
+    """Read the authenticated email from a Gmail token file, if available."""
+    try:
+        token_data = json.loads(acct.gmail_token_path.read_text())
+        return token_data.get("authenticated_email", "[not authenticated]")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return "[not authenticated]"
 
 
 @click.group()
@@ -44,8 +53,8 @@ def auth(ctx: click.Context, account: str | None, remote: bool) -> None:
     for acct in gmail_accounts:
         label = acct.name or "gmail"
         console.print(f"\n[bold]Authenticating: {label}[/bold]")
-        authenticate(acct, remote=remote)
-        console.print(f"[green]Token saved for {label}[/green]")
+        email_addr = authenticate(acct, remote=remote)
+        console.print(f"[green]Token saved for {label} ({email_addr})[/green]")
 
 
 @cli.command()
@@ -148,14 +157,17 @@ def accounts(ctx: click.Context) -> None:
     table = Table(title="Email Accounts")
     table.add_column("Name", width=20)
     table.add_column("Backend", width=10)
+    table.add_column("Email", width=30)
     table.add_column("Details", width=40)
 
     for acct in accts:
         if acct.backend == "gmail":
+            email_addr = _gmail_token_email(acct)
             details = f"credentials: {acct.gmail_credentials_path}"
         else:
-            details = f"{acct.imap_user}@{acct.imap_host}:{acct.imap_port}"
-        table.add_row(acct.name or "(unnamed)", acct.backend, details)
+            email_addr = acct.imap_user or ""
+            details = f"{acct.imap_host}:{acct.imap_port}"
+        table.add_row(acct.name or "(unnamed)", acct.backend, email_addr, details)
 
     console.print(table)
 
@@ -251,17 +263,22 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--stage", "-s", type=click.Choice(["extract_base", "contact_memory", "extract_entities", "categorise", "summarise_threads"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--stage", "-s", type=click.Choice(["extract_base", "fetch_homepages", "contact_memory", "categorise", "summarise_threads", "label_companies", "discussions"]), multiple=True, help="Run specific stage(s) only")
 @click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
+@click.option("--force", "-f", is_flag=True, help="Force regeneration even if already processed")
+@click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")
+@click.option("--label", "-l", default=None, help="Scope to all companies with this label (e.g. customer, vendor)")
+@click.option("--exclude", "-x", multiple=True, help="Exclude company by domain or name (repeatable)")
+@click.option("--contact", default=None, help="Scope to a specific contact's company (email address)")
 @click.pass_context
-def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None) -> None:
+def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, company: str | None, label: str | None, exclude: tuple[str, ...], contact: str | None) -> None:
     """Run AI analysis pipeline on synced emails."""
     from email_manager.pipeline.runner import run_pipeline
 
     config: Config = ctx.obj["config"]
     console = Console()
     stages = list(stage) if stage else None
-    run_pipeline(config, stages=stages, console=console, limit=limit)
+    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, company=company, label=label, exclude=list(exclude) if exclude else None, contact=contact)
 
 
 @cli.command()
@@ -323,73 +340,576 @@ def projects(ctx: click.Context, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--type", "-t", "entity_type", default=None, type=click.Choice(["person", "company", "topic", "action_item"]), help="Filter by entity type")
 @click.option("--limit", "-n", default=30)
+@click.option("--label", "-l", default=None, help="Filter by label (e.g. customer, vendor, partner)")
+@click.option("--unlabelled", is_flag=True, help="Show only companies without labels")
 @click.pass_context
-def entities(ctx: click.Context, entity_type: str | None, limit: int) -> None:
-    """List extracted entities."""
+def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool) -> None:
+    """List companies you interact with and their associated email addresses."""
     config: Config = ctx.obj["config"]
     conn = get_db(config)
 
-    if entity_type:
+    if label:
         rows = fetchall(
             conn,
-            """SELECT ent.entity_type, ent.value, ent.context, ent.confidence,
-                      e.subject, e.date
-               FROM entities ent
-               JOIN emails e ON ent.email_id = e.id
-               WHERE ent.entity_type = ?
-               ORDER BY ent.confidence DESC
+            """SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+               FROM companies c
+               JOIN company_labels cl ON c.id = cl.company_id
+               WHERE cl.label = ?
+               ORDER BY cl.confidence DESC, c.email_count DESC
                LIMIT ?""",
-            (entity_type, limit),
+            (label, limit),
+        )
+    elif unlabelled:
+        rows = fetchall(
+            conn,
+            """SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+               FROM companies c
+               LEFT JOIN company_labels cl ON c.id = cl.company_id
+               WHERE cl.company_id IS NULL
+               ORDER BY c.email_count DESC
+               LIMIT ?""",
+            (limit,),
         )
     else:
         rows = fetchall(
             conn,
-            """SELECT ent.entity_type, ent.value, ent.context, ent.confidence,
-                      e.subject, e.date
-               FROM entities ent
-               JOIN emails e ON ent.email_id = e.id
-               ORDER BY ent.confidence DESC
+            """SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+               FROM companies c
+               ORDER BY c.email_count DESC
+               LIMIT ?""",
+            (limit,),
+        )
+
+    console = Console()
+    if not rows:
+        console.print("[dim]No companies found. Run 'email-manager analyse --stage extract_base' first.[/dim]")
+        conn.close()
+        return
+
+    table = Table(title="Companies")
+    table.add_column("Company", width=20)
+    table.add_column("Domain", width=25)
+    table.add_column("Emails", width=8, justify="right")
+    table.add_column("Labels", width=25)
+    table.add_column("Contacts", width=35)
+    table.add_column("First Seen", width=12)
+    table.add_column("Last Seen", width=12)
+
+    for row in rows:
+        contacts = fetchall(
+            conn,
+            "SELECT contact_email FROM company_contacts WHERE company_id = ? ORDER BY contact_email",
+            (row["id"],),
+        )
+        contact_list = ", ".join(c["contact_email"] for c in contacts[:5])
+        if len(contacts) > 5:
+            contact_list += f" (+{len(contacts) - 5} more)"
+
+        labels = fetchall(
+            conn,
+            "SELECT label, confidence FROM company_labels WHERE company_id = ? ORDER BY confidence DESC",
+            (row["id"],),
+        )
+        label_str = ", ".join(f'{l["label"]} ({l["confidence"]:.0%})' for l in labels) if labels else ""
+
+        table.add_row(
+            row["name"],
+            row["domain"],
+            str(row["email_count"]),
+            label_str,
+            contact_list,
+            (row["first_seen"] or "")[:10],
+            (row["last_seen"] or "")[:10],
+        )
+
+    console.print(table)
+
+    # Summary stats (only on unfiltered view)
+    if not label and not unlabelled:
+        total = fetchone(conn, "SELECT COUNT(*) as cnt FROM companies")["cnt"]
+        labelled_count = fetchone(conn, "SELECT COUNT(DISTINCT company_id) as cnt FROM company_labels")["cnt"]
+        unlabelled_count = total - labelled_count
+        label_counts = fetchall(
+            conn,
+            "SELECT label, COUNT(*) as cnt FROM company_labels GROUP BY label ORDER BY cnt DESC",
+        )
+
+        console.print()
+        console.print(f"[bold]Total:[/bold] {total} companies — {labelled_count} labelled, {unlabelled_count} unlabelled")
+        if label_counts:
+            parts = [f"{r['label']} ({r['cnt']})" for r in label_counts]
+            console.print(f"[dim]Labels: {', '.join(parts)}[/dim]")
+
+    conn.close()
+
+
+@cli.command()
+@click.argument("identifier")
+@click.pass_context
+def company(ctx: click.Context, identifier: str) -> None:
+    """Show detailed information about a company (by domain or name)."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    # Look up by domain first, then by name (case-insensitive)
+    row = fetchone(
+        conn,
+        "SELECT * FROM companies WHERE domain = ? COLLATE NOCASE",
+        (identifier,),
+    )
+    if not row:
+        row = fetchone(
+            conn,
+            "SELECT * FROM companies WHERE name LIKE ? COLLATE NOCASE",
+            (f"%{identifier}%",),
+        )
+    if not row:
+        console.print(f"[red]No company found matching '{identifier}'[/red]")
+        conn.close()
+        return
+
+    company_id = row["id"]
+
+    # Header
+    console.print(f"\n[bold]{row['name']}[/bold]  ({row['domain']})")
+    if row["description"]:
+        console.print(f"[dim]{row['description']}[/dim]")
+
+    # Labels
+    labels = fetchall(
+        conn,
+        "SELECT label, confidence, reasoning FROM company_labels WHERE company_id = ? ORDER BY confidence DESC",
+        (company_id,),
+    )
+    if labels:
+        console.print(f"\n[bold]Labels:[/bold]")
+        for l in labels:
+            conf = f" ({l['confidence']:.0%})" if l["confidence"] else ""
+            reason = f" — {l['reasoning']}" if l["reasoning"] else ""
+            console.print(f"  {l['label']}{conf}{reason}")
+
+    # Email statistics
+    like_pattern = f"%@{row['domain']}%"
+    total_emails = fetchone(
+        conn,
+        """SELECT COUNT(*) as cnt FROM emails
+           WHERE from_address LIKE ? OR to_addresses LIKE ? OR cc_addresses LIKE ?""",
+        (like_pattern, like_pattern, like_pattern),
+    )["cnt"]
+    received = fetchone(
+        conn,
+        "SELECT COUNT(*) as cnt FROM emails WHERE from_address LIKE ?",
+        (like_pattern,),
+    )["cnt"]
+    sent = total_emails - received
+    first_email = fetchone(
+        conn,
+        """SELECT MIN(date) as d FROM emails
+           WHERE from_address LIKE ? OR to_addresses LIKE ? OR cc_addresses LIKE ?""",
+        (like_pattern, like_pattern, like_pattern),
+    )
+    last_email = fetchone(
+        conn,
+        """SELECT MAX(date) as d FROM emails
+           WHERE from_address LIKE ? OR to_addresses LIKE ? OR cc_addresses LIKE ?""",
+        (like_pattern, like_pattern, like_pattern),
+    )
+
+    console.print(f"\n[bold]Email Statistics:[/bold]")
+    console.print(f"  Total emails: {total_emails}  (received: {received}, sent: {sent})")
+    console.print(f"  First email:  {(first_email['d'] or '')[:10]}")
+    console.print(f"  Last email:   {(last_email['d'] or '')[:10]}")
+
+    # Top 5 contacts
+    contacts = fetchall(
+        conn,
+        """SELECT cc.contact_email, c.name, c.email_count, c.sent_count, c.received_count
+           FROM company_contacts cc
+           JOIN contacts c ON cc.contact_email = c.email
+           WHERE cc.company_id = ?
+           ORDER BY c.email_count DESC
+           LIMIT 5""",
+        (company_id,),
+    )
+    if contacts:
+        console.print(f"\n[bold]Top Contacts:[/bold]")
+        table = Table(show_header=True, box=None, pad_edge=False, padding=(0, 2))
+        table.add_column("Email", width=35)
+        table.add_column("Name", width=25)
+        table.add_column("Emails", width=8, justify="right")
+        table.add_column("Sent", width=6, justify="right")
+        table.add_column("Received", width=10, justify="right")
+        for c in contacts:
+            table.add_row(
+                c["contact_email"],
+                c["name"] or "",
+                str(c["email_count"]),
+                str(c["sent_count"]),
+                str(c["received_count"]),
+            )
+        console.print(table)
+
+    console.print()
+    conn.close()
+
+
+@cli.command()
+@click.option("--limit", "-n", default=30)
+@click.option("--label", "-l", default=None, help="Filter by label name")
+@click.pass_context
+def labels(ctx: click.Context, limit: int, label: str | None) -> None:
+    """Show company relationship labels."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    if label:
+        rows = fetchall(
+            conn,
+            """SELECT c.name, c.domain, c.email_count, cl.label, cl.confidence, cl.reasoning
+               FROM company_labels cl
+               JOIN companies c ON cl.company_id = c.id
+               WHERE cl.label = ?
+               ORDER BY cl.confidence DESC
+               LIMIT ?""",
+            (label, limit),
+        )
+    else:
+        rows = fetchall(
+            conn,
+            """SELECT c.name, c.domain, c.email_count, cl.label, cl.confidence, cl.reasoning
+               FROM company_labels cl
+               JOIN companies c ON cl.company_id = c.id
+               ORDER BY c.email_count DESC, cl.confidence DESC
                LIMIT ?""",
             (limit,),
         )
 
     conn.close()
 
-    console = Console()
     if not rows:
-        console.print("[dim]No entities found. Run 'email-manager analyse --stage extract_entities' first.[/dim]")
+        console.print("[dim]No labels found. Run 'email-manager analyse --stage label_companies' first.[/dim]")
         return
 
-    # Also show a summary count by type
-    config2 = Config()
-    conn2 = get_db(config2)
-    counts = fetchall(conn2, "SELECT entity_type, COUNT(*) as cnt FROM entities GROUP BY entity_type ORDER BY cnt DESC")
-    conn2.close()
-    if counts:
-        console.print("[bold]Entity counts:[/bold]")
-        for c in counts:
-            console.print(f"  {c['entity_type']}: {c['cnt']}")
-        console.print()
-
-    table = Table(title=f"Entities{f' ({entity_type})' if entity_type else ''}")
-    table.add_column("Type", width=12)
-    table.add_column("Value", width=25)
-    table.add_column("Confidence", width=6, justify="right")
-    table.add_column("Email Subject", width=35)
-    table.add_column("Context", width=40)
+    table = Table(title=f"Company Labels{f' ({label})' if label else ''}")
+    table.add_column("Company", width=20)
+    table.add_column("Domain", width=25)
+    table.add_column("Emails", width=8, justify="right")
+    table.add_column("Label", width=18)
+    table.add_column("Conf", width=6, justify="right")
+    table.add_column("Reasoning", width=50)
 
     for row in rows:
         table.add_row(
-            row["entity_type"],
-            row["value"][:25],
-            f"{row['confidence']:.0%}" if row["confidence"] else "—",
-            (row["subject"] or "")[:35],
-            (row["context"] or "")[:40],
+            row["name"],
+            row["domain"],
+            str(row["email_count"]),
+            row["label"],
+            f"{row['confidence']:.0%}" if row["confidence"] else "",
+            (row["reasoning"] or "")[:50],
         )
 
     console.print(table)
+
+
+@cli.command()
+@click.option("--limit", "-n", default=50)
+@click.option("--company", "-c", default=None, help="Filter by company domain or name")
+@click.option("--contact", default=None, help="Filter by contact email")
+@click.option("--category", default=None, help="Filter by discussion category")
+@click.option("--state", default=None, help="Filter by current state")
+@click.pass_context
+def discussions(ctx: click.Context, limit: int, company: str | None, contact: str | None, category: str | None, state: str | None) -> None:
+    """List extracted discussions and their current status."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    conditions = []
+    params: list = []
+
+    if company:
+        # Resolve to company_id
+        row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (company,))
+        if not row:
+            row = fetchone(conn, "SELECT id FROM companies WHERE name LIKE ? COLLATE NOCASE", (f"%{company}%",))
+        if not row:
+            console.print(f"[red]No company found matching '{company}'[/red]")
+            conn.close()
+            return
+        conditions.append("d.company_id = ?")
+        params.append(row["id"])
+
+    if contact:
+        contact_row = fetchone(
+            conn,
+            """SELECT c.id FROM companies c
+               JOIN company_contacts cc ON c.id = cc.company_id
+               WHERE cc.contact_email = ?""",
+            (contact,),
+        )
+        if not contact_row:
+            console.print(f"[red]No company found for contact '{contact}'[/red]")
+            conn.close()
+            return
+        conditions.append("d.company_id = ?")
+        params.append(contact_row["id"])
+
+    if category:
+        conditions.append("d.category = ?")
+        params.append(category)
+
+    if state:
+        conditions.append("d.current_state = ?")
+        params.append(state)
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+
+    rows = fetchall(
+        conn,
+        f"""SELECT d.id, d.title, d.category, d.current_state, d.summary,
+                   d.first_seen, d.last_seen, c.name as company_name, c.domain
+            FROM discussions d
+            JOIN companies c ON d.company_id = c.id
+            {where}
+            ORDER BY d.last_seen DESC
+            LIMIT ?""",
+        tuple(params),
+    )
+
+    if not rows:
+        console.print("[dim]No discussions found. Run 'email-manager analyse --stage discussions' first.[/dim]")
+        conn.close()
+        return
+
+    table = Table(title="Discussions")
+    table.add_column("ID", width=5, justify="right")
+    table.add_column("Company", width=30)
+    table.add_column("Category", width=18)
+    table.add_column("State", width=16)
+    table.add_column("Title", width=35)
+    table.add_column("Start", width=10)
+    table.add_column("End", width=10)
+
+    for row in rows:
+        company_display = f"{row['company_name']} ({row['domain']})"
+        table.add_row(
+            str(row["id"]),
+            company_display[:30],
+            row["category"],
+            row["current_state"] or "",
+            row["title"][:35],
+            (row["first_seen"] or "")[:10],
+            (row["last_seen"] or "")[:10],
+        )
+
+    console.print(table)
+
+    # Summary
+    total = fetchone(conn, "SELECT COUNT(*) as cnt FROM discussions")["cnt"]
+    cat_counts = fetchall(conn, "SELECT category, COUNT(*) as cnt FROM discussions GROUP BY category ORDER BY cnt DESC")
+    console.print()
+    console.print(f"[bold]Total:[/bold] {total} discussions")
+    if cat_counts:
+        parts = [f"{r['category']} ({r['cnt']})" for r in cat_counts]
+        console.print(f"[dim]Categories: {', '.join(parts)}[/dim]")
+
+    conn.close()
+
+
+@cli.command()
+@click.argument("discussion_id", type=int)
+@click.pass_context
+def discussion(ctx: click.Context, discussion_id: int) -> None:
+    """Show detailed information about a specific discussion."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    row = fetchone(
+        conn,
+        """SELECT d.*, c.name as company_name, c.domain
+           FROM discussions d
+           JOIN companies c ON d.company_id = c.id
+           WHERE d.id = ?""",
+        (discussion_id,),
+    )
+    if not row:
+        console.print(f"[red]Discussion {discussion_id} not found[/red]")
+        conn.close()
+        return
+
+    # Header
+    console.print(f"\n[bold]{row['title']}[/bold]")
+    console.print(f"Company: {row['company_name']} ({row['domain']})")
+    console.print(f"Category: [bold]{row['category']}[/bold]  State: [bold]{row['current_state']}[/bold]")
+    if row["summary"]:
+        console.print(f"\n{row['summary']}")
+
+    # Participants
+    participants = json.loads(row["participants"]) if row["participants"] else []
+    if participants:
+        console.print(f"\n[bold]Participants:[/bold]")
+        for p in participants:
+            console.print(f"  {p}")
+
+    # State history timeline
+    history = fetchall(
+        conn,
+        """SELECT state, entered_at, reasoning
+           FROM discussion_state_history
+           WHERE discussion_id = ?
+           ORDER BY entered_at ASC, id ASC""",
+        (discussion_id,),
+    )
+    if history:
+        console.print(f"\n[bold]State Timeline:[/bold]")
+        for h in history:
+            date = (h["entered_at"] or "unknown")[:10]
+            reasoning = f" — {h['reasoning']}" if h["reasoning"] else ""
+            console.print(f"  {date}  {h['state']}{reasoning}")
+
+    # Linked threads
+    threads = fetchall(
+        conn,
+        """SELECT dt.thread_id, t.subject, t.email_count, t.first_date, t.last_date
+           FROM discussion_threads dt
+           LEFT JOIN threads t ON dt.thread_id = t.thread_id
+           WHERE dt.discussion_id = ?
+           ORDER BY t.last_date DESC""",
+        (discussion_id,),
+    )
+    if threads:
+        console.print(f"\n[bold]Linked Threads:[/bold]")
+        for t in threads:
+            subject = (t["subject"] or "(no subject)")[:50]
+            dates = f"{(t['first_date'] or '')[:10]} — {(t['last_date'] or '')[:10]}" if t["first_date"] else ""
+            count = f"({t['email_count']} emails)" if t["email_count"] else ""
+            console.print(f"  {subject}  {count}  {dates}")
+
+    console.print()
+    conn.close()
+
+
+@cli.command(name="discussion-stats")
+@click.option("--category", default=None, help="Filter by discussion category")
+@click.pass_context
+def discussion_stats(ctx: click.Context, category: str | None) -> None:
+    """Show discussion funnel statistics and state transition analysis."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    # Load category config for state ordering
+    from email_manager.analysis.discussions import load_category_config
+    categories = load_category_config(getattr(config, "discussion_categories_path", None))
+    state_order = {c["name"]: c["states"] for c in categories}
+
+    cats_to_show = [category] if category else [c["name"] for c in categories]
+
+    for cat_name in cats_to_show:
+        states = state_order.get(cat_name)
+        if not states:
+            continue
+
+        # Count discussions per current state
+        state_counts = fetchall(
+            conn,
+            """SELECT current_state, COUNT(*) as cnt
+               FROM discussions
+               WHERE category = ?
+               GROUP BY current_state""",
+            (cat_name,),
+        )
+        count_map = {r["current_state"]: r["cnt"] for r in state_counts}
+        total = sum(count_map.values())
+
+        if total == 0:
+            continue
+
+        console.print(f"\n[bold]{cat_name}[/bold] ({total} discussions)")
+
+        # Funnel view — show states in order
+        table = Table(show_header=True, box=None, pad_edge=False, padding=(0, 2))
+        table.add_column("State", width=25)
+        table.add_column("Current", width=10, justify="right")
+        table.add_column("Ever reached", width=12, justify="right")
+        table.add_column("Avg days in state", width=18, justify="right")
+
+        for s in states:
+            current = count_map.get(s, 0)
+
+            # Count how many discussions ever reached this state
+            ever_reached = fetchone(
+                conn,
+                """SELECT COUNT(DISTINCT discussion_id) as cnt
+                   FROM discussion_state_history
+                   WHERE state = ? AND discussion_id IN (
+                       SELECT id FROM discussions WHERE category = ?
+                   )""",
+                (s, cat_name),
+            )
+            ever = ever_reached["cnt"] if ever_reached else 0
+
+            # Average time spent in this state (for discussions that moved past it)
+            avg_days_str = ""
+            avg_row = fetchone(
+                conn,
+                """SELECT AVG(julianday(next_date) - julianday(h.entered_at)) as avg_d
+                   FROM discussion_state_history h
+                   JOIN (
+                       SELECT discussion_id, MIN(entered_at) as next_date
+                       FROM discussion_state_history
+                       WHERE entered_at > (
+                           SELECT entered_at FROM discussion_state_history h2
+                           WHERE h2.discussion_id = discussion_state_history.discussion_id
+                             AND h2.state = ?
+                           LIMIT 1
+                       )
+                       AND discussion_id IN (SELECT id FROM discussions WHERE category = ?)
+                       GROUP BY discussion_id
+                   ) nxt ON h.discussion_id = nxt.discussion_id
+                   WHERE h.state = ?
+                     AND h.discussion_id IN (SELECT id FROM discussions WHERE category = ?)""",
+                (s, cat_name, s, cat_name),
+            )
+            if avg_row and avg_row["avg_d"] is not None:
+                avg_days_str = f"{avg_row['avg_d']:.1f}"
+
+            bar = "#" * current + "." * (total - current)
+            table.add_row(s, str(current), str(ever), avg_days_str)
+
+        console.print(table)
+
+        # Conversion rates between consecutive states
+        console.print(f"\n  [dim]Conversion rates:[/dim]")
+        for i in range(len(states) - 1):
+            from_s, to_s = states[i], states[i + 1]
+            from_count = fetchone(
+                conn,
+                """SELECT COUNT(DISTINCT discussion_id) as cnt
+                   FROM discussion_state_history
+                   WHERE state = ? AND discussion_id IN (SELECT id FROM discussions WHERE category = ?)""",
+                (from_s, cat_name),
+            )
+            to_count = fetchone(
+                conn,
+                """SELECT COUNT(DISTINCT discussion_id) as cnt
+                   FROM discussion_state_history
+                   WHERE state = ? AND discussion_id IN (SELECT id FROM discussions WHERE category = ?)""",
+                (to_s, cat_name),
+            )
+            from_n = from_count["cnt"] if from_count else 0
+            to_n = to_count["cnt"] if to_count else 0
+            rate = f"{to_n / from_n:.0%}" if from_n > 0 else "—"
+            console.print(f"    {from_s} → {to_s}: {rate} ({to_n}/{from_n})")
+
+    conn.close()
+
+
 
 
 @cli.command()
@@ -776,11 +1296,10 @@ def _display_memory(console: Console, mem) -> None:
 
 @cli.command(name="delete-contact")
 @click.argument("email_address")
-@click.option("--account", "-a", required=True, help="Account to delete from (by name)")
 @click.option("--remote", is_flag=True, help="Headless mode for Gmail OAuth")
 @click.pass_context
-def delete_contact(ctx: click.Context, email_address: str, account: str, remote: bool) -> None:
-    """Delete all emails from/to a contact on the remote server and local database."""
+def delete_contact(ctx: click.Context, email_address: str, remote: bool) -> None:
+    """Delete all emails from/to a contact on the remote server(s) and local database."""
     from collections import defaultdict
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
@@ -788,30 +1307,26 @@ def delete_contact(ctx: click.Context, email_address: str, account: str, remote:
     conn = get_db(config)
     console = Console()
 
-    # Resolve account
-    accounts = config.get_accounts()
-    acct = next((a for a in accounts if a.name == account), None)
-    if not acct:
-        console.print(f"[red]No account named '{account}'. Available: {', '.join(a.name for a in accounts)}[/red]")
-        conn.close()
-        raise SystemExit(1)
-
     email_address = email_address.lower()
     like_pattern = f'%"{email_address}"%'
 
-    # Gather stats
+    # Gather stats from actual emails, not the (possibly stale) contacts table
     contact = fetchone(conn, "SELECT * FROM contacts WHERE email = ?", (email_address,))
-    sent = fetchone(
+    stats = fetchone(
         conn,
-        "SELECT COUNT(*) as cnt FROM emails WHERE from_address = ?",
-        (email_address,),
-    )["cnt"]
-    received = fetchone(
-        conn,
-        "SELECT COUNT(*) as cnt FROM emails WHERE from_address != ? AND (to_addresses LIKE ? OR cc_addresses LIKE ?)",
-        (email_address, like_pattern, like_pattern),
-    )["cnt"]
-    total = sent + received
+        """SELECT
+               SUM(CASE WHEN from_address = ? THEN 1 ELSE 0 END) as sent_by,
+               SUM(CASE WHEN from_address != ? THEN 1 ELSE 0 END) as sent_to,
+               COUNT(*) as total,
+               MIN(date) as first_seen,
+               MAX(date) as last_seen
+           FROM emails
+           WHERE from_address = ? OR to_addresses LIKE ? OR cc_addresses LIKE ?""",
+        (email_address, email_address, email_address, like_pattern, like_pattern),
+    )
+    sent = stats["sent_by"] or 0
+    received = stats["sent_to"] or 0
+    total = stats["total"] or 0
 
     if total == 0:
         console.print(f"[dim]No emails found involving {email_address}.[/dim]")
@@ -822,102 +1337,111 @@ def delete_contact(ctx: click.Context, email_address: str, account: str, remote:
     name = contact["name"] if contact and contact["name"] else email_address
     console.print(f"\n[bold]Contact:[/bold] {name}")
     console.print(f"  Emails sent by them:     [bold]{sent}[/bold]")
-    console.print(f"  Emails received by them: [bold]{received}[/bold]")
+    console.print(f"  Emails sent to them:     [bold]{received}[/bold]")
     console.print(f"  Total to delete:         [bold red]{total}[/bold red]")
-    if contact:
-        console.print(f"  First seen: {(contact['first_seen'] or '')[:10]}")
-        console.print(f"  Last seen:  {(contact['last_seen'] or '')[:10]}")
-    console.print(f"  Account:    [bold]{acct.name}[/bold] ({acct.backend})")
+    console.print(f"  First seen: {(stats['first_seen'] or '')[:10]}")
+    console.print(f"  Last seen:  {(stats['last_seen'] or '')[:10]}")
 
     # Confirm
-    if not click.confirm(f"\nDelete all {total} emails involving {email_address} from {acct.backend}?", default=False):
+    if not click.confirm(f"\nDelete all {total} emails involving {email_address}?", default=False):
         console.print("[dim]Aborted.[/dim]")
         conn.close()
         return
 
-    # Collect emails to delete
+    # Collect emails to delete, grouped by account
     rows = fetchall(
         conn,
-        "SELECT id, message_id, gmail_id, folder FROM emails WHERE from_address = ? OR to_addresses LIKE ? OR cc_addresses LIKE ?",
+        "SELECT id, message_id, gmail_id, folder, account_name FROM emails "
+        "WHERE from_address = ? OR to_addresses LIKE ? OR cc_addresses LIKE ?",
         (email_address, like_pattern, like_pattern),
     )
 
-    deleted_ids: list[int] = []
+    # Build account lookup
+    accounts_by_name = {a.name: a for a in config.get_accounts()}
+
+    # Group rows by account_name
+    by_account: dict[str, list] = defaultdict(list)
+    no_account: list = []
+    for r in rows:
+        if r["account_name"] and r["account_name"] in accounts_by_name:
+            by_account[r["account_name"]].append(r)
+        else:
+            no_account.append(r)
+
+    if no_account:
+        console.print(
+            f"[yellow]{len(no_account)} email(s) have no account_name set "
+            f"(synced before this feature). Re-sync to backfill, or these "
+            f"will only be deleted locally.[/yellow]"
+        )
+
+    deleted_count = 0
     failed_count = 0
 
-    if acct.backend == "gmail":
-        from email_manager.ingestion.gmail_client import trash_messages
-
-        # Split into gmail and non-gmail emails
-        gmail_rows = [r for r in rows if r["gmail_id"]]
-        non_gmail = [r for r in rows if not r["gmail_id"]]
-
-        if non_gmail:
-            console.print(f"[yellow]Skipping {len(non_gmail)} email(s) without Gmail IDs (likely from another account).[/yellow]")
-
-        if gmail_rows:
-            gmail_ids = [r["gmail_id"] for r in gmail_rows]
-            id_to_row = {r["gmail_id"]: r["id"] for r in gmail_rows}
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Trashing emails in Gmail", total=len(gmail_ids))
-
-                # Process in batches for progress updates
-                BATCH = 50
-                for i in range(0, len(gmail_ids), BATCH):
-                    batch = gmail_ids[i : i + BATCH]
-                    succeeded, failed = trash_messages(acct, batch, remote=remote)
-                    deleted_ids.extend(id_to_row[gid] for gid in succeeded)
-                    failed_count += len(failed)
-                    progress.advance(task, len(batch))
-
-    else:
-        from email_manager.ingestion.imap_client import delete_messages
-
-        # Group emails by folder for efficient IMAP deletion
-        by_folder: dict[str, list[str]] = defaultdict(list)
-        mid_to_id: dict[str, int] = {}
-        for r in rows:
-            folder = r["folder"] or "INBOX"
-            by_folder[folder].append(r["message_id"])
-            mid_to_id[r["message_id"]] = r["id"]
-
-        folder_list = list(by_folder.items())
-        total_msgs = sum(len(v) for v in by_folder.values())
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Deleting emails via IMAP", total=total_msgs)
-
-            for folder, msg_ids in folder_list:
-                succeeded, failed = delete_messages(acct, {folder: msg_ids})
-                deleted_ids.extend(mid_to_id[mid] for mid in succeeded)
-                failed_count += len(failed)
-                progress.advance(task, len(msg_ids))
-
-    # Delete local data only for emails successfully removed from remote
-    if deleted_ids:
-        # Process in chunks to avoid SQL variable limits
+    def _delete_local_batch(ids: list[int]) -> None:
+        """Delete a batch of emails from local DB and commit immediately."""
         CHUNK = 500
-        for i in range(0, len(deleted_ids), CHUNK):
-            chunk = deleted_ids[i : i + CHUNK]
+        for i in range(0, len(ids), CHUNK):
+            chunk = ids[i : i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
-            conn.execute(f"DELETE FROM entities WHERE email_id IN ({placeholders})", chunk)
             conn.execute(f"DELETE FROM email_projects WHERE email_id IN ({placeholders})", chunk)
             conn.execute(f"DELETE FROM email_references WHERE email_id IN ({placeholders})", chunk)
             conn.execute(f"DELETE FROM pipeline_runs WHERE email_id IN ({placeholders})", chunk)
             conn.execute(f"DELETE FROM emails WHERE id IN ({placeholders})", chunk)
+        conn.commit()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Deleting from remote", total=len(rows) - len(no_account))
+
+        for acct_name, acct_rows in by_account.items():
+            acct = accounts_by_name[acct_name]
+
+            if acct.backend == "gmail":
+                from email_manager.ingestion.gmail_client import trash_messages
+
+                gmail_rows = [r for r in acct_rows if r["gmail_id"]]
+                gmail_ids = [r["gmail_id"] for r in gmail_rows]
+                id_by_gmail = {r["gmail_id"]: r["id"] for r in gmail_rows}
+
+                BATCH = 50
+                for i in range(0, len(gmail_ids), BATCH):
+                    batch = gmail_ids[i : i + BATCH]
+                    succeeded, failed = trash_messages(acct, batch, remote=remote)
+                    batch_ids = [id_by_gmail[gid] for gid in succeeded]
+                    if batch_ids:
+                        _delete_local_batch(batch_ids)
+                        deleted_count += len(batch_ids)
+                    failed_count += len(failed)
+                    progress.advance(task, len(batch))
+            else:
+                from email_manager.ingestion.imap_client import delete_messages
+
+                by_folder: dict[str, list[str]] = defaultdict(list)
+                mid_to_id: dict[str, int] = {}
+                for r in acct_rows:
+                    folder = r["folder"] or "INBOX"
+                    by_folder[folder].append(r["message_id"])
+                    mid_to_id[r["message_id"]] = r["id"]
+
+                succeeded, failed = delete_messages(acct, dict(by_folder))
+                batch_ids = [mid_to_id[mid] for mid in succeeded]
+                if batch_ids:
+                    _delete_local_batch(batch_ids)
+                    deleted_count += len(batch_ids)
+                failed_count += len(failed)
+                progress.advance(task, len(acct_rows))
+
+    # Emails with no account — delete locally only
+    no_account_ids = [r["id"] for r in no_account]
+    if no_account_ids:
+        _delete_local_batch(no_account_ids)
+        deleted_count += len(no_account_ids)
 
     # Clean up contact-level data if all emails were deleted
     remaining = fetchone(
@@ -937,11 +1461,11 @@ def delete_contact(ctx: click.Context, email_address: str, account: str, remote:
     conn.commit()
     conn.close()
 
-    console.print(f"\n[green]Deleted {len(deleted_ids)} email(s) from {acct.backend} and local database.[/green]")
+    console.print(f"\n[green]Deleted {deleted_count} email(s) from remote and local database.[/green]")
     if failed_count:
         console.print(f"[yellow]{failed_count} email(s) failed to delete remotely and were kept locally.[/yellow]")
     if remaining > 0 and failed_count == 0:
-        console.print(f"[dim]{remaining} email(s) from other accounts remain in the local database.[/dim]")
+        console.print(f"[dim]{remaining} email(s) remain locally (failed remote deletion).[/dim]")
 
 
 @cli.command()

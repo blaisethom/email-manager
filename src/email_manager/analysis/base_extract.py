@@ -23,15 +23,15 @@ def _make_progress(console: Console) -> Progress:
 
 
 def extract_base(conn: sqlite3.Connection, console: Console = None, limit: int | None = None) -> int:
-    """Extract all structured data from email headers: contacts, companies, domains, entities."""
+    """Extract all structured data from email headers: contacts, companies, domains."""
     if console is None:
         console = Console()
 
-    entities_count = _extract_header_entities(conn, console=console, limit=limit)
+    companies_count = _extract_companies(conn, console=console, limit=limit)
     contacts_count = _extract_contacts(conn, console=console)
     co_email_count = _compute_co_email_stats(conn, console=console)
     conn.commit()
-    return entities_count + contacts_count + co_email_count
+    return companies_count + contacts_count + co_email_count
 
 
 def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
@@ -71,7 +71,7 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
                     (addr, row["date"], row["date"]),
                 )
 
-    # Now update all contacts with accurate counts and best-known names
+    # Update best-known names and received count (dates are set in the single-pass below)
     conn.execute("""
         UPDATE contacts SET
             name = COALESCE(
@@ -79,28 +79,30 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
                  AND from_name IS NOT NULL AND from_name != '' ORDER BY date DESC LIMIT 1),
                 contacts.name
             ),
-            first_seen = COALESCE(
-                (SELECT MIN(date) FROM emails WHERE from_address = contacts.email),
-                contacts.first_seen
-            ),
-            last_seen = COALESCE(
-                (SELECT MAX(date) FROM emails WHERE from_address = contacts.email),
-                contacts.last_seen
-            ),
             received_count = (SELECT COUNT(*) FROM emails WHERE from_address = contacts.email)
     """)
 
-    # Count sent/received in a single pass over emails (avoids N*M LIKE scans)
+    # Count sent/received and track dates in a single pass (avoids N*M LIKE scans)
     sent_counts: dict[str, int] = {}
     recv_counts: dict[str, int] = {}
+    first_dates: dict[str, str] = {}
+    last_dates: dict[str, str] = {}
 
-    email_rows = fetchall(conn, "SELECT from_address, to_addresses, cc_addresses FROM emails")
+    def _update_dates(addr: str, date: str) -> None:
+        if addr not in first_dates or date < first_dates[addr]:
+            first_dates[addr] = date
+        if addr not in last_dates or date > last_dates[addr]:
+            last_dates[addr] = date
+
+    email_rows = fetchall(conn, "SELECT from_address, to_addresses, cc_addresses, date FROM emails")
 
     with _make_progress(console) as progress:
         task = progress.add_task("Counting sent/received", total=len(email_rows))
         for row in email_rows:
             addr = row["from_address"]
+            date = row["date"]
             recv_counts[addr] = recv_counts.get(addr, 0) + 1
+            _update_dates(addr, date)
 
             for field in ("to_addresses", "cc_addresses"):
                 raw = row[field]
@@ -114,6 +116,7 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
                     a = a.strip().lower()
                     if a and "@" in a:
                         sent_counts[a] = sent_counts.get(a, 0) + 1
+                        _update_dates(a, date)
 
             progress.advance(task)
 
@@ -132,9 +135,12 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
             company = _domain_to_company(domain) if domain else None
 
             conn.execute(
-                """UPDATE contacts SET sent_count = ?, received_count = ?, email_count = ?, company = COALESCE(company, ?)
+                """UPDATE contacts SET sent_count = ?, received_count = ?, email_count = ?,
+                   first_seen = ?, last_seen = ?, company = COALESCE(company, ?)
                    WHERE id = ?""",
-                (sent, received, sent + received, company, contact["id"]),
+                (sent, received, sent + received,
+                 first_dates.get(email_addr), last_dates.get(email_addr),
+                 company, contact["id"]),
             )
             updated += 1
             progress.update(task, completed=updated)
@@ -142,12 +148,12 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
     return updated
 
 
-def _extract_header_entities(
+def _extract_companies(
     conn: sqlite3.Connection, console: Console = None, limit: int | None = None
 ) -> int:
-    """Extract person and company entities from email headers into the entities table."""
+    """Extract companies and their associated email addresses from email headers."""
 
-    sql = """SELECT e.id, e.from_address, e.from_name, e.to_addresses, e.cc_addresses, e.date
+    sql = """SELECT e.id, e.from_address, e.to_addresses, e.cc_addresses, e.date
              FROM emails e
              LEFT JOIN pipeline_runs pr ON e.id = pr.email_id AND pr.stage = 'extract_base'
              WHERE pr.id IS NULL OR pr.status = 'error'
@@ -163,28 +169,13 @@ def _extract_header_entities(
     processed = 0
 
     with _make_progress(console) as progress:
-        task = progress.add_task("Extracting header entities", total=len(unprocessed))
+        task = progress.add_task("Extracting companies", total=len(unprocessed))
 
         for row in unprocessed:
             email_id = row["id"]
+            date = row["date"]
 
-            # Extract person entities from From, To, Cc
-            _extract_person_entity(conn, email_id, row["from_address"], row["from_name"], "sender")
-
-            for field, role in [("to_addresses", "recipient"), ("cc_addresses", "cc")]:
-                raw = row[field]
-                if not raw:
-                    continue
-                try:
-                    addresses = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                for addr in addresses:
-                    addr = addr.strip().lower()
-                    if addr and "@" in addr:
-                        _extract_person_entity(conn, email_id, addr, None, role)
-
-            # Extract company entities from domains
+            # Collect all addresses from this email
             all_addresses = [row["from_address"]]
             for field in ("to_addresses", "cc_addresses"):
                 raw = row[field]
@@ -194,19 +185,32 @@ def _extract_header_entities(
                     except (json.JSONDecodeError, TypeError):
                         pass
 
-            seen_companies = set()
             for addr in all_addresses:
                 addr = addr.strip().lower()
                 if "@" not in addr:
                     continue
                 domain = addr.split("@")[-1]
-                company = _domain_to_company(domain)
-                if company and company not in seen_companies:
-                    seen_companies.add(company)
+                company_name = _domain_to_company(domain)
+                if not company_name:
+                    continue
+
+                # Upsert company
+                conn.execute(
+                    """INSERT INTO companies (name, domain, email_count, first_seen, last_seen)
+                    VALUES (?, ?, 1, ?, ?)
+                    ON CONFLICT(domain) DO UPDATE SET
+                        email_count = email_count + 1,
+                        first_seen = MIN(first_seen, excluded.first_seen),
+                        last_seen = MAX(last_seen, excluded.last_seen)""",
+                    (company_name, domain, date, date),
+                )
+
+                # Link contact email to company
+                company_row = fetchone(conn, "SELECT id FROM companies WHERE domain = ?", (domain,))
+                if company_row:
                     conn.execute(
-                        """INSERT INTO entities (email_id, entity_type, value, context, confidence)
-                        VALUES (?, 'company', ?, ?, 1.0)""",
-                        (email_id, company, f"domain: {domain}"),
+                        "INSERT OR IGNORE INTO company_contacts (company_id, contact_email) VALUES (?, ?)",
+                        (company_row["id"], addr),
                     )
 
             # Mark as processed
@@ -298,18 +302,6 @@ def _compute_co_email_stats(conn: sqlite3.Connection, console: Console = None) -
 
     return total_pairs
 
-
-def _extract_person_entity(
-    conn: sqlite3.Connection, email_id: int, address: str, name: str | None, role: str
-) -> None:
-    if not address or "@" not in address:
-        return
-    display = name if name and name.strip() else address
-    conn.execute(
-        """INSERT INTO entities (email_id, entity_type, value, context, confidence)
-        VALUES (?, 'person', ?, ?, 1.0)""",
-        (email_id, display, role),
-    )
 
 
 def _domain_to_company(domain: str) -> str | None:

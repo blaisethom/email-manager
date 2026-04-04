@@ -96,7 +96,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "run_sql",
-        "description": "Execute a read-only SQL query against the email database. Tables: emails, contacts, threads, projects, email_projects, entities, pipeline_runs. Only SELECT queries allowed.",
+        "description": "Execute a read-only SQL query against the email database. Tables: emails, contacts, threads, projects, email_projects, companies, company_contacts, pipeline_runs. Only SELECT queries allowed.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -416,7 +416,7 @@ def _get_stats(conn: sqlite3.Connection, args: dict) -> str:
     projects = fetchone(conn, "SELECT COUNT(*) as cnt FROM projects")
     contacts = fetchone(conn, "SELECT COUNT(*) as cnt FROM contacts")
     threads = fetchone(conn, "SELECT COUNT(*) as cnt FROM threads")
-    entities = fetchone(conn, "SELECT COUNT(*) as cnt FROM entities")
+    companies = fetchone(conn, "SELECT COUNT(*) as cnt FROM companies")
 
     pipeline = fetchall(
         conn,
@@ -433,7 +433,7 @@ def _get_stats(conn: sqlite3.Connection, args: dict) -> str:
         f"Threads: {threads['cnt']}\n"
         f"Projects: {projects['cnt']}\n"
         f"Contacts: {contacts['cnt']}\n"
-        f"Entities: {entities['cnt']}"
+        f"Companies: {companies['cnt']}"
         f"{pipeline_str}"
     )
 

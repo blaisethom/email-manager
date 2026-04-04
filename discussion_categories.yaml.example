@@ -1,0 +1,98 @@
+categories:
+  - name: pharma-deal
+    description: "Sales deal with a pharmaceutical or CRO company"
+    states:
+      - discovery
+      - qualification
+      - interacting
+      - proposal_sent
+      - negotiating
+      - out_for_contract
+      - signed
+      - lost
+
+  - name: investment
+    description: "Fundraising or investment round discussion"
+    states:
+      - intro
+      - deck_sent
+      - meeting_scheduled
+      - shared_level_1_data_room
+      - nda_signed
+      - shared_level_2_data_room
+      - term_sheet_received
+      - investment_dd
+      - signed
+      - passed
+
+  - name: scheduling
+    description: "Scheduling a meeting, call, or event"
+    states:
+      - proposed
+      - confirmed
+      - completed
+      - cancelled
+
+  - name: contract-negotiation
+    description: "Negotiating terms of a contract or agreement"
+    states:
+      - initial_draft
+      - redlines
+      - final_review
+      - signed
+      - abandoned
+
+  - name: vendor-selection
+    description: "Evaluating and selecting a vendor or service provider"
+    states:
+      - research
+      - shortlisted
+      - evaluating
+      - selected
+      - onboarded
+      - rejected
+
+  - name: internal-decision
+    description: "Internal process or decision-making discussion"
+    states:
+      - raised
+      - under_discussion
+      - decided
+      - implemented
+      - deferred
+
+  - name: hiring
+    description: "Recruiting or hiring discussion"
+    states:
+      - sourcing
+      - screening
+      - interviewing
+      - offer_extended
+      - hired
+      - passed
+
+  - name: partnership
+    description: "Exploring or establishing a strategic partnership"
+    states:
+      - intro
+      - exploring
+      - proposal
+      - negotiating
+      - agreed
+      - abandoned
+
+  - name: support-issue
+    description: "Technical support or customer service issue"
+    states:
+      - reported
+      - investigating
+      - awaiting_response
+      - resolved
+      - escalated
+
+  - name: other
+    description: "Discussion that does not fit any other category"
+    states:
+      - active
+      - resolved
+      - stalled

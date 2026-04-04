@@ -52,7 +52,7 @@ class Config(BaseSettings):
     # AI
     ai_backend: str = "claude"  # "claude", "claude-cli", or "ollama"
     anthropic_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-20250514"
+    claude_model: str = ""
     ollama_model: str = "llama3.1:8b"
     ollama_url: str = "http://localhost:11434"
     ai_batch_size: int = 10
@@ -61,6 +61,13 @@ class Config(BaseSettings):
     memory_backend: str = "both"  # "sqlite", "markdown", or "both"
     memory_strategy: str = "default"  # "default" or "detailed"
     memory_dir: Path = Path("data/memories")
+
+    # Company labels
+    company_labels_path: Path | None = None  # path to company_labels.yaml/.json
+    homepage_max_workers: int = 10  # concurrent threads for homepage fetching
+
+    # Discussion categories
+    discussion_categories_path: Path | None = None  # path to discussion_categories.yaml
 
     # Database
     db_path: Path = Path("data/email_manager.db")

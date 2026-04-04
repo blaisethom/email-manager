@@ -17,6 +17,7 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 
 def _get_gmail_service(config: EmailAccount, *, remote: bool = False):
+    import json
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -26,9 +27,13 @@ def _get_gmail_service(config: EmailAccount, *, remote: bool = False):
     credentials_path = config.gmail_credentials_path
 
     creds = None
+    stored_email = None
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        token_data = json.loads(token_path.read_text())
+        stored_email = token_data.get("authenticated_email")
 
+    did_reauth = False
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -45,37 +50,71 @@ def _get_gmail_service(config: EmailAccount, *, remote: bool = False):
                 creds = _run_remote_auth(flow)
             else:
                 creds = flow.run_local_server(port=0)
+            did_reauth = True
 
+    service = build("gmail", "v1", credentials=creds)
+
+    # Verify the authenticated email matches what was stored previously
+    if did_reauth or not stored_email:
+        profile = service.users().getProfile(userId="me").execute()
+        current_email = profile["emailAddress"].lower()
+
+        if stored_email and current_email != stored_email.lower():
+            raise RuntimeError(
+                f"Token mismatch: expected {stored_email} but got {current_email}. "
+                f"Delete {token_path} first if you intentionally want to switch accounts."
+            )
+
+        # Persist token with the authenticated email
         token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(creds.to_json())
+        token_data = json.loads(creds.to_json())
+        token_data["authenticated_email"] = current_email
+        token_path.write_text(json.dumps(token_data, indent=2))
 
-    return build("gmail", "v1", credentials=creds)
+    return service
 
 
-AUTH_PORT = 8085
+AUTH_PORT_START = 8085
+AUTH_PORT_END = 8095
+
+
+def _find_free_port(start: int = AUTH_PORT_START, end: int = AUTH_PORT_END) -> int:
+    """Find the first available port in [start, end)."""
+    import socket
+
+    for port in range(start, end):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    raise OSError(f"No free port found in range {start}-{end}")
 
 
 def _run_remote_auth(flow: object):
     """OAuth flow for headless/remote machines with no browser.
 
-    Starts a local server on a fixed port and prints the auth URL for the
+    Starts a local server on a free port and prints the auth URL for the
     user to open on another machine.  Works in two ways:
 
     1. SSH tunnel (recommended):
-       ssh -L 8085:localhost:8085 user@remote-host
+       ssh -L <port>:localhost:<port> user@remote-host
        Then open the printed URL in your local browser.
 
     2. Direct access (if the remote host is reachable):
        Open the printed URL, replacing 'localhost' with the remote host's
        IP/hostname.
     """
+    port = _find_free_port()
     console = Console()
     console.print(
         f"\n[bold yellow]Remote authentication mode[/bold yellow]\n\n"
-        f"The OAuth server will listen on port [bold]{AUTH_PORT}[/bold].\n\n"
+        f"The OAuth server will listen on port [bold]{port}[/bold].\n\n"
         f"[bold]Option 1 — SSH tunnel (recommended):[/bold]\n"
         f"  From your local machine, run:\n"
-        f"  [cyan]ssh -L {AUTH_PORT}:localhost:{AUTH_PORT} <user>@<this-host>[/cyan]\n"
+        f"  [cyan]ssh -L {port}:localhost:{port} <user>@<this-host>[/cyan]\n"
         f"  Then open the URL below in your local browser.\n\n"
         f"[bold]Option 2 — Direct access:[/bold]\n"
         f"  Open the URL below, replacing 'localhost' with this machine's hostname/IP.\n"
@@ -83,7 +122,7 @@ def _run_remote_auth(flow: object):
     creds = flow.run_local_server(
         host="localhost",
         bind_addr="0.0.0.0",
-        port=AUTH_PORT,
+        port=port,
         open_browser=False,
     )
     return creds
@@ -94,9 +133,16 @@ def _sync_state_key(config: EmailAccount) -> str:
     return f"gmail:{config.name}" if config.name else "gmail"
 
 
-def authenticate(config: EmailAccount, *, remote: bool = False) -> None:
-    """Run the OAuth flow and persist the token, without syncing."""
-    _get_gmail_service(config, remote=remote)
+def authenticate(config: EmailAccount, *, remote: bool = False) -> str:
+    """Run the OAuth flow and persist the token, without syncing.
+
+    Returns the authenticated email address.
+    """
+    import json
+
+    service = _get_gmail_service(config, remote=remote)
+    profile = service.users().getProfile(userId="me").execute()
+    return profile["emailAddress"]
 
 
 def sync_emails(conn: sqlite3.Connection, config: EmailAccount, *, remote: bool = False) -> int:
@@ -199,17 +245,18 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
                 em = parse_raw_email(raw_bytes, folder=label_folder)
                 row = email_to_db_row(em)
                 row["gmail_id"] = msg_id
+                row["account_name"] = config.name
                 conn.execute(
                     """INSERT OR IGNORE INTO emails
                     (message_id, thread_id, subject, normalised_subject, from_address, from_name,
                      to_addresses, cc_addresses, date, body_text, body_html,
                      raw_headers, folder, size_bytes, has_attachments, fetched_at,
-                     gmail_id)
+                     gmail_id, account_name)
                     VALUES
                     (:message_id, :thread_id, :subject, :normalised_subject, :from_address, :from_name,
                      :to_addresses, :cc_addresses, :date, :body_text, :body_html,
                      :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at,
-                     :gmail_id)""",
+                     :gmail_id, :account_name)""",
                     row,
                 )
                 # Populate email_references
@@ -306,17 +353,18 @@ def _sync_incremental(
                 em = parse_raw_email(raw_bytes, folder=label_folder)
                 row = email_to_db_row(em)
                 row["gmail_id"] = msg_id
+                row["account_name"] = config.name
                 conn.execute(
                     """INSERT OR IGNORE INTO emails
                     (message_id, thread_id, subject, normalised_subject, from_address, from_name,
                      to_addresses, cc_addresses, date, body_text, body_html,
                      raw_headers, folder, size_bytes, has_attachments, fetched_at,
-                     gmail_id)
+                     gmail_id, account_name)
                     VALUES
                     (:message_id, :thread_id, :subject, :normalised_subject, :from_address, :from_name,
                      :to_addresses, :cc_addresses, :date, :body_text, :body_html,
                      :raw_headers, :folder, :size_bytes, :has_attachments, :fetched_at,
-                     :gmail_id)""",
+                     :gmail_id, :account_name)""",
                     row,
                 )
                 # Populate email_references

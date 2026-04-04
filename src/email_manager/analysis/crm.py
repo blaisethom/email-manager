@@ -24,15 +24,13 @@ def build_crm(conn: sqlite3.Connection) -> int:
         GROUP BY from_address
     """)
 
-    # Update counts for existing contacts
+    # Update counts and names for existing contacts
     conn.execute("""
         UPDATE contacts SET
             name = COALESCE(
                 (SELECT from_name FROM emails WHERE from_address = contacts.email AND from_name IS NOT NULL ORDER BY date DESC LIMIT 1),
                 contacts.name
             ),
-            first_seen = (SELECT MIN(date) FROM emails WHERE from_address = contacts.email),
-            last_seen = (SELECT MAX(date) FROM emails WHERE from_address = contacts.email),
             received_count = (SELECT COUNT(*) FROM emails WHERE from_address = contacts.email)
     """)
 
@@ -42,14 +40,24 @@ def build_crm(conn: sqlite3.Connection) -> int:
 
     for contact in all_contacts:
         email_addr = contact["email"]
+        like_pattern = f'%"{email_addr}"%'
+
         # Count emails where this contact is in to_addresses or cc_addresses
         sent = fetchone(
             conn,
             """SELECT COUNT(*) as cnt FROM emails
                WHERE to_addresses LIKE ? OR cc_addresses LIKE ?""",
-            (f'%"{email_addr}"%', f'%"{email_addr}"%'),
+            (like_pattern, like_pattern),
         )
         sent_count = sent["cnt"] if sent else 0
+
+        # Get accurate first/last seen across all roles (sender + recipient)
+        dates = fetchone(
+            conn,
+            """SELECT MIN(date) as first_seen, MAX(date) as last_seen FROM emails
+               WHERE from_address = ? OR to_addresses LIKE ? OR cc_addresses LIKE ?""",
+            (email_addr, like_pattern, like_pattern),
+        )
 
         total = (contact.get("received_count") or 0) + sent_count
 
@@ -58,9 +66,11 @@ def build_crm(conn: sqlite3.Connection) -> int:
         company = _domain_to_company(domain) if domain else None
 
         conn.execute(
-            """UPDATE contacts SET sent_count = ?, email_count = ?, company = COALESCE(company, ?)
+            """UPDATE contacts SET sent_count = ?, email_count = ?,
+               first_seen = ?, last_seen = ?, company = COALESCE(company, ?)
                WHERE id = ?""",
-            (sent_count, total, company, contact["id"]),
+            (sent_count, total, dates["first_seen"], dates["last_seen"],
+             company, contact["id"]),
         )
         updated += 1
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS emails (
     size_bytes      INTEGER,
     has_attachments INTEGER DEFAULT 0,
     fetched_at      TEXT NOT NULL,
-    gmail_id        TEXT
+    gmail_id        TEXT,
+    account_name    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
@@ -84,17 +85,24 @@ CREATE TABLE IF NOT EXISTS email_projects (
     PRIMARY KEY (email_id, project_id)
 );
 
-CREATE TABLE IF NOT EXISTS entities (
+CREATE TABLE IF NOT EXISTS companies (
     id              INTEGER PRIMARY KEY,
-    email_id        INTEGER REFERENCES emails(id),
-    entity_type     TEXT NOT NULL,
-    value           TEXT NOT NULL,
-    context         TEXT,
-    confidence      REAL
+    name            TEXT NOT NULL,
+    domain          TEXT UNIQUE NOT NULL,
+    email_count     INTEGER DEFAULT 0,
+    first_seen      TEXT,
+    last_seen       TEXT,
+    homepage_fetched_at TEXT,
+    description     TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
-CREATE INDEX IF NOT EXISTS idx_entities_value ON entities(value);
+CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
+
+CREATE TABLE IF NOT EXISTS company_contacts (
+    company_id      INTEGER REFERENCES companies(id),
+    contact_email   TEXT NOT NULL,
+    PRIMARY KEY (company_id, contact_email)
+);
 
 CREATE TABLE IF NOT EXISTS pipeline_runs (
     id              INTEGER PRIMARY KEY,
@@ -135,6 +143,57 @@ CREATE TABLE IF NOT EXISTS contact_memories (
     generated_at    TEXT,
     emails_hash     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS company_labels (
+    company_id      INTEGER REFERENCES companies(id),
+    label           TEXT NOT NULL,
+    confidence      REAL,
+    reasoning       TEXT,
+    model_used      TEXT,
+    assigned_at     TEXT,
+    PRIMARY KEY (company_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS idx_company_labels_label ON company_labels(label);
+
+CREATE TABLE IF NOT EXISTS discussions (
+    id              INTEGER PRIMARY KEY,
+    title           TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    current_state   TEXT,
+    company_id      INTEGER REFERENCES companies(id),
+    summary         TEXT,
+    participants    TEXT,
+    first_seen      TEXT,
+    last_seen       TEXT,
+    model_used      TEXT,
+    updated_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_discussions_company ON discussions(company_id);
+CREATE INDEX IF NOT EXISTS idx_discussions_category ON discussions(category);
+CREATE INDEX IF NOT EXISTS idx_discussions_state ON discussions(current_state);
+
+CREATE TABLE IF NOT EXISTS discussion_threads (
+    discussion_id   INTEGER REFERENCES discussions(id),
+    thread_id       TEXT NOT NULL,
+    PRIMARY KEY (discussion_id, thread_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_discussion_threads_thread ON discussion_threads(thread_id);
+
+CREATE TABLE IF NOT EXISTS discussion_state_history (
+    id              INTEGER PRIMARY KEY,
+    discussion_id   INTEGER REFERENCES discussions(id),
+    state           TEXT NOT NULL,
+    entered_at      TEXT,
+    reasoning       TEXT,
+    model_used      TEXT,
+    detected_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dsh_discussion ON discussion_state_history(discussion_id);
+CREATE INDEX IF NOT EXISTS idx_dsh_state ON discussion_state_history(state);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -178,6 +237,55 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.commit()
     if current_version < 3:
         _migrate_to_v3(conn)
+    if current_version < 4:
+        _migrate_to_v4(conn)
+    if current_version < 5:
+        _migrate_to_v5(conn)
+    if current_version < 6:
+        _migrate_to_v6(conn)
+    if current_version < 7:
+        _migrate_to_v7(conn)
+    if current_version < 8:
+        _migrate_to_v8(conn)
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """Migration v3 -> v4: add account_name column to emails."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(emails)").fetchall()}
+    if "account_name" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN account_name TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_account ON emails(account_name)")
+
+    # Backfill: emails with gmail_id came from a gmail account.
+    # Match them to accounts via sync_state keys (gmail:<name>).
+    gmail_states = conn.execute(
+        "SELECT folder FROM sync_state WHERE folder LIKE 'gmail:%'"
+    ).fetchall()
+    if gmail_states:
+        # If there's only one gmail account, assign all gmail emails to it
+        gmail_names = [r[0].split(":", 1)[1] for r in gmail_states]
+        if len(gmail_names) == 1:
+            conn.execute(
+                "UPDATE emails SET account_name = ? WHERE gmail_id IS NOT NULL AND account_name IS NULL",
+                (gmail_names[0],),
+            )
+        # Multiple gmail accounts — can't reliably guess, leave NULL
+
+    # Backfill IMAP: match by folder name to sync_state entries that aren't gmail
+    imap_folders = conn.execute(
+        "SELECT DISTINCT folder FROM sync_state WHERE folder NOT LIKE 'gmail:%'"
+    ).fetchall()
+    if imap_folders:
+        # IMAP sync_state folder names are just the folder name, shared across accounts.
+        # If there's only one non-gmail account configured, assign all non-gmail emails.
+        # We can't do better without config access in a migration, so keep it simple.
+        pass
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v4] account_name column added")
 
 
 def _migrate_to_v3(conn: sqlite3.Connection) -> None:
@@ -269,6 +377,113 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     print("  [migration v3] complete")
+
+
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """Migration v4 -> v5: replace entities table with companies + company_contacts."""
+    conn.execute("DROP TABLE IF EXISTS entities")
+    conn.execute("""CREATE TABLE IF NOT EXISTS companies (
+        id              INTEGER PRIMARY KEY,
+        name            TEXT NOT NULL,
+        domain          TEXT UNIQUE NOT NULL,
+        email_count     INTEGER DEFAULT 0,
+        first_seen      TEXT,
+        last_seen       TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS company_contacts (
+        company_id      INTEGER REFERENCES companies(id),
+        contact_email   TEXT NOT NULL,
+        PRIMARY KEY (company_id, contact_email)
+    )""")
+    # Clear extract_base pipeline runs so companies get rebuilt
+    conn.execute("DELETE FROM pipeline_runs WHERE stage = 'extract_base'")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v5] entities table replaced with companies + company_contacts")
+
+
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    """Migration v5 -> v6: add homepage_fetched_at to companies, add company_labels table."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(companies)").fetchall()}
+    if "homepage_fetched_at" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN homepage_fetched_at TEXT")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS company_labels (
+        company_id      INTEGER REFERENCES companies(id),
+        label           TEXT NOT NULL,
+        confidence      REAL,
+        reasoning       TEXT,
+        model_used      TEXT,
+        assigned_at     TEXT,
+        PRIMARY KEY (company_id, label)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_company_labels_label ON company_labels(label)")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v6] homepage columns and company_labels table added")
+
+
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    """Migration v6 -> v7: add description column to companies."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(companies)").fetchall()}
+    if "description" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN description TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v7] description column added to companies")
+
+
+def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+    """Migration v7 -> v8: add discussions, discussion_threads, discussion_state_history tables."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS discussions (
+        id              INTEGER PRIMARY KEY,
+        title           TEXT NOT NULL,
+        category        TEXT NOT NULL,
+        current_state   TEXT,
+        company_id      INTEGER REFERENCES companies(id),
+        summary         TEXT,
+        participants    TEXT,
+        first_seen      TEXT,
+        last_seen       TEXT,
+        model_used      TEXT,
+        updated_at      TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_discussions_company ON discussions(company_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_discussions_category ON discussions(category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_discussions_state ON discussions(current_state)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS discussion_threads (
+        discussion_id   INTEGER REFERENCES discussions(id),
+        thread_id       TEXT NOT NULL,
+        PRIMARY KEY (discussion_id, thread_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_discussion_threads_thread ON discussion_threads(thread_id)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS discussion_state_history (
+        id              INTEGER PRIMARY KEY,
+        discussion_id   INTEGER REFERENCES discussions(id),
+        state           TEXT NOT NULL,
+        entered_at      TEXT,
+        reasoning       TEXT,
+        model_used      TEXT,
+        detected_at     TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dsh_discussion ON discussion_state_history(discussion_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dsh_state ON discussion_state_history(state)")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v8] discussions tables added")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:

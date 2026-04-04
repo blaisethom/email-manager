@@ -12,7 +12,7 @@ class ClaudeCLIBackend:
 
     @property
     def model_name(self) -> str:
-        return self._model or "claude-cli"
+        return self._model or "claude-cli (default model)"
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
         return self._run_claude(system, user)
