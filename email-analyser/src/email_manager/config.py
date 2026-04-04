@@ -22,8 +22,8 @@ class EmailAccount(BaseModel):
     imap_folders: list[str] = Field(default_factory=lambda: ["INBOX", "Sent"])
 
     # Gmail API
-    gmail_credentials_path: Path = Path("data/gmail_credentials.json")
-    gmail_token_path: Path = Path("data/gmail_token.json")
+    gmail_credentials_path: Path = Path("../data/gmail_credentials.json")
+    gmail_token_path: Path = Path("../data/gmail_token.json")
     gmail_labels: list[str] = Field(default_factory=list)
 
 
@@ -45,8 +45,8 @@ class Config(BaseSettings):
     imap_port: int = 993
     imap_use_ssl: bool = True
     imap_folders: list[str] = Field(default_factory=lambda: ["INBOX", "Sent"])
-    gmail_credentials_path: Path = Path("data/gmail_credentials.json")
-    gmail_token_path: Path = Path("data/gmail_token.json")
+    gmail_credentials_path: Path = Path("../data/gmail_credentials.json")
+    gmail_token_path: Path = Path("../data/gmail_token.json")
     gmail_labels: list[str] = Field(default_factory=list)
 
     # AI
@@ -60,7 +60,7 @@ class Config(BaseSettings):
     # Memory
     memory_backend: str = "both"  # "sqlite", "markdown", or "both"
     memory_strategy: str = "default"  # "default" or "detailed"
-    memory_dir: Path = Path("data/memories")
+    memory_dir: Path = Path("../data/memories")
 
     # Company labels
     company_labels_path: Path | None = None  # path to company_labels.yaml/.json
@@ -70,7 +70,7 @@ class Config(BaseSettings):
     discussion_categories_path: Path | None = None  # path to discussion_categories.yaml
 
     # Database
-    db_path: Path = Path("data/email_manager.db")
+    db_path: Path = Path("../data/email_manager.db")
 
     # Accounts config file
     accounts_path: Path = Path("accounts.json")

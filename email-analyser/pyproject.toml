@@ -31,7 +31,7 @@ dev = [
 ]
 
 [project.scripts]
-email-manager = "email_manager.cli:cli"
+email-analyser = "email_manager.cli:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/email_manager"]
