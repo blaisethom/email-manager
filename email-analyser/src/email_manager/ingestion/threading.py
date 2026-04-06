@@ -233,19 +233,54 @@ def _find_thread_for_email(
         winner = _merge_threads(conn, found_thread_ids, dirty_threads)
         return winner
 
-    # Fallback: subject matching within time window
+    # Fallback: subject matching within time window, requiring participant overlap
     if norm_subj:
-        row = conn.execute(
-            """SELECT thread_id FROM emails
+        # Collect participants of this email
+        addr_row = conn.execute(
+            "SELECT from_address, to_addresses, cc_addresses FROM emails WHERE id = ?",
+            (email_id,),
+        ).fetchone()
+        my_addrs: set[str] = set()
+        if addr_row:
+            if addr_row["from_address"]:
+                my_addrs.add(addr_row["from_address"].lower())
+            for field in ("to_addresses", "cc_addresses"):
+                val = addr_row[field]
+                if val:
+                    try:
+                        for a in json.loads(val):
+                            if a:
+                                my_addrs.add(a.lower())
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+        # Find candidate threads with matching subject within time window
+        candidates = conn.execute(
+            """SELECT thread_id, from_address, to_addresses, cc_addresses FROM emails
                WHERE normalised_subject = ?
                  AND thread_id IS NOT NULL
                  AND ABS(julianday(?) - julianday(date)) <= ?
                ORDER BY date DESC
-               LIMIT 1""",
+               LIMIT 20""",
             (norm_subj, email_date, SUBJECT_WINDOW_DAYS),
-        ).fetchone()
-        if row:
-            return row["thread_id"]
+        ).fetchall()
+
+        for cand in candidates:
+            cand_addrs: set[str] = set()
+            if cand["from_address"]:
+                cand_addrs.add(cand["from_address"].lower())
+            for field in ("to_addresses", "cc_addresses"):
+                val = cand[field]
+                if val:
+                    try:
+                        for a in json.loads(val):
+                            if a:
+                                cand_addrs.add(a.lower())
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            # Require at least one participant in common
+            if my_addrs & cand_addrs:
+                return cand["thread_id"]
 
     # No match — start a new thread
     return message_id
@@ -366,14 +401,17 @@ def _build_union_find(
         f"  [dim]Phase 1 complete: linked {ref_count:,} references[/dim]"
     )
 
-    # Phase 2: Subject-based fallback grouping
+    # Phase 2: Subject-based fallback grouping (with participant overlap check)
     task = progress.add_task("Grouping by subject", total=total)
 
-    subject_groups: dict[str, list[tuple[str, str]]] = {}
+    # Collect unlinked emails with their subject, date, and participants
+    subject_groups: dict[str, list[tuple[str, str, set[str]]]] = {}
     offset = 0
     while True:
         rows = conn.execute(
-            "SELECT message_id, normalised_subject, date FROM emails ORDER BY id LIMIT ? OFFSET ?",
+            """SELECT message_id, normalised_subject, date,
+                      from_address, to_addresses, cc_addresses
+               FROM emails ORDER BY id LIMIT ? OFFSET ?""",
             (BATCH_SIZE, offset),
         ).fetchall()
         if not rows:
@@ -385,13 +423,25 @@ def _build_union_find(
             msg_id = row["message_id"]
             root = uf.find(msg_id)
             if root == msg_id:  # not linked to anything yet
+                addrs: set[str] = set()
+                if row["from_address"]:
+                    addrs.add(row["from_address"].lower())
+                for field in ("to_addresses", "cc_addresses"):
+                    val = row[field]
+                    if val:
+                        try:
+                            for a in json.loads(val):
+                                if a:
+                                    addrs.add(a.lower())
+                        except (json.JSONDecodeError, TypeError):
+                            pass
                 subject_groups.setdefault(norm_subj, []).append(
-                    (msg_id, row["date"])
+                    (msg_id, row["date"], addrs)
                 )
         progress.update(task, advance=len(rows))
         offset += BATCH_SIZE
 
-    # Link within subject groups using time window
+    # Link within subject groups using time window AND participant overlap
     for _subj, msgs in subject_groups.items():
         if len(msgs) < 2:
             continue
@@ -400,10 +450,12 @@ def _build_union_find(
             try:
                 d1 = datetime.fromisoformat(msgs[i - 1][1])
                 d2 = datetime.fromisoformat(msgs[i][1])
-                if abs((d2 - d1).days) <= SUBJECT_WINDOW_DAYS:
+                if abs((d2 - d1).days) <= SUBJECT_WINDOW_DAYS and (msgs[i - 1][2] & msgs[i][2]):
                     uf.union(msgs[i - 1][0], msgs[i][0])
             except (ValueError, TypeError):
-                uf.union(msgs[i - 1][0], msgs[i][0])
+                # On date parse failure, still require participant overlap
+                if msgs[i - 1][2] & msgs[i][2]:
+                    uf.union(msgs[i - 1][0], msgs[i][0])
 
     progress.remove_task(task)
     progress.console.print(

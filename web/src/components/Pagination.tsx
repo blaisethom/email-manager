@@ -26,8 +26,8 @@ export default function Pagination({ page, total, limit, onPageChange }: Paginat
   }
 
   return (
-    <div className="flex items-center justify-between px-1 py-3">
-      <p className="text-sm text-slate-500">
+    <div className="flex flex-col sm:flex-row items-center justify-between gap-2 px-1 py-3">
+      <p className="text-sm text-slate-500 hidden sm:block">
         Showing <span className="font-medium text-slate-700">{start}</span>–
         <span className="font-medium text-slate-700">{end}</span> of{' '}
         <span className="font-medium text-slate-700">{total.toLocaleString()}</span>

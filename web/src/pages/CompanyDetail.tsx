@@ -1,9 +1,65 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import type { CompanyDetail, CompanyLabel, DiscussionSummary } from '../types';
 import Badge from '../components/Badge';
+import Markdown from '../components/Markdown';
 import { formatDate } from '../utils';
+
+function HomepageModal({ companyId, onClose }: { companyId: number; onClose: () => void }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.getCompanyHomepage(companyId)
+      .then((data) => setContent(data.content))
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [companyId]);
+
+  const handleBackdropClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) onClose();
+  }, [onClose]);
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={handleBackdropClick}
+    >
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+          <h2 className="text-lg font-semibold text-slate-900">Homepage Content</h2>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-600 transition-colors text-xl leading-none"
+          >
+            &times;
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading ? (
+            <div className="animate-pulse space-y-3">
+              <div className="h-4 bg-slate-200 rounded w-3/4" />
+              <div className="h-4 bg-slate-200 rounded w-full" />
+              <div className="h-4 bg-slate-200 rounded w-5/6" />
+            </div>
+          ) : error ? (
+            <p className="text-red-600 text-sm">{error}</p>
+          ) : (
+            <Markdown>{content ?? ''}</Markdown>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -76,6 +132,7 @@ export default function CompanyDetailPage() {
   const [data, setData] = useState<CompanyDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showHomepage, setShowHomepage] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -90,7 +147,7 @@ export default function CompanyDetailPage() {
 
   if (loading) {
     return (
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         <div className="animate-pulse space-y-4">
           <div className="h-4 bg-slate-200 rounded w-24" />
           <div className="h-8 bg-slate-200 rounded w-64" />
@@ -102,7 +159,7 @@ export default function CompanyDetailPage() {
 
   if (error || !data) {
     return (
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         <button onClick={() => navigate('/companies')} className="btn-secondary mb-6">
           ← Back
         </button>
@@ -114,7 +171,7 @@ export default function CompanyDetailPage() {
   }
 
   return (
-    <div className="p-8 max-w-5xl">
+    <div className="p-4 sm:p-8 max-w-5xl">
       {/* Back */}
       <button
         onClick={() => navigate('/companies')}
@@ -148,10 +205,17 @@ export default function CompanyDetailPage() {
         <StatCard label="Emails" value={data.email_count.toLocaleString()} />
         <StatCard label="First seen" value={formatDate(data.first_seen)} />
         <StatCard label="Last active" value={formatDate(data.last_seen)} />
-        <StatCard
-          label="Homepage"
-          value={data.homepage_fetched_at ? 'Fetched' : 'Not fetched'}
-        />
+        {data.homepage_fetched_at ? (
+          <button
+            onClick={() => setShowHomepage(true)}
+            className="bg-slate-50 rounded-lg px-4 py-3 text-left hover:bg-slate-100 transition-colors cursor-pointer"
+          >
+            <div className="text-xs text-slate-500 font-medium uppercase tracking-wider mb-1">Homepage</div>
+            <div className="text-lg font-semibold text-blue-600">Fetched ↗</div>
+          </button>
+        ) : (
+          <StatCard label="Homepage" value="Not fetched" />
+        )}
       </div>
 
       {/* Labels */}
@@ -220,6 +284,10 @@ export default function CompanyDetailPage() {
             ))}
           </div>
         </div>
+      )}
+
+      {showHomepage && data && (
+        <HomepageModal companyId={data.id} onClose={() => setShowHomepage(false)} />
       )}
     </div>
   );

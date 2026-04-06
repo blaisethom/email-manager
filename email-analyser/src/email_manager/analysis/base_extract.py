@@ -313,7 +313,16 @@ def _domain_to_company(domain: str) -> str | None:
     }
     if domain.lower() in free_providers:
         return None
+    # Two-level TLDs where the second-level part is generic (e.g. .com.au, .co.uk)
+    _SECOND_LEVEL = {
+        "com", "co", "org", "net", "edu", "gov", "ac", "mil",
+        "gen", "biz", "info", "nom", "sch", "nhs",
+    }
     parts = domain.split(".")
+    # For domains like fourhats.com.au: parts = [fourhats, com, au]
+    # If second-to-last part is a generic SLD, take the part before it
+    if len(parts) >= 3 and parts[-2].lower() in _SECOND_LEVEL:
+        return parts[-3].capitalize()
     if len(parts) >= 2:
         return parts[-2].capitalize()
     return domain

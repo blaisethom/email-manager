@@ -111,6 +111,7 @@ Rules:
 4. Base your assessment on the email content, tone, direction of communication, and homepage content.
 5. If the homepage is unavailable, rely on email evidence alone.
 6. Also provide a 1-2 line description of what the company does.
+7. Extract the official company name as it appears on the homepage or in emails (e.g. "Four Hats" not "Fourhats", "DeepMind" not "Deepmind"). If you cannot determine it, set "company_name" to null.
 
 Respond with JSON only."""
 
@@ -136,6 +137,7 @@ Recent email exchanges:
 
 Respond with this exact JSON structure:
 {{
+  "company_name": "Official Company Name or null if unknown",
   "company_description": "1-2 line description of what the company does",
   "labels": [
     {{"label": "label-name", "confidence": 0.85, "reasoning": "Brief explanation"}}
@@ -203,6 +205,7 @@ def label_companies(
     on_progress: Callable[[int, int, str], None] | None = None,
     limit: int | None = None,
     force: bool = False,
+    company_domain: str | None = None,
 ) -> int:
     """Assign relationship labels to companies using AI."""
     if labels_config is None:
@@ -212,18 +215,33 @@ def label_companies(
     valid_label_names = {l["name"] for l in labels_config}
 
     # Find companies that haven't been labelled yet (or all if force)
-    if force:
+    if company_domain:
+        # Scope to a single company by domain or name
+        row = fetchone(
+            conn,
+            "SELECT id, name, domain FROM companies WHERE domain = ? COLLATE NOCASE",
+            (company_domain,),
+        )
+        if not row:
+            row = fetchone(
+                conn,
+                "SELECT id, name, domain FROM companies WHERE name LIKE ? COLLATE NOCASE",
+                (f"%{company_domain}%",),
+            )
+        companies = [row] if row else []
+    elif force:
         sql = "SELECT id, name, domain FROM companies ORDER BY email_count DESC"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        companies = fetchall(conn, sql)
     else:
         sql = """SELECT c.id, c.name, c.domain FROM companies c
                  LEFT JOIN company_labels cl ON c.id = cl.company_id
                  WHERE cl.company_id IS NULL
                  ORDER BY c.email_count DESC"""
-
-    if limit:
-        sql += f" LIMIT {int(limit)}"
-
-    companies = fetchall(conn, sql)
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        companies = fetchall(conn, sql)
     if not companies:
         return 0
 
@@ -258,11 +276,22 @@ def label_companies(
 
         assigned_labels = result.get("labels", [])
         company_description = result.get("company_description", "")
+        company_name = result.get("company_name")
 
+        # Update name and/or description
+        updates = []
+        params = []
+        if company_name and isinstance(company_name, str) and company_name.lower() != "null":
+            updates.append("name = ?")
+            params.append(company_name.strip())
         if company_description:
+            updates.append("description = ?")
+            params.append(company_description.strip())
+        if updates:
+            params.append(company["id"])
             conn.execute(
-                "UPDATE companies SET description = ? WHERE id = ?",
-                (company_description.strip(), company["id"]),
+                f"UPDATE companies SET {', '.join(updates)} WHERE id = ?",
+                params,
             )
 
         # Clear old labels if force

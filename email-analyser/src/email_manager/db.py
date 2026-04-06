@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 12
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -195,6 +195,57 @@ CREATE TABLE IF NOT EXISTS discussion_state_history (
 CREATE INDEX IF NOT EXISTS idx_dsh_discussion ON discussion_state_history(discussion_id);
 CREATE INDEX IF NOT EXISTS idx_dsh_state ON discussion_state_history(state);
 
+CREATE TABLE IF NOT EXISTS actions (
+    id              INTEGER PRIMARY KEY,
+    discussion_id   INTEGER REFERENCES discussions(id),
+    description     TEXT NOT NULL,
+    assignee_emails TEXT,
+    target_date     TEXT,
+    status          TEXT DEFAULT 'open',
+    source_date     TEXT,
+    completed_date  TEXT,
+    model_used      TEXT,
+    detected_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_actions_discussion ON actions(discussion_id);
+CREATE INDEX IF NOT EXISTS idx_actions_status ON actions(status);
+
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id              INTEGER PRIMARY KEY,
+    event_id        TEXT UNIQUE NOT NULL,
+    calendar_id     TEXT NOT NULL DEFAULT 'primary',
+    account_name    TEXT,
+    title           TEXT,
+    description     TEXT,
+    location        TEXT,
+    start_time      TEXT NOT NULL,
+    end_time        TEXT NOT NULL,
+    all_day         INTEGER DEFAULT 0,
+    status          TEXT,
+    organizer_email TEXT,
+    attendees       TEXT,
+    html_link       TEXT,
+    recurring_event_id TEXT,
+    created_at      TEXT,
+    updated_at      TEXT,
+    fetched_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_time);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_end ON calendar_events(end_time);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_account ON calendar_events(account_name);
+
+CREATE TABLE IF NOT EXISTS discussion_events (
+    discussion_id   INTEGER REFERENCES discussions(id),
+    event_id        INTEGER REFERENCES calendar_events(id),
+    match_score     REAL,
+    match_reason    TEXT,
+    PRIMARY KEY (discussion_id, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_discussion_events_event ON discussion_events(event_id);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -247,6 +298,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v7(conn)
     if current_version < 8:
         _migrate_to_v8(conn)
+    if current_version < 9:
+        _migrate_to_v9(conn)
+    if current_version < 10:
+        _migrate_to_v10(conn)
+    if current_version < 11:
+        _migrate_to_v11(conn)
+    if current_version < 12:
+        _migrate_to_v12(conn)
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
@@ -484,6 +543,110 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     print("  [migration v8] discussions tables added")
+
+
+def _migrate_to_v9(conn: sqlite3.Connection) -> None:
+    """Migration v8 -> v9: add actions table."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS actions (
+        id              INTEGER PRIMARY KEY,
+        discussion_id   INTEGER REFERENCES discussions(id),
+        description     TEXT NOT NULL,
+        assignee_emails TEXT,
+        target_date     TEXT,
+        status          TEXT DEFAULT 'open',
+        source_date     TEXT,
+        completed_date  TEXT,
+        model_used      TEXT,
+        detected_at     TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_actions_discussion ON actions(discussion_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_actions_status ON actions(status)")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v9] actions table added")
+
+
+def _migrate_to_v10(conn: sqlite3.Connection) -> None:
+    """Migration v9 -> v10: add completed_date column to actions."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(actions)").fetchall()}
+    if "completed_date" not in cols:
+        conn.execute("ALTER TABLE actions ADD COLUMN completed_date TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v10] completed_date column added to actions")
+
+
+def _migrate_to_v11(conn: sqlite3.Connection) -> None:
+    """Migration v10 -> v11: rename assignee_email to assignee_emails (JSON array)."""
+    import json as _json
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(actions)").fetchall()}
+    if "assignee_email" in cols and "assignee_emails" not in cols:
+        conn.execute("ALTER TABLE actions ADD COLUMN assignee_emails TEXT")
+        # Migrate existing data: wrap single email in a JSON array
+        rows = conn.execute("SELECT id, assignee_email FROM actions WHERE assignee_email IS NOT NULL AND assignee_email != ''").fetchall()
+        for r in rows:
+            conn.execute(
+                "UPDATE actions SET assignee_emails = ? WHERE id = ?",
+                (_json.dumps([r[1]]), r[0]),
+            )
+    conn.execute("DROP INDEX IF EXISTS idx_actions_assignee")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v11] assignee_email migrated to assignee_emails (JSON array)")
+
+
+def _migrate_to_v12(conn: sqlite3.Connection) -> None:
+    """Migration v11 -> v12: add calendar_events and discussion_events tables."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS calendar_events (
+        id              INTEGER PRIMARY KEY,
+        event_id        TEXT UNIQUE NOT NULL,
+        calendar_id     TEXT NOT NULL DEFAULT 'primary',
+        account_name    TEXT,
+        title           TEXT,
+        description     TEXT,
+        location        TEXT,
+        start_time      TEXT NOT NULL,
+        end_time        TEXT NOT NULL,
+        all_day         INTEGER DEFAULT 0,
+        status          TEXT,
+        organizer_email TEXT,
+        attendees       TEXT,
+        html_link       TEXT,
+        recurring_event_id TEXT,
+        created_at      TEXT,
+        updated_at      TEXT,
+        fetched_at      TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_events_end ON calendar_events(end_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_events_account ON calendar_events(account_name)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS discussion_events (
+        discussion_id   INTEGER REFERENCES discussions(id),
+        event_id        INTEGER REFERENCES calendar_events(id),
+        match_score     REAL,
+        match_reason    TEXT,
+        PRIMARY KEY (discussion_id, event_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_discussion_events_event ON discussion_events(event_id)")
+
+    # Add sync_token column to sync_state for calendar sync tokens (strings)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sync_state)").fetchall()}
+    if "sync_token" not in cols:
+        conn.execute("ALTER TABLE sync_state ADD COLUMN sync_token TEXT")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v12] calendar_events and discussion_events tables added")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:

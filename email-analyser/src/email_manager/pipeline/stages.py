@@ -63,7 +63,7 @@ def run_fetch_homepages(conn: sqlite3.Connection, backend: LLMBackend, config: C
     return fetch_homepages(conn, console=console or Console(), limit=limit, max_workers=config.homepage_max_workers)
 
 
-def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
+def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
     from email_manager.analysis.company_labels import label_companies, load_label_config
 
     console = console or Console()
@@ -77,7 +77,7 @@ def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: C
             progress.update(task, completed=done, total=total or 0, description=desc)
             logger.info("label_companies: %d/%d — %s", done, total, name)
 
-        return label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force)
+        return label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company)
 
 
 def run_contact_memory(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
@@ -131,6 +131,25 @@ def run_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Confi
         )
 
 
+def run_sync_calendar(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
+    from email_manager.ingestion.calendar_client import sync_calendar_events
+
+    console = console or Console()
+    total = 0
+    for acct in config.get_accounts():
+        if acct.backend == "gmail":
+            label = acct.name or "gmail"
+            console.print(f"  Syncing calendar for: {label}")
+            total += sync_calendar_events(conn, acct, console=console)
+    return total
+
+
+def run_link_calendar(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
+    from email_manager.analysis.calendar_links import link_calendar_events
+
+    return link_calendar_events(conn, console=console or Console(), limit=limit)
+
+
 ALL_STAGES = {
     "extract_base": run_extract_base,
     "fetch_homepages": run_fetch_homepages,
@@ -139,4 +158,6 @@ ALL_STAGES = {
     "summarise_threads": run_summarise_threads,
     "label_companies": run_label_companies,
     "discussions": run_discussions,
+    "sync_calendar": run_sync_calendar,
+    "link_calendar": run_link_calendar,
 }

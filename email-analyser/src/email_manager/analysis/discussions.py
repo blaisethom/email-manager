@@ -24,26 +24,31 @@ DEFAULT_CATEGORIES = [
         "name": "scheduling",
         "description": "Scheduling a meeting, call, or event",
         "states": ["proposed", "confirmed", "completed", "cancelled"],
+        "terminal_states": ["completed", "cancelled"],
     },
     {
         "name": "contract-negotiation",
         "description": "Negotiating terms of a contract or agreement",
         "states": ["initial_draft", "redlines", "final_review", "signed", "abandoned"],
+        "terminal_states": ["signed", "abandoned"],
     },
     {
         "name": "vendor-selection",
         "description": "Evaluating and selecting a vendor or service provider",
         "states": ["research", "shortlisted", "evaluating", "selected", "onboarded", "rejected"],
+        "terminal_states": ["onboarded", "rejected"],
     },
     {
         "name": "internal-decision",
         "description": "Internal process or decision-making discussion",
         "states": ["raised", "under_discussion", "decided", "implemented", "deferred"],
+        "terminal_states": ["implemented", "deferred"],
     },
     {
         "name": "other",
         "description": "Discussion that does not fit any other category",
         "states": ["active", "resolved", "stalled"],
+        "terminal_states": ["resolved"],
     },
 ]
 
@@ -88,8 +93,12 @@ def load_category_config(config_path: Path | None = None) -> list[dict[str, Any]
 def _build_system_prompt(categories: list[dict[str, Any]]) -> str:
     cat_block = ""
     for cat in categories:
-        states_str = " → ".join(cat["states"])
-        cat_block += f'- "{cat["name"]}": {cat["description"]}\n  States: {states_str}\n'
+        terminal = set(cat.get("terminal_states", []))
+        states_parts = []
+        for s in cat["states"]:
+            states_parts.append(f"{s}*" if s in terminal else s)
+        states_str = " → ".join(states_parts)
+        cat_block += f'- "{cat["name"]}": {cat["description"]}\n  States: {states_str}  (* = terminal)\n'
 
     return f"""You are a discussion extraction system. Given email threads found via a company, identify distinct discussions and classify each into a category with its current state.
 
@@ -105,6 +114,17 @@ Rules:
 7. List all participants (email addresses) for each discussion. Select from the provided list of email addresses found in the threads.
 8. States are ordered — earlier states come before later ones in time. Some states are terminal exits (e.g. lost, abandoned, cancelled) that can be reached from any prior state.
 9. For each discussion, identify the most relevant external company domain (not the account owner's domain). A thread may contain conversations with multiple companies — assign each discussion to the company it is primarily about, using "company_domain".
+10. For each discussion, extract any actions/tasks that are required. An action is something a specific person has been asked to do, has committed to doing, or clearly needs to do. For each action include:
+    - A clear description of what needs to be done — this should describe the TASK ITSELF, not who does it
+    - The email addresses of ALL people responsible or involved in the action (as a JSON array). Include both the person who needs to do it and any key participants (e.g. for "schedule a meeting between A and B", include both A and B)
+    - The target/due date if one is mentioned or implied (YYYY-MM-DD format), or null if not specified
+    - The status: "open" if the action is still pending, "done" if it has been completed based on the email evidence
+    - The approximate date the action was identified/requested (YYYY-MM-DD format)
+    - If the action is done, the approximate date it was completed (YYYY-MM-DD format), or null if unknown
+    IMPORTANT: Consolidate related actions into a single action. If multiple emails refer to the same underlying task (e.g. scheduling the same meeting, sharing the same document), emit it ONCE with the most complete information. Do NOT create separate actions for each email mentioning the same task. For example, if email 1 says "let's schedule a call" and email 2 says "how about Tuesday?", that is ONE action, not two.
+    Extract actions from ALL emails, including historical ones. Even if an action was requested and completed long ago, include it with status "done" and the completed_date. This builds a complete history of what was asked and delivered.
+    Only include concrete, actionable items — not vague intentions. If no actions are evident, return an empty actions list.
+    When updating existing discussions that already have actions, preserve all existing actions and update their status if you see evidence of completion. Add any new actions found in the current batch of emails.
 
 Respond with JSON only."""
 
@@ -136,9 +156,19 @@ def _build_user_prompt(
                 state_hist = f" history=[{transitions}]"
             company_dom = d.get("company_domain", "")
             company_info = f' company={company_dom}' if company_dom else ""
+            actions_info = ""
+            if d.get("actions"):
+                action_parts = []
+                for a in d["actions"]:
+                    assignees = a.get("assignee_emails") or "?"
+                    a_str = f'{a["status"]}: "{a["description"]}" -> {assignees}'
+                    if a.get("completed_date"):
+                        a_str += f' (completed {a["completed_date"]})'
+                    action_parts.append(a_str)
+                actions_info = f' actions=[{"; ".join(action_parts)}]'
             existing_block += (
                 f'- ID {d["id"]}: "{d["title"]}" [{d["category"]}] '
-                f'state={d["current_state"]}{state_hist}{company_info} threads={d["thread_ids"]}\n'
+                f'state={d["current_state"]}{state_hist}{company_info} threads={d["thread_ids"]}{actions_info}\n'
             )
 
     addresses_block = ""
@@ -172,6 +202,16 @@ Respond with this exact JSON structure:
           "date": "YYYY-MM-DD",
           "evidence_summary": "Brief description of what email shows this state"
         }}
+      ],
+      "actions": [
+        {{
+          "description": "What needs to be done",
+          "assignee_emails": ["person1@example.com", "person2@example.com"],
+          "target_date": "YYYY-MM-DD or null",
+          "status": "open or done",
+          "source_date": "YYYY-MM-DD",
+          "completed_date": "YYYY-MM-DD or null"
+        }}
       ]
     }}
   ]
@@ -183,7 +223,8 @@ Notes:
 - Each thread should belong to at most one discussion (but a discussion can span multiple threads).
 - For state_history, include each state transition you can infer from the email content with the approximate date.
 - When updating an existing discussion, include its full updated state_history (existing + new transitions), not just new ones.
-- "company_domain" should be the domain of the external company this discussion is primarily about (not the account owner's domain). For example, if the account owner emails investor@vc-firm.com, the company_domain should be "vc-firm.com"."""
+- "company_domain" should be the domain of the external company this discussion is primarily about (not the account owner's domain). For example, if the account owner emails investor@vc-firm.com, the company_domain should be "vc-firm.com".
+- For "actions": extract concrete tasks/actions from the emails, including historical/completed ones. Each action must have assignee_emails (array) from the participants list — include all people involved in carrying out the action. Consolidate: if the same task is mentioned across multiple emails, emit it only ONCE. Set target_date only if a deadline is mentioned. Set status to "done" if follow-up emails show the action was completed, otherwise "open". Set source_date to the date of the email where the action was first identified. Set completed_date to the date of the email that shows completion (null if still open or completion date unknown). When updating existing discussions, include all their existing actions (update status/completed_date if needed) plus any new ones."""
 
 
 # ── Quote stripping & deduplication ──────────────────────────────────────────
@@ -642,6 +683,12 @@ def dedupe_discussions(conn: sqlite3.Connection, dry_run: bool = True) -> list[t
             (keep_id, remove_id),
         )
 
+        # Move actions
+        conn.execute(
+            "UPDATE actions SET discussion_id = ? WHERE discussion_id = ?",
+            (keep_id, remove_id),
+        )
+
         # Update date range on kept discussion
         conn.execute(
             """UPDATE discussions SET
@@ -656,6 +703,7 @@ def dedupe_discussions(conn: sqlite3.Connection, dry_run: bool = True) -> list[t
         )
 
         # Delete the duplicate
+        conn.execute("DELETE FROM actions WHERE discussion_id = ?", (remove_id,))
         conn.execute("DELETE FROM discussion_threads WHERE discussion_id = ?", (remove_id,))
         conn.execute("DELETE FROM discussion_state_history WHERE discussion_id = ?", (remove_id,))
         conn.execute("DELETE FROM discussions WHERE id = ?", (remove_id,))
@@ -893,6 +941,60 @@ def _save_discussions(
                     (discussion_id, state, entered_at, evidence, model_name, now),
                 )
 
+        # Save actions
+        for action in disc.get("actions", []):
+            description = (action.get("description") or "").strip()
+            if not description:
+                continue
+
+            # Handle assignee_emails — accept both array and legacy single string
+            raw_assignees = action.get("assignee_emails") or action.get("assignee_email")
+            if isinstance(raw_assignees, str):
+                assignee_list = [raw_assignees.strip().lower()] if raw_assignees.strip() else []
+            elif isinstance(raw_assignees, list):
+                assignee_list = [a.strip().lower() for a in raw_assignees if isinstance(a, str) and a.strip()]
+            else:
+                assignee_list = []
+            assignee_emails_json = json.dumps(assignee_list)
+
+            target_date = action.get("target_date") or None
+            if target_date == "null":
+                target_date = None
+            status = (action.get("status") or "open").strip().lower()
+            if status not in ("open", "done"):
+                status = "open"
+            source_date = action.get("source_date") or None
+            completed_date = action.get("completed_date") or None
+            if completed_date == "null":
+                completed_date = None
+
+            # Dedup on discussion + description (the task itself)
+            existing_action = fetchone(
+                conn,
+                """SELECT id FROM actions
+                   WHERE discussion_id = ? AND description = ?""",
+                (discussion_id, description),
+            )
+            if existing_action:
+                # Update status, assignees, target_date, and completed_date
+                conn.execute(
+                    """UPDATE actions SET status = ?,
+                       assignee_emails = ?,
+                       target_date = COALESCE(?, target_date),
+                       completed_date = COALESCE(?, completed_date)
+                       WHERE id = ?""",
+                    (status, assignee_emails_json, target_date, completed_date, existing_action["id"]),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO actions
+                       (discussion_id, description, assignee_emails, target_date, status,
+                        source_date, completed_date, model_used, detected_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (discussion_id, description, assignee_emails_json, target_date, status,
+                     source_date, completed_date, model_name, now),
+                )
+
         saved += 1
 
     return saved
@@ -927,6 +1029,15 @@ def _discussions_to_context(conn: sqlite3.Connection, company_id: int) -> list[d
                ORDER BY entered_at ASC, id ASC""",
             (r["id"],),
         )
+        action_rows = fetchall(
+            conn,
+            """SELECT description, assignee_emails, target_date, status,
+                      source_date, completed_date
+               FROM actions
+               WHERE discussion_id = ?
+               ORDER BY source_date ASC, id ASC""",
+            (r["id"],),
+        )
         result.append({
             "id": r["id"],
             "title": r["title"],
@@ -935,6 +1046,7 @@ def _discussions_to_context(conn: sqlite3.Connection, company_id: int) -> list[d
             "company_domain": r["company_domain"],
             "thread_ids": [t["thread_id"] for t in thread_rows],
             "state_history": [dict(h) for h in history_rows],
+            "actions": [dict(a) for a in action_rows],
         })
     return result
 
@@ -1059,6 +1171,7 @@ def extract_discussions(
                 (company_id,),
             )
             for d in disc_ids:
+                conn.execute("DELETE FROM actions WHERE discussion_id = ?", (d["id"],))
                 conn.execute("DELETE FROM discussion_state_history WHERE discussion_id = ?", (d["id"],))
                 conn.execute("DELETE FROM discussion_threads WHERE discussion_id = ?", (d["id"],))
             conn.execute("DELETE FROM discussions WHERE company_id = ?", (company_id,))

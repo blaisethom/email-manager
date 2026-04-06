@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback } from 'react';
-import { useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
-import type { Discussion } from '../types';
+import type { Discussion, CategoryConfig } from '../types';
 import Badge from '../components/Badge';
 import SearchBar from '../components/SearchBar';
 import Pagination from '../components/Pagination';
@@ -10,13 +10,29 @@ import { formatDate } from '../utils';
 
 const LIMIT = 20;
 
-function DiscussionCard({ disc, onClick }: { disc: Discussion; onClick: () => void }) {
+// ── Shared card used in both list and kanban views ─────────────────────────
+
+function DiscussionCard({ disc, onClick, compact }: { disc: Discussion; onClick: () => void; compact?: boolean }) {
+  if (compact) {
+    return (
+      <div
+        onClick={onClick}
+        className="bg-white rounded-lg border border-slate-200 p-3 cursor-pointer hover:shadow-md hover:border-slate-300 transition-all"
+      >
+        <h4 className="text-sm font-medium text-slate-900 leading-snug line-clamp-2">{disc.title}</h4>
+        {disc.company_name && (
+          <p className="text-xs text-blue-600 mt-1 truncate">{disc.company_name}</p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div
       onClick={onClick}
       className="card p-5 cursor-pointer hover:shadow-md hover:border-slate-300 transition-all"
     >
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 sm:gap-4">
         <div className="flex-1 min-w-0">
           <h3 className="font-semibold text-slate-900 leading-snug">{disc.title}</h3>
 
@@ -33,7 +49,7 @@ function DiscussionCard({ disc, onClick }: { disc: Discussion; onClick: () => vo
           )}
         </div>
 
-        <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+        <div className="flex flex-wrap sm:flex-col sm:items-end gap-1.5 flex-shrink-0">
           {disc.current_state && <Badge label={disc.current_state} variant="state" />}
           {disc.category && <Badge label={disc.category} variant="category" />}
         </div>
@@ -54,6 +70,80 @@ function DiscussionCard({ disc, onClick }: { disc: Discussion; onClick: () => vo
   );
 }
 
+// ── Kanban board ───────────────────────────────────────────────────────────
+
+function KanbanBoard({
+  items,
+  columns,
+  onClickDiscussion,
+}: {
+  items: Discussion[];
+  columns: string[];
+  onClickDiscussion: (id: number) => void;
+}) {
+  const byState = useMemo(() => {
+    const map: Record<string, Discussion[]> = {};
+    for (const col of columns) map[col] = [];
+    for (const disc of items) {
+      const s = disc.current_state ?? '';
+      if (map[s]) map[s].push(disc);
+    }
+    return map;
+  }, [items, columns]);
+
+  return (
+    <div className="flex gap-4 overflow-x-auto pb-4 -mx-4 px-4 sm:-mx-8 sm:px-8">
+      {columns.map((col) => (
+        <div key={col} className="flex-shrink-0 w-72">
+          <div className="flex items-center gap-2 mb-3 px-1">
+            <Badge label={col} variant="state" />
+            <span className="text-xs text-slate-400 font-medium">{byState[col].length}</span>
+          </div>
+          <div className="space-y-3 min-h-[100px]">
+            {byState[col].length === 0 ? (
+              <div className="rounded-lg border-2 border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+                No discussions
+              </div>
+            ) : (
+              byState[col].map((disc) => (
+                <DiscussionCard
+                  key={disc.id}
+                  disc={disc}
+                  compact
+                  onClick={() => onClickDiscussion(disc.id)}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── View toggle icons ──────────────────────────────────────────────────────
+
+function ListIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" />
+    </svg>
+  );
+}
+
+function KanbanIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="5" height="18" rx="1" /><rect x="10" y="3" width="5" height="12" rx="1" /><rect x="17" y="3" width="5" height="15" rx="1" />
+    </svg>
+  );
+}
+
+// ── Main page ──────────────────────────────────────────────────────────────
+
 export default function DiscussionsPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -62,6 +152,7 @@ export default function DiscussionsPage() {
   const [total, setTotal] = useState(0);
   const [categories, setCategories] = useState<string[]>([]);
   const [states, setStates] = useState<string[]>([]);
+  const [categoryConfig, setCategoryConfig] = useState<CategoryConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,12 +162,37 @@ export default function DiscussionsPage() {
   const sort = searchParams.get('sort') ?? 'last_seen';
   const order = searchParams.get('order') ?? 'desc';
   const page = parseInt(searchParams.get('page') ?? '1', 10);
+  const view = searchParams.get('view') ?? 'list';
+  const hideTerminal = searchParams.get('hideTerminal') === '1';
+
+  // Load category config once from meta
+  useEffect(() => {
+    api.getMeta().then((meta) => {
+      if (meta.categoryConfig?.length) {
+        setCategoryConfig(meta.categoryConfig);
+      }
+    }).catch(() => {});
+  }, []);
+
+  // Build lookup maps from config
+  const configByCategory = useMemo(() => {
+    const map: Record<string, CategoryConfig> = {};
+    for (const c of categoryConfig) map[c.name] = c;
+    return map;
+  }, [categoryConfig]);
+
+  const terminalStatesStr = useMemo(() => {
+    if (!category || !configByCategory[category]) return '';
+    const ts = configByCategory[category].terminal_states;
+    return ts.length > 0 ? ts.join(',') : '';
+  }, [category, configByCategory]);
 
   const fetchData = useCallback(() => {
     setLoading(true);
     setError(null);
+    const exclude_states = hideTerminal && terminalStatesStr ? terminalStatesStr : undefined;
     api
-      .getDiscussions({ q, category, state, sort, order, page, limit: LIMIT })
+      .getDiscussions({ q, category, state, exclude_states, sort, order, page, limit: LIMIT })
       .then((data) => {
         setItems(data.items);
         setTotal(data.total);
@@ -85,11 +201,33 @@ export default function DiscussionsPage() {
       })
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [q, category, state, sort, order, page]);
+  }, [q, category, state, sort, order, page, hideTerminal, terminalStatesStr]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Filter states for the dropdown based on selected category
+  const filteredStates = useMemo(() => {
+    if (!category || !configByCategory[category]) return states;
+    return configByCategory[category].states.filter((s) => states.includes(s));
+  }, [category, configByCategory, states]);
+
+  // Compute kanban columns from config
+  const kanbanColumns = useMemo(() => {
+    if (!category || !configByCategory[category]) return [];
+    const cfg = configByCategory[category];
+    const terminal = new Set(cfg.terminal_states);
+    if (hideTerminal) {
+      return cfg.states.filter((s) => !terminal.has(s));
+    }
+    return cfg.states;
+  }, [category, configByCategory, hideTerminal]);
+
+  const terminalStates = useMemo(() => {
+    if (!terminalStatesStr) return new Set<string>();
+    return new Set(terminalStatesStr.split(','));
+  }, [terminalStatesStr]);
 
   function updateParam(key: string, value: string) {
     const next = new URLSearchParams(searchParams);
@@ -98,12 +236,28 @@ export default function DiscussionsPage() {
     } else {
       next.delete(key);
     }
+    if (key === 'category') {
+      next.delete('state');
+    }
     if (key !== 'page') next.delete('page');
     setSearchParams(next);
   }
 
+  function setView(v: 'list' | 'kanban') {
+    const next = new URLSearchParams(searchParams);
+    if (v === 'list') {
+      next.delete('view');
+    } else {
+      next.set('view', 'kanban');
+    }
+    setSearchParams(next);
+  }
+
+  const isKanban = view === 'kanban';
+  const canKanban = !!category && kanbanColumns.length > 0;
+
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -112,15 +266,37 @@ export default function DiscussionsPage() {
             <p className="text-sm text-slate-500 mt-0.5">{total.toLocaleString()} total</p>
           )}
         </div>
+
+        {/* View toggle */}
+        <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+          <button
+            onClick={() => setView('list')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              !isKanban ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <ListIcon /> List
+          </button>
+          <button
+            onClick={() => setView('kanban')}
+            title={!canKanban ? 'Select a category to use board view' : undefined}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              isKanban ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+            } ${!canKanban ? 'opacity-50 cursor-not-allowed' : ''}`}
+            disabled={!canKanban}
+          >
+            <KanbanIcon /> Board
+          </button>
+        </div>
       </div>
 
       {/* Filter bar */}
-      <div className="flex flex-wrap gap-3 mb-6">
+      <div className="flex flex-wrap items-center gap-3 mb-6">
         <SearchBar
           value={q}
           onChange={(v) => updateParam('q', v)}
-          placeholder="Search title or summary…"
-          className="w-72"
+          placeholder="Search title or summary..."
+          className="w-full sm:w-72"
         />
 
         <select
@@ -138,10 +314,13 @@ export default function DiscussionsPage() {
           value={state}
           onChange={(e) => updateParam('state', e.target.value)}
           className="filter-input"
+          disabled={!category}
         >
-          <option value="">All states</option>
-          {states.map((s) => (
-            <option key={s} value={s}>{s}</option>
+          <option value="">{category ? 'All states' : 'Select a category first'}</option>
+          {filteredStates.map((s) => (
+            <option key={s} value={s}>
+              {s}{terminalStates.has(s) ? ' (terminal)' : ''}
+            </option>
           ))}
         </select>
 
@@ -159,9 +338,30 @@ export default function DiscussionsPage() {
         >
           <option value="last_seen:desc">Most recent</option>
           <option value="first_seen:asc">Oldest first</option>
-          <option value="title:asc">Title A–Z</option>
-          <option value="title:desc">Title Z–A</option>
+          <option value="title:asc">Title A-Z</option>
+          <option value="title:desc">Title Z-A</option>
         </select>
+
+        {terminalStates.size > 0 && (
+          <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={hideTerminal}
+              onChange={(e) => {
+                const next = new URLSearchParams(searchParams);
+                if (e.target.checked) {
+                  next.set('hideTerminal', '1');
+                } else {
+                  next.delete('hideTerminal');
+                }
+                next.delete('page');
+                setSearchParams(next);
+              }}
+              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            />
+            Hide terminal states
+          </label>
+        )}
       </div>
 
       {/* Content */}
@@ -189,15 +389,23 @@ export default function DiscussionsPage() {
         </div>
       ) : (
         <>
-          <div className="space-y-4">
-            {items.map((disc) => (
-              <DiscussionCard
-                key={disc.id}
-                disc={disc}
-                onClick={() => navigate(`/discussions/${disc.id}`)}
-              />
-            ))}
-          </div>
+          {isKanban && canKanban ? (
+            <KanbanBoard
+              items={items}
+              columns={kanbanColumns}
+              onClickDiscussion={(id) => navigate(`/discussions/${id}`, { state: { listSearch: searchParams.toString() } })}
+            />
+          ) : (
+            <div className="space-y-4">
+              {items.map((disc) => (
+                <DiscussionCard
+                  key={disc.id}
+                  disc={disc}
+                  onClick={() => navigate(`/discussions/${disc.id}`, { state: { listSearch: searchParams.toString() } })}
+                />
+              ))}
+            </div>
+          )}
 
           <div className="mt-4">
             <Pagination

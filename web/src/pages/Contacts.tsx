@@ -53,7 +53,7 @@ export default function ContactsPage() {
   }
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -70,7 +70,7 @@ export default function ContactsPage() {
           value={q}
           onChange={(v) => updateParam('q', v)}
           placeholder="Search name or email…"
-          className="w-64"
+          className="w-full sm:w-64"
         />
 
         <input
@@ -78,7 +78,7 @@ export default function ContactsPage() {
           value={company}
           onChange={(e) => updateParam('company', e.target.value)}
           placeholder="Filter by company…"
-          className="filter-input w-48"
+          className="filter-input w-full sm:w-48"
         />
 
         <select
@@ -127,26 +127,26 @@ export default function ContactsPage() {
           <EmptyState />
         </div>
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50">
                 <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Name / Email
                 </th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <th className="hidden sm:table-cell text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Company
                 </th>
                 <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Emails
                 </th>
-                <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <th className="hidden md:table-cell text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Sent
                 </th>
-                <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <th className="hidden md:table-cell text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Received
                 </th>
-                <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <th className="hidden sm:table-cell text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Last active
                 </th>
               </tr>
@@ -166,19 +166,19 @@ export default function ContactsPage() {
                       {contact.email}
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-slate-600">
+                  <td className="hidden sm:table-cell px-6 py-4 text-slate-600">
                     {contact.company ?? <span className="text-slate-300">—</span>}
                   </td>
                   <td className="px-6 py-4 text-right font-medium text-slate-700">
                     {contact.email_count.toLocaleString()}
                   </td>
-                  <td className="px-6 py-4 text-right text-slate-500">
+                  <td className="hidden md:table-cell px-6 py-4 text-right text-slate-500">
                     {contact.sent_count.toLocaleString()}
                   </td>
-                  <td className="px-6 py-4 text-right text-slate-500">
+                  <td className="hidden md:table-cell px-6 py-4 text-right text-slate-500">
                     {contact.received_count.toLocaleString()}
                   </td>
-                  <td className="px-6 py-4 text-right text-slate-500">
+                  <td className="hidden sm:table-cell px-6 py-4 text-right text-slate-500">
                     {formatDate(contact.last_seen)}
                   </td>
                 </tr>

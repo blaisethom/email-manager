@@ -53,7 +53,7 @@ export default function ContactDetailPage() {
 
   if (loading) {
     return (
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         <div className="animate-pulse space-y-4">
           <div className="h-4 bg-slate-200 rounded w-24" />
           <div className="h-8 bg-slate-200 rounded w-64" />
@@ -65,7 +65,7 @@ export default function ContactDetailPage() {
 
   if (error || !data) {
     return (
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         <button onClick={() => navigate('/contacts')} className="btn-secondary mb-6">
           ← Back
         </button>
@@ -77,7 +77,7 @@ export default function ContactDetailPage() {
   }
 
   return (
-    <div className="p-8 max-w-4xl">
+    <div className="p-4 sm:p-8 max-w-4xl">
       {/* Back */}
       <button
         onClick={() => navigate('/contacts')}

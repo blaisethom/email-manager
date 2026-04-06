@@ -56,7 +56,7 @@ export default function CompaniesPage() {
   }
 
   return (
-    <div className="p-8">
+    <div className="p-4 sm:p-8">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -73,7 +73,7 @@ export default function CompaniesPage() {
           value={q}
           onChange={(v) => updateParam('q', v)}
           placeholder="Search name or domain…"
-          className="w-64"
+          className="w-full sm:w-64"
         />
 
         <select
@@ -133,20 +133,20 @@ export default function CompaniesPage() {
           <EmptyState />
         </div>
       ) : (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50">
                 <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Company
                 </th>
-                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <th className="hidden sm:table-cell text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Labels
                 </th>
                 <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Emails
                 </th>
-                <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <th className="hidden sm:table-cell text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Last active
                 </th>
               </tr>
@@ -164,7 +164,7 @@ export default function CompaniesPage() {
                       <div className="text-xs text-slate-500 mt-0.5">{company.domain}</div>
                     )}
                   </td>
-                  <td className="px-6 py-4">
+                  <td className="hidden sm:table-cell px-6 py-4">
                     <div className="flex flex-wrap gap-1">
                       {company.labels.slice(0, 4).map((l) => (
                         <Badge key={l} label={l} variant="label" />
@@ -177,7 +177,7 @@ export default function CompaniesPage() {
                   <td className="px-6 py-4 text-right font-medium text-slate-700">
                     {company.email_count.toLocaleString()}
                   </td>
-                  <td className="px-6 py-4 text-right text-slate-500">
+                  <td className="hidden sm:table-cell px-6 py-4 text-right text-slate-500">
                     {formatDate(company.last_seen)}
                   </td>
                 </tr>

@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useEffect, useState, useCallback } from 'react';
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { api } from '../api';
-import type { DiscussionDetail, StateHistoryEntry, Thread } from '../types';
+import type { DiscussionDetail, DiscussionAction, StateHistoryEntry, Thread, ThreadEmail, CalendarEvent } from '../types';
 import Badge from '../components/Badge';
+import Markdown from '../components/Markdown';
 import { formatDate, formatDateTime } from '../utils';
 
 function StateTimeline({ history }: { history: StateHistoryEntry[] }) {
@@ -47,9 +48,210 @@ function StateTimeline({ history }: { history: StateHistoryEntry[] }) {
   );
 }
 
-function ThreadRow({ thread }: { thread: Thread }) {
+function ActionRow({ action }: { action: DiscussionAction }) {
   return (
     <div className="py-3 border-b border-slate-100 last:border-0">
+      <div className="flex items-start gap-3">
+        <div className={`mt-0.5 w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${
+          action.status === 'done'
+            ? 'bg-green-100 text-green-600'
+            : 'bg-amber-100 text-amber-600'
+        }`}>
+          {action.status === 'done' ? (
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ) : (
+            <div className="w-2 h-2 rounded-full bg-amber-500" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className={`text-sm leading-relaxed ${action.status === 'done' ? 'text-slate-500 line-through' : 'text-slate-900'}`}>
+            {action.description}
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1 text-xs text-slate-400">
+            {action.assignee_emails.length > 0 && (
+              <span className="flex flex-wrap gap-x-2">
+                {action.assignee_emails.map((email) => (
+                  <Link
+                    key={email}
+                    to={`/contacts/${encodeURIComponent(email)}`}
+                    className="text-blue-600 hover:underline"
+                  >
+                    {email}
+                  </Link>
+                ))}
+              </span>
+            )}
+            {action.target_date && (
+              <span>Due {formatDate(action.target_date)}</span>
+            )}
+            {action.completed_date && (
+              <span className="text-green-600">Completed {formatDate(action.completed_date)}</span>
+            )}
+            {action.source_date && (
+              <span>From {formatDate(action.source_date)}</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ThreadModal({ thread, onClose }: { thread: Thread; onClose: () => void }) {
+  const [emails, setEmails] = useState<ThreadEmail[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    api.getThreadEmails(thread.thread_id)
+      .then((data) => {
+        setEmails(data.emails);
+        // Auto-expand the last email
+        if (data.emails.length > 0) {
+          setExpandedIds(new Set([data.emails[data.emails.length - 1].id]));
+        }
+      })
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [thread.thread_id]);
+
+  const handleBackdropClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) onClose();
+  }, [onClose]);
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  function toggleEmail(id: number) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={handleBackdropClick}
+    >
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-200">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold text-slate-900 leading-snug">
+              {thread.subject ?? '(no subject)'}
+            </h2>
+            <div className="flex items-center gap-3 mt-1 text-xs text-slate-400">
+              <span>{thread.email_count} email{thread.email_count !== 1 ? 's' : ''}</span>
+              {thread.first_date && <span>{formatDate(thread.first_date)}</span>}
+              {thread.last_date && thread.last_date !== thread.first_date && (
+                <span>– {formatDate(thread.last_date)}</span>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-600 transition-colors text-xl leading-none flex-shrink-0 mt-1"
+          >
+            &times;
+          </button>
+        </div>
+
+        {/* Summary */}
+        {thread.summary && (
+          <div className="px-6 py-3 bg-slate-50 border-b border-slate-200 text-sm text-slate-600 leading-relaxed">
+            {thread.summary}
+          </div>
+        )}
+
+        {/* Emails */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-3">
+          {loading ? (
+            <div className="animate-pulse space-y-4">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="space-y-2">
+                  <div className="h-4 bg-slate-200 rounded w-1/3" />
+                  <div className="h-4 bg-slate-200 rounded w-full" />
+                  <div className="h-4 bg-slate-200 rounded w-5/6" />
+                </div>
+              ))}
+            </div>
+          ) : error ? (
+            <p className="text-red-600 text-sm">{error}</p>
+          ) : emails.length === 0 ? (
+            <p className="text-sm text-slate-400">No emails found for this thread.</p>
+          ) : (
+            emails.map((email) => {
+              const isExpanded = expandedIds.has(email.id);
+              return (
+                <div key={email.id} className="border border-slate-200 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => toggleEmail(email.id)}
+                    className="w-full text-left px-4 py-3 hover:bg-slate-50 transition-colors flex items-start gap-3"
+                  >
+                    <span className="text-xs text-slate-400 mt-0.5 flex-shrink-0 select-none">
+                      {isExpanded ? '▾' : '▸'}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-baseline gap-2">
+                        <span className="font-medium text-slate-900 text-sm truncate">
+                          {email.from_name ?? email.from_address}
+                        </span>
+                        {email.from_name && (
+                          <span className="text-xs text-slate-400 truncate">&lt;{email.from_address}&gt;</span>
+                        )}
+                      </div>
+                      {!isExpanded && email.body_text && (
+                        <p className="text-xs text-slate-400 mt-0.5 truncate">{email.body_text.slice(0, 120)}</p>
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-400 flex-shrink-0 whitespace-nowrap">
+                      {formatDateTime(email.date)}
+                    </span>
+                  </button>
+                  {isExpanded && (
+                    <div className="px-4 pb-4 border-t border-slate-100">
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400 py-2">
+                        {email.to_addresses.length > 0 && (
+                          <span>To: {email.to_addresses.join(', ')}</span>
+                        )}
+                        {email.cc_addresses.length > 0 && (
+                          <span>Cc: {email.cc_addresses.join(', ')}</span>
+                        )}
+                      </div>
+                      <div className="mt-1">
+                        {email.body_text
+                          ? <Markdown>{email.body_text}</Markdown>
+                          : <p className="text-sm text-slate-400 italic">(no text content)</p>
+                        }
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ThreadRow({ thread, onClick }: { thread: Thread; onClick: () => void }) {
+  return (
+    <div
+      className="py-3 border-b border-slate-100 last:border-0 cursor-pointer hover:bg-slate-50 -mx-2 px-2 rounded transition-colors"
+      onClick={onClick}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="font-medium text-slate-900 truncate">
@@ -79,9 +281,14 @@ function ThreadRow({ thread }: { thread: Thread }) {
 export default function DiscussionDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const listSearch = (location.state as { listSearch?: string } | null)?.listSearch;
+  const backTo = listSearch ? `/discussions?${listSearch}` : '/discussions';
   const [data, setData] = useState<DiscussionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showDoneActions, setShowDoneActions] = useState(false);
+  const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -96,7 +303,7 @@ export default function DiscussionDetailPage() {
 
   if (loading) {
     return (
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         <div className="animate-pulse space-y-4">
           <div className="h-4 bg-slate-200 rounded w-24" />
           <div className="h-8 bg-slate-200 rounded w-2/3" />
@@ -108,8 +315,8 @@ export default function DiscussionDetailPage() {
 
   if (error || !data) {
     return (
-      <div className="p-8">
-        <button onClick={() => navigate('/discussions')} className="btn-secondary mb-6">
+      <div className="p-4 sm:p-8">
+        <button onClick={() => navigate(backTo)} className="btn-secondary mb-6">
           ← Back
         </button>
         <div className="card p-6 text-center text-red-600">
@@ -120,10 +327,10 @@ export default function DiscussionDetailPage() {
   }
 
   return (
-    <div className="p-8 max-w-4xl">
+    <div className="p-4 sm:p-8 max-w-4xl">
       {/* Back */}
       <button
-        onClick={() => navigate('/discussions')}
+        onClick={() => navigate(backTo)}
         className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors mb-6"
       >
         ← Back to Discussions
@@ -206,6 +413,86 @@ export default function DiscussionDetailPage() {
         </div>
       )}
 
+      {/* Actions */}
+      {data.actions && data.actions.length > 0 && (() => {
+        const openActions = data.actions.filter(a => a.status !== 'done');
+        const doneActions = data.actions.filter(a => a.status === 'done');
+        const visibleActions = showDoneActions ? data.actions : openActions;
+        return (
+          <div className="card p-6 mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-base font-semibold text-slate-900">
+                Actions
+                <span className="ml-2 text-sm font-normal text-slate-500">
+                  ({openActions.length} open, {doneActions.length} done)
+                </span>
+              </h2>
+              {doneActions.length > 0 && (
+                <button
+                  onClick={() => setShowDoneActions(!showDoneActions)}
+                  className="text-sm text-blue-600 hover:text-blue-700 transition-colors"
+                >
+                  {showDoneActions ? 'Hide done' : `Show ${doneActions.length} done`}
+                </button>
+              )}
+            </div>
+            <div>
+              {visibleActions.map((action) => (
+                <ActionRow key={action.id} action={action} />
+              ))}
+              {visibleActions.length === 0 && (
+                <p className="text-sm text-slate-400 py-2">No open actions</p>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Calendar Events */}
+      {data.calendar_events && data.calendar_events.length > 0 && (
+        <div className="card p-6 mb-6">
+          <h2 className="text-base font-semibold text-slate-900 mb-3">
+            Calendar Events
+            <span className="ml-2 text-sm font-normal text-slate-500">({data.calendar_events.length})</span>
+          </h2>
+          <div className="divide-y divide-slate-100">
+            {data.calendar_events.map((evt: CalendarEvent) => (
+              <div key={evt.id} className="py-3 first:pt-0 last:pb-0">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-slate-900">
+                      {evt.title || '(No title)'}
+                      {evt.html_link && (
+                        <a
+                          href={evt.html_link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="ml-2 text-blue-500 hover:text-blue-600 text-xs"
+                        >
+                          ↗
+                        </a>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 mt-1 text-xs text-slate-400">
+                      <span>
+                        {evt.all_day
+                          ? formatDate(evt.start_time)
+                          : `${formatDateTime(evt.start_time)} – ${formatDateTime(evt.end_time)}`
+                        }
+                      </span>
+                      {evt.location && <span>{evt.location}</span>}
+                      {evt.attendees.length > 0 && (
+                        <span>{evt.attendees.length} attendee{evt.attendees.length !== 1 ? 's' : ''}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Threads */}
       {data.threads.length > 0 && (
         <div className="card p-6">
@@ -215,10 +502,14 @@ export default function DiscussionDetailPage() {
           </h2>
           <div>
             {data.threads.map((thread) => (
-              <ThreadRow key={thread.id} thread={thread} />
+              <ThreadRow key={thread.id} thread={thread} onClick={() => setSelectedThread(thread)} />
             ))}
           </div>
         </div>
+      )}
+
+      {selectedThread && (
+        <ThreadModal thread={selectedThread} onClose={() => setSelectedThread(null)} />
       )}
     </div>
   );

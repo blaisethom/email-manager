@@ -6,6 +6,8 @@ import ContactsPage from './pages/Contacts';
 import ContactDetailPage from './pages/ContactDetail';
 import DiscussionsPage from './pages/Discussions';
 import DiscussionDetailPage from './pages/DiscussionDetail';
+import ActionsPage from './pages/Actions';
+import CalendarEventsPage from './pages/CalendarEvents';
 
 export default function App() {
   return (
@@ -19,6 +21,8 @@ export default function App() {
           <Route path="contacts/:email" element={<ContactDetailPage />} />
           <Route path="discussions" element={<DiscussionsPage />} />
           <Route path="discussions/:id" element={<DiscussionDetailPage />} />
+          <Route path="actions" element={<ActionsPage />} />
+          <Route path="calendar" element={<CalendarEventsPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

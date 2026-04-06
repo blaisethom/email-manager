@@ -63,8 +63,9 @@ def auth(ctx: click.Context, account: str | None, remote: bool) -> None:
 @click.option("--list-folders", is_flag=True, help="List available folders on IMAP accounts and exit")
 @click.option("--remote", is_flag=True, help="Headless mode for Gmail OAuth — prints URL instead of opening a browser")
 @click.option("--rebuild-threads", is_flag=True, help="Force a full thread rebuild instead of incremental")
+@click.option("--no-calendar", is_flag=True, help="Skip calendar sync for Gmail accounts")
 @click.pass_context
-def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool, remote: bool, rebuild_threads: bool) -> None:
+def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool, remote: bool, rebuild_threads: bool, no_calendar: bool) -> None:
     """Fetch new emails from all configured accounts."""
     from email_manager.ingestion.threading import compute_threads
 
@@ -138,6 +139,20 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
             console.print(f"[green]Updated {updated} thread assignment(s)[/green]")
         else:
             console.print(f"\n[green]Total: {total_new} new email(s) across {len(accounts)} account(s)[/green]")
+
+        # Sync calendar events for Gmail accounts
+        if not no_calendar:
+            gmail_accounts = [a for a in accounts if a.backend == "gmail"]
+            if gmail_accounts:
+                from email_manager.ingestion.calendar_client import sync_calendar_events
+                for acct in gmail_accounts:
+                    label = acct.name or "gmail"
+                    console.print(f"\n[bold]Syncing calendar: {label}[/bold]")
+                    try:
+                        cal_count = sync_calendar_events(conn, acct, console=console, remote=remote)
+                        console.print(f"  [green]{cal_count} calendar event(s) synced[/green]")
+                    except Exception as e:
+                        console.print(f"  [yellow]Calendar sync failed: {e}[/yellow]")
     finally:
         conn.close()
 
@@ -790,7 +805,124 @@ def discussion(ctx: click.Context, discussion_id: int) -> None:
             count = f"({t['email_count']} emails)" if t["email_count"] else ""
             console.print(f"  {subject}  {count}  {dates}")
 
+    # Actions
+    actions = fetchall(
+        conn,
+        """SELECT description, assignee_emails, target_date, status, source_date, completed_date
+           FROM actions
+           WHERE discussion_id = ?
+           ORDER BY source_date ASC, id ASC""",
+        (discussion_id,),
+    )
+    if actions:
+        console.print(f"\n[bold]Actions:[/bold]")
+        for a in actions:
+            status_icon = "[green]done[/green]" if a["status"] == "done" else "[yellow]open[/yellow]"
+            assignees = json.loads(a["assignee_emails"]) if a["assignee_emails"] else []
+            assignee_str = ", ".join(assignees) if assignees else "unassigned"
+            target = f" due {a['target_date']}" if a["target_date"] else ""
+            completed = f" completed {a['completed_date'][:10]}" if a.get("completed_date") else ""
+            source = f" (from {a['source_date'][:10]})" if a["source_date"] else ""
+            console.print(f"  [{status_icon}] {a['description']}")
+            console.print(f"         assignees: {assignee_str}{target}{completed}{source}")
+
     console.print()
+    conn.close()
+
+
+@cli.command()
+@click.option("--limit", "-n", default=50)
+@click.option("--company", "-c", default=None, help="Filter by company domain or name")
+@click.option("--assignee", "-a", default=None, help="Filter by assignee email address")
+@click.option("--status", "-s", default=None, type=click.Choice(["open", "done"]), help="Filter by action status")
+@click.option("--discussion", "-d", "discussion_id", default=None, type=int, help="Filter by discussion ID")
+@click.pass_context
+def actions(ctx: click.Context, limit: int, company: str | None, assignee: str | None, status: str | None, discussion_id: int | None) -> None:
+    """List extracted actions from discussions."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    conditions = []
+    params: list = []
+
+    if company:
+        row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (company,))
+        if not row:
+            row = fetchone(conn, "SELECT id FROM companies WHERE name LIKE ? COLLATE NOCASE", (f"%{company}%",))
+        if not row:
+            console.print(f"[red]No company found matching '{company}'[/red]")
+            conn.close()
+            return
+        conditions.append("d.company_id = ?")
+        params.append(row["id"])
+
+    if assignee:
+        conditions.append("a.assignee_emails LIKE ?")
+        params.append(f"%{assignee.lower()}%")
+
+    if status:
+        conditions.append("a.status = ?")
+        params.append(status)
+
+    if discussion_id:
+        conditions.append("a.discussion_id = ?")
+        params.append(discussion_id)
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+
+    rows = fetchall(
+        conn,
+        f"""SELECT a.id, a.description, a.assignee_emails, a.target_date, a.status,
+                   a.source_date, d.title as discussion_title, d.id as discussion_id,
+                   c.name as company_name, c.domain
+            FROM actions a
+            JOIN discussions d ON a.discussion_id = d.id
+            JOIN companies c ON d.company_id = c.id
+            {where}
+            ORDER BY a.status ASC, a.target_date ASC NULLS LAST, a.source_date DESC
+            LIMIT ?""",
+        tuple(params),
+    )
+
+    if not rows:
+        console.print("[dim]No actions found. Run 'email-manager analyse --stage discussions' first.[/dim]")
+        conn.close()
+        return
+
+    table = Table(title="Actions")
+    table.add_column("ID", width=5, justify="right")
+    table.add_column("Status", width=6)
+    table.add_column("Description", width=40)
+    table.add_column("Assignees", width=30)
+    table.add_column("Due", width=10)
+    table.add_column("Discussion", width=30)
+    table.add_column("Company", width=20)
+
+    for row in rows:
+        status_str = "[green]done[/green]" if row["status"] == "done" else "[yellow]open[/yellow]"
+        assignees = json.loads(row["assignee_emails"]) if row["assignee_emails"] else []
+        assignees_str = ", ".join(assignees) if assignees else ""
+        table.add_row(
+            str(row["id"]),
+            status_str,
+            row["description"][:40],
+            assignees_str[:30],
+            (row["target_date"] or "")[:10],
+            f'#{row["discussion_id"]} {row["discussion_title"][:22]}',
+            f'{row["company_name"][:20]}',
+        )
+
+    console.print(table)
+
+    # Summary
+    total = fetchone(conn, "SELECT COUNT(*) as cnt FROM actions")["cnt"]
+    open_count = fetchone(conn, "SELECT COUNT(*) as cnt FROM actions WHERE status = 'open'")["cnt"]
+    done_count = fetchone(conn, "SELECT COUNT(*) as cnt FROM actions WHERE status = 'done'")["cnt"]
+    console.print()
+    console.print(f"[bold]Total:[/bold] {total} actions ({open_count} open, {done_count} done)")
+
     conn.close()
 
 

@@ -5,7 +5,10 @@ import type {
   ContactDetail,
   DiscussionsResponse,
   DiscussionDetail,
+  ActionsResponse,
   MetaResponse,
+  ThreadEmail,
+  CalendarEventsResponse,
 } from './types';
 
 const BASE = '/api';
@@ -52,7 +55,31 @@ export interface DiscussionsParams extends Record<string, string | number | unde
   q?: string;
   category?: string;
   state?: string;
+  exclude_states?: string;
   company_id?: string | number;
+  sort?: string;
+  order?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface ActionsParams extends Record<string, string | number | undefined> {
+  q?: string;
+  status?: string;
+  assignee?: string;
+  company_id?: string | number;
+  discussion_id?: string | number;
+  sort?: string;
+  order?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface CalendarEventsParams extends Record<string, string | number | undefined> {
+  q?: string;
+  from?: string;
+  to?: string;
+  status?: string;
   sort?: string;
   order?: string;
   page?: number;
@@ -72,6 +99,10 @@ export const api = {
     return fetchJson<CompanyDetail>(`${BASE}/companies/${id}`);
   },
 
+  getCompanyHomepage(id: number): Promise<{ content: string; domain: string; fetched_at: string }> {
+    return fetchJson(`${BASE}/companies/${id}/homepage`);
+  },
+
   getContacts(params: ContactsParams = {}): Promise<ContactsResponse> {
     return fetchJson<ContactsResponse>(`${BASE}/contacts${buildQuery(params)}`);
   },
@@ -86,5 +117,17 @@ export const api = {
 
   getDiscussion(id: number): Promise<DiscussionDetail> {
     return fetchJson<DiscussionDetail>(`${BASE}/discussions/${id}`);
+  },
+
+  getThreadEmails(threadId: string): Promise<{ emails: ThreadEmail[] }> {
+    return fetchJson(`${BASE}/threads/${encodeURIComponent(threadId)}/emails`);
+  },
+
+  getCalendarEvents(params: CalendarEventsParams = {}): Promise<CalendarEventsResponse> {
+    return fetchJson<CalendarEventsResponse>(`${BASE}/calendar-events${buildQuery(params)}`);
+  },
+
+  getActions(params: ActionsParams = {}): Promise<ActionsResponse> {
+    return fetchJson<ActionsResponse>(`${BASE}/actions${buildQuery(params)}`);
   },
 };
