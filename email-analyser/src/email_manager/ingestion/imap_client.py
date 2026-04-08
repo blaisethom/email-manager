@@ -141,13 +141,19 @@ def _connect_with_retry(config: EmailAccount, use_export: bool = False) -> IMAPC
     if use_export and _is_yahoo(host):
         host = "export.imap.mail.yahoo.com"
 
-    # In container environments, try the IMAP proxy first (plaintext, no SSL)
+    # In container environments, try the IMAP proxy first (plaintext, no SSL).
+    # Encode the API key and real upstream host in the username using the pt:
+    # passthrough prefix so the proxy can verify the agent with the hub and
+    # knows where to connect.  Format: pt:<api_key>:<user>@<host>:<port>
     proxy = _detect_imap_proxy()
     if proxy:
+        import os
+        api_key = os.environ.get("AGENT_API_KEY", "")
         proxy_host, proxy_port = proxy
+        pt_user = f"pt:{api_key}:{config.imap_user}@{host}:{port}"
         try:
             return _connect_imap(proxy_host, proxy_port, False,
-                                 config.imap_user, config.imap_password)
+                                 pt_user, config.imap_password)
         except ConnectionError:
             raise
         except Exception as e:
