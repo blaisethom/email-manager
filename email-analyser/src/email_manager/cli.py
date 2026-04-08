@@ -30,8 +30,9 @@ def cli(ctx: click.Context) -> None:
 @cli.command()
 @click.option("--account", "-a", default=None, help="Authenticate only this account (by name)")
 @click.option("--remote", is_flag=True, help="Headless mode — prints OAuth URL instead of opening a browser")
+@click.option("--calendar", is_flag=True, help="Also authorize Google Calendar access")
 @click.pass_context
-def auth(ctx: click.Context, account: str | None, remote: bool) -> None:
+def auth(ctx: click.Context, account: str | None, remote: bool, calendar: bool) -> None:
     """Authenticate Gmail accounts (useful on remote/headless machines)."""
     from email_manager.ingestion.gmail_client import authenticate
 
@@ -53,8 +54,14 @@ def auth(ctx: click.Context, account: str | None, remote: bool) -> None:
     for acct in gmail_accounts:
         label = acct.name or "gmail"
         console.print(f"\n[bold]Authenticating: {label}[/bold]")
-        email_addr = authenticate(acct, remote=remote)
-        console.print(f"[green]Token saved for {label} ({email_addr})[/green]")
+        if calendar:
+            from email_manager.ingestion.calendar_client import _get_calendar_service
+            console.print("  Requesting Gmail + Calendar access...")
+            _get_calendar_service(acct, remote=remote)
+            console.print(f"[green]Token saved for {label} (Gmail + Calendar)[/green]")
+        else:
+            email_addr = authenticate(acct, remote=remote)
+            console.print(f"[green]Token saved for {label} ({email_addr})[/green]")
 
 
 @cli.command()
@@ -64,8 +71,9 @@ def auth(ctx: click.Context, account: str | None, remote: bool) -> None:
 @click.option("--remote", is_flag=True, help="Headless mode for Gmail OAuth — prints URL instead of opening a browser")
 @click.option("--rebuild-threads", is_flag=True, help="Force a full thread rebuild instead of incremental")
 @click.option("--no-calendar", is_flag=True, help="Skip calendar sync for Gmail accounts")
+@click.option("--calendar-months", type=int, default=6, help="How many months back to sync calendar events (default: 6)")
 @click.pass_context
-def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool, remote: bool, rebuild_threads: bool, no_calendar: bool) -> None:
+def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list_folders: bool, remote: bool, rebuild_threads: bool, no_calendar: bool, calendar_months: int) -> None:
     """Fetch new emails from all configured accounts."""
     from email_manager.ingestion.threading import compute_threads
 
@@ -144,12 +152,15 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
         if not no_calendar:
             gmail_accounts = [a for a in accounts if a.backend == "gmail"]
             if gmail_accounts:
-                from email_manager.ingestion.calendar_client import sync_calendar_events
+                from email_manager.ingestion.calendar_client import sync_calendar_events, needs_calendar_auth
                 for acct in gmail_accounts:
                     label = acct.name or "gmail"
+                    if needs_calendar_auth(acct):
+                        console.print(f"\n[yellow]Calendar ({label}): needs authorization. Run 'auth --account {acct.name}' first to grant calendar access.[/yellow]")
+                        continue
                     console.print(f"\n[bold]Syncing calendar: {label}[/bold]")
                     try:
-                        cal_count = sync_calendar_events(conn, acct, console=console, remote=remote)
+                        cal_count = sync_calendar_events(conn, acct, console=console, remote=remote, months_back=calendar_months)
                         console.print(f"  [green]{cal_count} calendar event(s) synced[/green]")
                     except Exception as e:
                         console.print(f"  [yellow]Calendar sync failed: {e}[/yellow]")

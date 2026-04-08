@@ -29,14 +29,19 @@ def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> int:
 
     folders = config.imap_folders
     if not folders or folders == ["*"]:
-        client = _connect_with_retry(config)
         try:
-            folders = _list_folders(client)
-        finally:
+            client = _connect_with_retry(config)
             try:
-                client.logout()
-            except Exception:
-                pass
+                folders = _list_folders(client)
+            finally:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+        except (ConnectionError, OSError, TimeoutError) as e:
+            from rich.console import Console
+            Console().print(f"[yellow]Cannot list folders: {e}[/yellow]")
+            return 0
 
     with Progress(
         SpinnerColumn(),
@@ -77,20 +82,95 @@ def _list_folders(client: IMAPClient) -> list[str]:
     return folders
 
 
+CONNECT_TIMEOUT = 15  # seconds for initial connection + login
+
+
+def _detect_imap_proxy() -> tuple[str, int] | None:
+    """Check if an IMAP proxy is available (e.g. in container environments)."""
+    import socket
+    try:
+        s = socket.create_connection(("proxy-imap", 143), timeout=2)
+        s.close()
+        return ("proxy-imap", 143)
+    except (OSError, socket.timeout):
+        return None
+
+
+def _connect_imap(host: str, port: int, ssl: bool, user: str, password: str) -> IMAPClient:
+    """Connect and login with a hard timeout that covers SSL handshake and IMAP greeting."""
+    import threading
+
+    result: list = []
+    error: list = []
+
+    def _do_connect():
+        try:
+            client = IMAPClient(host, port=port, ssl=ssl, timeout=CONNECT_TIMEOUT)
+            client.login(user, password)
+            result.append(client)
+        except Exception as e:
+            error.append(e)
+
+    t = threading.Thread(target=_do_connect, daemon=True)
+    t.start()
+    t.join(timeout=CONNECT_TIMEOUT)
+
+    if t.is_alive():
+        # Thread is still blocked — connection hung. Since it's a daemon thread
+        # it won't block process exit.
+        raise ConnectionError(
+            f"Connection to {host}:{port} timed out after {CONNECT_TIMEOUT}s "
+            f"(server may be unreachable or blocked by a proxy)"
+        )
+    if error:
+        raise error[0]
+    if not result:
+        raise ConnectionError(f"Connection to {host}:{port} failed with no result")
+
+    client = result[0]
+    client.socket().settimeout(60)
+    return client
+
+
 def _connect_with_retry(config: EmailAccount, use_export: bool = False) -> IMAPClient:
     host = config.imap_host
+    port = config.imap_port
+    use_ssl = config.imap_use_ssl
+
     # Yahoo export endpoint supports up to 100k messages per folder (vs 10k on standard)
     if use_export and _is_yahoo(host):
         host = "export.imap.mail.yahoo.com"
 
+    # In container environments, try the IMAP proxy first (plaintext, no SSL)
+    proxy = _detect_imap_proxy()
+    if proxy:
+        proxy_host, proxy_port = proxy
+        try:
+            return _connect_imap(proxy_host, proxy_port, False,
+                                 config.imap_user, config.imap_password)
+        except ConnectionError:
+            raise
+        except Exception as e:
+            # Proxy is available but auth failed — raise directly instead of
+            # falling through to a direct connection that will likely also fail
+            raise ConnectionError(
+                f"IMAP proxy at {proxy_host}:{proxy_port} rejected login: {e}"
+            ) from e
+
     for attempt in range(MAX_RETRIES):
         try:
-            client = IMAPClient(
-                host, port=config.imap_port, ssl=config.imap_use_ssl,
-                timeout=30,
-            )
-            client.login(config.imap_user, config.imap_password)
-            return client
+            return _connect_imap(host, port, use_ssl,
+                                 config.imap_user, config.imap_password)
+        except ConnectionError:
+            # Hard timeout — server unreachable, don't keep retrying
+            raise
+        except (OSError, TimeoutError) as e:
+            if attempt < 1:
+                time.sleep(RETRY_BASE_DELAY)
+                continue
+            raise ConnectionError(
+                f"Cannot reach {host}:{port} — {e}"
+            ) from e
         except Exception as e:
             error_str = str(e).lower()
             is_retryable = any(kw in error_str for kw in (

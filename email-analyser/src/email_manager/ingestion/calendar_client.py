@@ -36,28 +36,35 @@ def _get_calendar_service(config: EmailAccount, *, remote: bool = False):
     if token_path.exists():
         token_data = json.loads(token_path.read_text())
         stored_email = token_data.get("authenticated_email")
-        # Try loading with all scopes
-        creds = Credentials.from_authorized_user_file(str(token_path), ALL_SCOPES)
-        # Check if the token actually has calendar scope
-        if creds and creds.scopes and not any("calendar" in s for s in creds.scopes):
+        # Check the STORED scopes in the token file, not what Credentials reports
+        stored_scopes = token_data.get("scopes", [])
+        has_calendar = any("calendar" in s for s in stored_scopes)
+
+        if has_calendar:
+            creds = Credentials.from_authorized_user_file(str(token_path), ALL_SCOPES)
+        else:
             needs_reauth = True
-            creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token and not needs_reauth:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except Exception:
+                # Refresh failed (e.g. scope mismatch) — need re-auth
+                needs_reauth = True
+                creds = None
+
+        if needs_reauth or not creds:
             if not credentials_path.exists():
                 raise FileNotFoundError(
                     f"Gmail credentials file not found at {credentials_path}. "
                     "Download it from Google Cloud Console."
                 )
             console = Console()
-            if needs_reauth:
-                console.print(
-                    "[yellow]Calendar scope not found in existing token. "
-                    "Re-authenticating with calendar access...[/yellow]"
-                )
+            console.print(
+                "[yellow]Calendar scope not found in existing token. "
+                "Re-authenticating with calendar access...[/yellow]"
+            )
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(credentials_path), ALL_SCOPES
             )
@@ -75,6 +82,19 @@ def _get_calendar_service(config: EmailAccount, *, remote: bool = False):
             token_path.write_text(json.dumps(token_data, indent=2))
 
     return build("calendar", "v3", credentials=creds)
+
+
+def needs_calendar_auth(config: EmailAccount) -> bool:
+    """Check whether this account needs re-auth to get calendar scope."""
+    token_path = config.gmail_token_path
+    if not token_path.exists():
+        return True
+    try:
+        token_data = json.loads(token_path.read_text())
+        stored_scopes = token_data.get("scopes", [])
+        return not any("calendar" in s for s in stored_scopes)
+    except (json.JSONDecodeError, OSError):
+        return True
 
 
 def _sync_state_key(config: EmailAccount) -> str:
