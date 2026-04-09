@@ -30,10 +30,10 @@ def run_extract_base(conn: sqlite3.Connection, backend: LLMBackend, config: Conf
 
 
 
-def run_fetch_homepages(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
+def run_fetch_homepages(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
     from email_manager.analysis.homepage import fetch_homepages
 
-    return fetch_homepages(conn, console=console or Console(), limit=limit, max_workers=config.homepage_max_workers)
+    return fetch_homepages(conn, console=console or Console(), limit=limit, company_domain=company, max_workers=config.homepage_max_workers)
 
 
 def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
@@ -53,14 +53,14 @@ def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: C
         return label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company)
 
 
-def run_contact_memory(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
+def run_contact_memory(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
     from email_manager.analysis.contact_memory import build_contact_memories
     from email_manager.memory.factory import get_memory_backends, get_memory_strategy
 
     console = console or Console()
     memory_backends = get_memory_backends(config, conn)
     strategy = get_memory_strategy(config)
-    return build_contact_memories(conn, backend, memory_backends, strategy, console=console, limit=limit)
+    return build_contact_memories(conn, backend, memory_backends, strategy, company_domain=company, console=console, limit=limit)
 
 
 

@@ -42,6 +42,7 @@ def fetch_homepages(
     console: Console | None = None,
     limit: int | None = None,
     force: bool = False,
+    company_domain: str | None = None,
     output_dir: Path = HOMEPAGES_DIR,
     max_workers: int = DEFAULT_MAX_WORKERS,
 ) -> int:
@@ -51,15 +52,23 @@ def fetch_homepages(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if force:
-        sql = "SELECT id, name, domain FROM companies ORDER BY email_count DESC"
-    else:
-        sql = "SELECT id, name, domain FROM companies WHERE homepage_fetched_at IS NULL ORDER BY email_count DESC"
+    conditions = []
+    params: list[str] = []
+
+    if not force:
+        conditions.append("homepage_fetched_at IS NULL")
+
+    if company_domain:
+        conditions.append("domain = ? COLLATE NOCASE")
+        params.append(company_domain)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"SELECT id, name, domain FROM companies {where} ORDER BY email_count DESC"
 
     if limit:
         sql += f" LIMIT {int(limit)}"
 
-    companies = fetchall(conn, sql)
+    companies = fetchall(conn, sql, tuple(params))
     if not companies:
         console.print("  [dim]All company homepages already fetched.[/dim]")
         return 0

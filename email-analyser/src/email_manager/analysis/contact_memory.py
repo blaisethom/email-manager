@@ -27,6 +27,7 @@ def build_contact_memories(
     memory_backends: list[MemoryBackend],
     strategy: MemoryStrategy,
     email_address: str | None = None,
+    company_domain: str | None = None,
     console: Console | None = None,
     limit: int | None = None,
     force: bool = False,
@@ -38,6 +39,19 @@ def build_contact_memories(
         contacts = fetchall(
             conn, "SELECT email, name, email_count FROM contacts WHERE email = ?", (email_address,)
         )
+    elif company_domain:
+        contacts = fetchall(
+            conn,
+            """SELECT ct.email, ct.name, ct.email_count
+               FROM contacts ct
+               JOIN company_contacts cc ON cc.contact_email = ct.email
+               JOIN companies c ON cc.company_id = c.id
+               WHERE c.domain = ? COLLATE NOCASE AND ct.email_count > 0
+               ORDER BY ct.email_count DESC""",
+            (company_domain,),
+        )
+        if limit:
+            contacts = contacts[:limit]
     else:
         sql = "SELECT email, name, email_count FROM contacts WHERE email_count > 0 ORDER BY email_count DESC"
         if limit:
