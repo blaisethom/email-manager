@@ -30,13 +30,26 @@ def run_extract_base(conn: sqlite3.Connection, backend: LLMBackend, config: Conf
 
 
 
-def run_fetch_homepages(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
+def run_fetch_homepages(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.homepage import fetch_homepages
+
+    if label and not company:
+        # Fetch homepages for all companies with this label
+        from email_manager.db import fetchall
+        domains = [r[0] for r in fetchall(
+            conn,
+            "SELECT c.domain FROM companies c JOIN company_labels cl ON c.id = cl.company_id WHERE cl.label = ?",
+            (label,),
+        )]
+        total = 0
+        for domain in domains:
+            total += fetch_homepages(conn, console=console or Console(), limit=limit, company_domain=domain, max_workers=config.homepage_max_workers)
+        return total
 
     return fetch_homepages(conn, console=console or Console(), limit=limit, company_domain=company, max_workers=config.homepage_max_workers)
 
 
-def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
+def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.company_labels import label_companies, load_label_config
 
     console = console or Console()
@@ -53,13 +66,27 @@ def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: C
         return label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company)
 
 
-def run_contact_memory(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
+def run_contact_memory(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.contact_memory import build_contact_memories
     from email_manager.memory.factory import get_memory_backends, get_memory_strategy
 
     console = console or Console()
     memory_backends = get_memory_backends(config, conn)
     strategy = get_memory_strategy(config)
+
+    if label and not company:
+        # Process contacts for all companies with this label
+        from email_manager.db import fetchall
+        domains = [r[0] for r in fetchall(
+            conn,
+            "SELECT c.domain FROM companies c JOIN company_labels cl ON c.id = cl.company_id WHERE cl.label = ?",
+            (label,),
+        )]
+        total = 0
+        for domain in domains:
+            total += build_contact_memories(conn, backend, memory_backends, strategy, company_domain=domain, console=console, limit=limit)
+        return total
+
     return build_contact_memories(conn, backend, memory_backends, strategy, company_domain=company, console=console, limit=limit)
 
 
@@ -139,7 +166,7 @@ def run_discover_discussions(conn: sqlite3.Connection, backend: LLMBackend, conf
         )
 
 
-def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None) -> int:
+def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.analyse_discussions import analyse_discussions, load_category_config
 
     console = console or Console()
@@ -156,11 +183,11 @@ def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, confi
         return analyse_discussions(
             conn, backend, categories_config=categories_config,
             limit=limit, force=force, clean=clean, company_domain=company,
-            on_progress=on_progress,
+            company_label=label, on_progress=on_progress,
         )
 
 
-def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None) -> int:
+def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.propose_actions import propose_actions, load_category_config
 
     console = console or Console()
@@ -177,7 +204,7 @@ def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: C
         return propose_actions(
             conn, backend, categories_config=categories_config,
             limit=limit, force=force, clean=clean, company_domain=company,
-            on_progress=on_progress,
+            company_label=label, on_progress=on_progress,
         )
 
 

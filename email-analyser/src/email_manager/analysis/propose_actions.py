@@ -144,6 +144,7 @@ def _get_active_discussions(
     conn: sqlite3.Connection,
     categories_config: list[dict[str, Any]],
     company_domain: str | None = None,
+    company_label: str | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Get discussions not in a terminal state."""
@@ -158,6 +159,10 @@ def _get_active_discussions(
     if company_domain:
         conditions.append("c.domain = ? COLLATE NOCASE")
         params.append(company_domain)
+
+    if company_label:
+        conditions.append("d.company_id IN (SELECT company_id FROM company_labels WHERE label = ?)")
+        params.append(company_label)
 
     # Exclude terminal states
     if terminal_states:
@@ -209,6 +214,7 @@ def propose_actions(
     force: bool = False,
     clean: bool = False,
     company_domain: str | None = None,
+    company_label: str | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> int:
     """Propose next actions for active discussions.
@@ -233,7 +239,8 @@ def propose_actions(
         conn.commit()
 
     discussions = _get_active_discussions(
-        conn, categories_config, company_domain=company_domain, limit=limit,
+        conn, categories_config, company_domain=company_domain,
+        company_label=company_label, limit=limit,
     )
 
     if not force and not clean:

@@ -164,6 +164,7 @@ def _get_discussions_to_analyse(
     limit: int | None = None,
     force: bool = False,
     company_domain: str | None = None,
+    company_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Get discussions that need analysis (milestones + state + summary).
 
@@ -178,6 +179,10 @@ def _get_discussions_to_analyse(
     if company_domain:
         conditions.append("c.domain = ?")
         params.append(company_domain)
+
+    if company_label:
+        conditions.append("d.company_id IN (SELECT company_id FROM company_labels WHERE label = ?)")
+        params.append(company_label)
 
     if not force:
         # Discussions with events but no milestones, or with events newer than last analysis
@@ -350,6 +355,7 @@ def analyse_discussions(
     force: bool = False,
     clean: bool = False,
     company_domain: str | None = None,
+    company_label: str | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> int:
     """Analyse discussions: evaluate milestones, infer state, generate summary.
@@ -364,6 +370,7 @@ def analyse_discussions(
 
     discussions = _get_discussions_to_analyse(
         conn, limit=limit, force=force or clean, company_domain=company_domain,
+        company_label=company_label,
     )
     if not discussions:
         logger.info("No discussions to analyse")
