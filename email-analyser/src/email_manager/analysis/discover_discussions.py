@@ -256,19 +256,34 @@ def _save_discussion(
     thread_ids = disc.get("thread_ids", [])
     participants = disc.get("participants", [])
 
+    # Compute first_seen/last_seen from event dates
+    event_dates = []
+    if event_ids:
+        placeholders = ",".join("?" for _ in event_ids)
+        date_rows = fetchall(
+            conn,
+            f"SELECT event_date FROM event_ledger WHERE id IN ({placeholders}) AND event_date IS NOT NULL",
+            tuple(event_ids),
+        )
+        event_dates = [r["event_date"] for r in date_rows]
+
+    first_seen = min(event_dates) if event_dates else now
+    last_seen = max(event_dates) if event_dates else now
+
     if existing_id:
-        # Update existing discussion
+        # Update existing discussion — extend date range
         conn.execute(
             """UPDATE discussions SET
                current_state = COALESCE(?, current_state),
                participants = ?,
-               last_seen = ?,
+               first_seen = MIN(first_seen, ?),
+               last_seen = MAX(last_seen, ?),
                updated_at = ?
                WHERE id = ?""",
             (
                 disc.get("current_state"),
                 json.dumps(participants),
-                now, now,
+                first_seen, last_seen, now,
                 existing_id,
             ),
         )
@@ -296,7 +311,7 @@ def _save_discussion(
                 resolved_company_id,
                 None,  # summary will be set by analyse_discussions
                 json.dumps(participants),
-                now, now, model_used, now,
+                first_seen, last_seen, model_used, now,
             ),
         )
         disc_id = cursor.lastrowid
