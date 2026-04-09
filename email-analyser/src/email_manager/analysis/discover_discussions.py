@@ -447,11 +447,73 @@ def _merge_overlapping_discussions(conn: sqlite3.Connection, company_id: int) ->
 
 # ── Public entry point ──────────────────────────────────────────────────────
 
+def _clean_discussions(
+    conn: sqlite3.Connection,
+    company_domain: str | None = None,
+    company_label: str | None = None,
+) -> int:
+    """Delete discussions (and related data) for the given scope. Returns count deleted."""
+    # Find company IDs in scope
+    if company_domain:
+        company_ids = [r[0] for r in fetchall(
+            conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (company_domain,)
+        )]
+    elif company_label:
+        company_ids = [r[0] for r in fetchall(
+            conn,
+            "SELECT company_id FROM company_labels WHERE label = ?",
+            (company_label,),
+        )]
+    else:
+        company_ids = None  # all
+
+    if company_ids is not None and not company_ids:
+        return 0
+
+    # Build WHERE clause
+    if company_ids is not None:
+        placeholders = ",".join("?" for _ in company_ids)
+        disc_where = f"company_id IN ({placeholders})"
+        params = tuple(company_ids)
+    else:
+        disc_where = "1=1"
+        params = ()
+
+    # Get discussion IDs to clean
+    disc_ids = [r[0] for r in fetchall(
+        conn, f"SELECT id FROM discussions WHERE {disc_where}", params
+    )]
+    if not disc_ids:
+        return 0
+
+    id_placeholders = ",".join("?" for _ in disc_ids)
+    id_params = tuple(disc_ids)
+
+    # Unassign events (don't delete them — they belong to extract_events)
+    conn.execute(
+        f"UPDATE event_ledger SET discussion_id = NULL WHERE discussion_id IN ({id_placeholders})",
+        id_params,
+    )
+    # Delete related records
+    conn.execute(f"DELETE FROM milestones WHERE discussion_id IN ({id_placeholders})", id_params)
+    conn.execute(f"DELETE FROM discussion_state_history WHERE discussion_id IN ({id_placeholders})", id_params)
+    conn.execute(f"DELETE FROM discussion_threads WHERE discussion_id IN ({id_placeholders})", id_params)
+    conn.execute(f"DELETE FROM actions WHERE discussion_id IN ({id_placeholders})", id_params)
+    conn.execute(f"DELETE FROM discussion_events WHERE discussion_id IN ({id_placeholders})", id_params)
+    # Delete discussions themselves
+    conn.execute(f"DELETE FROM discussions WHERE id IN ({id_placeholders})", id_params)
+    conn.commit()
+
+    logger.info("Cleaned %d discussions", len(disc_ids))
+    return len(disc_ids)
+
+
 def discover_discussions(
     conn: sqlite3.Connection,
     backend: LLMBackend,
     limit: int | None = None,
     force: bool = False,
+    clean: bool = False,
     company_domain: str | None = None,
     company_label: str | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
@@ -460,6 +522,9 @@ def discover_discussions(
 
     Returns the number of discussions created or updated.
     """
+    if clean:
+        _clean_discussions(conn, company_domain=company_domain, company_label=company_label)
+
     account_owner = _detect_account_owner(conn)
 
     companies = _get_companies_with_unassigned_events(

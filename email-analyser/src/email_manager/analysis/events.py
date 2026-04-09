@@ -444,6 +444,41 @@ def _save_events(conn: sqlite3.Connection, events: list[dict[str, Any]]) -> int:
 
 # ── Public entry point ──────────────────────────────────────────────────────
 
+def _clean_events(
+    conn: sqlite3.Connection,
+    company_domain: str | None = None,
+    company_label: str | None = None,
+) -> int:
+    """Delete existing events for the given scope. Returns count deleted."""
+    if company_domain:
+        like = f"%@{company_domain}%"
+        result = conn.execute(
+            """DELETE FROM event_ledger WHERE thread_id IN (
+                SELECT DISTINCT e.thread_id FROM emails e
+                WHERE e.from_address LIKE ? OR e.to_addresses LIKE ?
+            )""",
+            (like, like),
+        )
+    elif company_label:
+        result = conn.execute(
+            """DELETE FROM event_ledger WHERE thread_id IN (
+                SELECT DISTINCT e.thread_id FROM emails e
+                JOIN company_contacts cc ON (e.from_address = cc.contact_email
+                                             OR e.to_addresses LIKE '%' || cc.contact_email || '%')
+                JOIN company_labels cl ON cc.company_id = cl.company_id
+                WHERE cl.label = ?
+            )""",
+            (company_label,),
+        )
+    else:
+        result = conn.execute("DELETE FROM event_ledger")
+    conn.commit()
+    count = result.changes if hasattr(result, 'changes') else 0
+    if count:
+        logger.info("Cleaned %d events", count)
+    return count
+
+
 def extract_events(
     conn: sqlite3.Connection,
     backend: LLMBackend,
@@ -451,6 +486,7 @@ def extract_events(
     config_path: Path | None = None,
     limit: int | None = None,
     force: bool = False,
+    clean: bool = False,
     company_domain: str | None = None,
     company_label: str | None = None,
     on_progress: Callable[[int, int], None] | None = None,
@@ -459,6 +495,9 @@ def extract_events(
 
     Returns the number of events extracted.
     """
+    if clean:
+        _clean_events(conn, company_domain=company_domain, company_label=company_label)
+
     if categories_config is None:
         categories_config = load_category_config(config_path)
 
@@ -470,7 +509,7 @@ def extract_events(
     account_owner = _detect_account_owner(conn)
 
     thread_ids = _get_threads_to_process(
-        conn, limit=limit, force=force,
+        conn, limit=limit, force=force or clean,
         company_domain=company_domain, company_label=company_label,
     )
     if not thread_ids:

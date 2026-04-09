@@ -38,6 +38,7 @@ def run_pipeline(
     console: Console | None = None,
     limit: int | None = None,
     force: bool = False,
+    clean: bool = False,
     company: str | None = None,
     label: str | None = None,
     exclude: list[str] | None = None,
@@ -81,6 +82,8 @@ def run_pipeline(
             kwargs = dict(console=console, limit=limit, force=force)
             # Pass filtering options to stages that accept them
             sig = inspect.signature(stage_fn)
+            if clean and "clean" in sig.parameters:
+                kwargs["clean"] = True
             for opt_name, opt_val in [("company", company), ("label", label), ("exclude", exclude), ("contact", contact)]:
                 if opt_name in sig.parameters and opt_val:
                     kwargs[opt_name] = opt_val

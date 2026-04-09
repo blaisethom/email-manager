@@ -309,6 +309,38 @@ def _save_state_and_summary(
 
 # ── Public entry point ──────────────────────────────────────────────────────
 
+def _clean_analysis(
+    conn: sqlite3.Connection,
+    company_domain: str | None = None,
+) -> int:
+    """Delete milestones and state history for discussions in scope."""
+    if company_domain:
+        disc_ids = [r[0] for r in fetchall(
+            conn,
+            """SELECT d.id FROM discussions d
+               JOIN companies c ON d.company_id = c.id
+               WHERE c.domain = ? COLLATE NOCASE""",
+            (company_domain,),
+        )]
+    else:
+        disc_ids = [r[0] for r in fetchall(conn, "SELECT id FROM discussions")]
+
+    if not disc_ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in disc_ids)
+    params = tuple(disc_ids)
+    conn.execute(f"DELETE FROM milestones WHERE discussion_id IN ({placeholders})", params)
+    conn.execute(f"DELETE FROM discussion_state_history WHERE discussion_id IN ({placeholders})", params)
+    conn.execute(
+        f"UPDATE discussions SET current_state = NULL, summary = NULL WHERE id IN ({placeholders})",
+        params,
+    )
+    conn.commit()
+    logger.info("Cleaned analysis for %d discussions", len(disc_ids))
+    return len(disc_ids)
+
+
 def analyse_discussions(
     conn: sqlite3.Connection,
     backend: LLMBackend,
@@ -316,6 +348,7 @@ def analyse_discussions(
     config_path: Path | None = None,
     limit: int | None = None,
     force: bool = False,
+    clean: bool = False,
     company_domain: str | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> int:
@@ -323,11 +356,14 @@ def analyse_discussions(
 
     Returns the number of discussions analysed.
     """
+    if clean:
+        _clean_analysis(conn, company_domain=company_domain)
+
     if categories_config is None:
         categories_config = load_category_config(config_path)
 
     discussions = _get_discussions_to_analyse(
-        conn, limit=limit, force=force, company_domain=company_domain,
+        conn, limit=limit, force=force or clean, company_domain=company_domain,
     )
     if not discussions:
         logger.info("No discussions to analyse")

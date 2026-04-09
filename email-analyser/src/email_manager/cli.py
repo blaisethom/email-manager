@@ -292,19 +292,20 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 @click.option("--stage", "-s", type=click.Choice(["sync_calendar", "extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "contact_memory", "categorise", "summarise_threads", "discussions", "link_calendar"]), multiple=True, help="Run specific stage(s) only")
 @click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
 @click.option("--force", "-f", is_flag=True, help="Force regeneration even if already processed")
+@click.option("--clean", is_flag=True, help="Delete previous output for the scoped stages before reprocessing")
 @click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")
 @click.option("--label", "-l", default=None, help="Scope to all companies with this label (e.g. customer, vendor)")
 @click.option("--exclude", "-x", multiple=True, help="Exclude company by domain or name (repeatable)")
 @click.option("--contact", default=None, help="Scope to a specific contact's company (email address)")
 @click.pass_context
-def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, company: str | None, label: str | None, exclude: tuple[str, ...], contact: str | None) -> None:
+def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], contact: str | None) -> None:
     """Run AI analysis pipeline on synced emails."""
     from email_manager.pipeline.runner import run_pipeline
 
     config: Config = ctx.obj["config"]
     console = Console()
     stages = list(stage) if stage else None
-    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, company=company, label=label, exclude=list(exclude) if exclude else None, contact=contact)
+    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, label=label, exclude=list(exclude) if exclude else None, contact=contact)
 
 
 @cli.command()

@@ -150,7 +150,7 @@ def run_link_calendar(conn: sqlite3.Connection, backend: LLMBackend, config: Con
     return link_calendar_events(conn, console=console or Console(), limit=limit)
 
 
-def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
+def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.events import extract_events, load_category_config
 
     console = console or Console()
@@ -165,13 +165,13 @@ def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Co
 
         return extract_events(
             conn, backend, categories_config=categories_config,
-            limit=limit, force=force,
+            limit=limit, force=force, clean=clean,
             company_domain=company, company_label=label,
             on_progress=on_progress,
         )
 
 
-def run_discover_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
+def run_discover_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.discover_discussions import discover_discussions
 
     console = console or Console()
@@ -185,13 +185,13 @@ def run_discover_discussions(conn: sqlite3.Connection, backend: LLMBackend, conf
             logger.info("discover_discussions: %d/%d — %s", done, total, name)
 
         return discover_discussions(
-            conn, backend, limit=limit, force=force,
+            conn, backend, limit=limit, force=force, clean=clean,
             company_domain=company, company_label=label,
             on_progress=on_progress,
         )
 
 
-def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
+def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None) -> int:
     from email_manager.analysis.analyse_discussions import analyse_discussions, load_category_config
 
     console = console or Console()
@@ -207,7 +207,7 @@ def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, confi
 
         return analyse_discussions(
             conn, backend, categories_config=categories_config,
-            limit=limit, force=force, company_domain=company,
+            limit=limit, force=force, clean=clean, company_domain=company,
             on_progress=on_progress,
         )
 
