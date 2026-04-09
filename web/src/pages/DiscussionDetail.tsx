@@ -237,6 +237,76 @@ function EventTimeline({ events, onThreadClick }: { events: EventLedgerEntry[]; 
   );
 }
 
+function splitQuotedText(body: string): { fresh: string; quoted: string } {
+  const lines = body.split('\n');
+  let splitIndex = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    // "On <date>, <person> wrote:" (Gmail-style)
+    if (/^On .{10,80} wrote:\s*$/.test(line)) {
+      splitIndex = i;
+      break;
+    }
+
+    // "-----Original Message-----" (Outlook)
+    if (/^-{2,}\s*Original Message\s*-{2,}$/i.test(line)) {
+      splitIndex = i;
+      break;
+    }
+
+    // "From: ... Sent: ..." block after a blank line
+    if (/^From:\s+\S+/.test(line) && i > 0 && lines[i - 1].trim() === '') {
+      splitIndex = i;
+      break;
+    }
+
+    // Block of consecutive ">" quoted lines (3+)
+    if (line.startsWith('>')) {
+      let runEnd = i;
+      while (runEnd < lines.length && lines[runEnd].trim().startsWith('>')) runEnd++;
+      if (runEnd - i >= 3) {
+        splitIndex = i;
+        break;
+      }
+    }
+  }
+
+  const fresh = lines.slice(0, splitIndex).join('\n').trimEnd();
+  const quoted = lines.slice(splitIndex).join('\n').trimStart();
+  return { fresh, quoted };
+}
+
+function EmailBody({ body }: { body: string }) {
+  const { fresh, quoted } = splitQuotedText(body);
+  const [showQuoted, setShowQuoted] = useState(false);
+
+  if (!quoted) {
+    return <Markdown>{fresh}</Markdown>;
+  }
+
+  return (
+    <div>
+      <Markdown>{fresh}</Markdown>
+      <button
+        onClick={() => setShowQuoted(!showQuoted)}
+        className="mt-2 flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors"
+      >
+        <span className="inline-flex items-center justify-center w-5 h-5 border border-slate-300 rounded text-[10px]">
+          {showQuoted ? '▾' : '···'}
+        </span>
+        <span>{showQuoted ? 'Hide quoted text' : 'Show quoted text'}</span>
+      </button>
+      {showQuoted && (
+        <div className="mt-2 pl-3 border-l-2 border-slate-200 text-slate-400">
+          <Markdown>{quoted}</Markdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ThreadModal({ thread, onClose, highlightMessageId }: { thread: Thread; onClose: () => void; highlightMessageId?: string | null }) {
   const [emails, setEmails] = useState<ThreadEmail[]>([]);
   const [loading, setLoading] = useState(true);
@@ -376,7 +446,7 @@ function ThreadModal({ thread, onClose, highlightMessageId }: { thread: Thread; 
                       </div>
                       <div className="mt-1">
                         {email.body_text
-                          ? <Markdown>{email.body_text}</Markdown>
+                          ? <EmailBody body={email.body_text} />
                           : <p className="text-sm text-slate-400 italic">(no text content)</p>
                         }
                       </div>
