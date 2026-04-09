@@ -181,6 +181,16 @@ export interface Milestone {
   confidence: number | null;
 }
 
+export interface ProposedAction {
+  id: number;
+  action: string;
+  reasoning: string | null;
+  priority: string;
+  wait_until: string | null;
+  assignee: string | null;
+  created_at: string;
+}
+
 export interface DiscussionDetail extends Discussion {
   state_history: StateHistoryEntry[];
   threads: Thread[];
@@ -188,6 +198,7 @@ export interface DiscussionDetail extends Discussion {
   calendar_events: CalendarEvent[];
   events: EventLedgerEntry[];
   milestones: Milestone[];
+  proposed_actions: ProposedAction[];
 }
 
 export interface CompaniesResponse {

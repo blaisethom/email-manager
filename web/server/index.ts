@@ -825,6 +825,33 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
     evidence_event_ids: parseJsonField<string[]>(m.evidence_event_ids) ?? [],
   }));
 
+  // Proposed next actions
+  const proposedActions = (() => {
+    try {
+      return db
+        .prepare(
+          `SELECT id, action, reasoning, priority, wait_until, assignee, created_at
+           FROM proposed_actions
+           WHERE discussion_id = ?
+           ORDER BY
+             CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+             id ASC`
+        )
+        .all(id) as Array<{
+        id: number;
+        action: string;
+        reasoning: string | null;
+        priority: string;
+        wait_until: string | null;
+        assignee: string | null;
+        created_at: string;
+      }>;
+    } catch {
+      // Table may not exist yet
+      return [];
+    }
+  })();
+
   res.json({
     ...discussion,
     participants: parseJsonField<string[]>(discussion.participants) ?? [],
@@ -834,6 +861,7 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
     calendar_events: calendarEvents,
     events,
     milestones,
+    proposed_actions: proposedActions,
   });
 });
 

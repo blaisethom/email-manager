@@ -289,7 +289,7 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--stage", "-s", type=click.Choice(["sync_calendar", "extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "contact_memory"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--stage", "-s", type=click.Choice(["sync_calendar", "extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "propose_actions", "contact_memory"]), multiple=True, help="Run specific stage(s) only")
 @click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
 @click.option("--force", "-f", is_flag=True, help="Force regeneration even if already processed")
 @click.option("--clean", is_flag=True, help="Delete previous output for the scoped stages before reprocessing")
@@ -311,7 +311,8 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
       5. extract_events       Extract business events from threads (AI)
       6. discover_discussions  Cluster events into discussions (AI)
       7. analyse_discussions   Evaluate milestones, state & summary (AI)
-      8. contact_memory       Generate contact relationship profiles (AI)
+      8. propose_actions      Suggest next steps for active discussions (AI)
+      9. contact_memory       Generate contact relationship profiles (AI)
 
     Use --stage/-s to run specific stages. Use --company/-c to scope to one
     company. Use --clean to delete previous output before reprocessing.

@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -321,6 +321,20 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS proposed_actions (
+    id              INTEGER PRIMARY KEY,
+    discussion_id   INTEGER REFERENCES discussions(id),
+    action          TEXT NOT NULL,
+    reasoning       TEXT,
+    priority        TEXT,
+    wait_until      TEXT,
+    assignee        TEXT,
+    model_used      TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposed_actions_discussion ON proposed_actions(discussion_id);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -383,6 +397,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v12(conn)
     if current_version < 13:
         _migrate_to_v13(conn)
+    if current_version < 14:
+        _migrate_to_v14(conn)
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
@@ -805,6 +821,27 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     print("  [migration v13] event ledger, milestones, feedback tables added")
+
+
+def _migrate_to_v14(conn: sqlite3.Connection) -> None:
+    """Migration v13 -> v14: add proposed_actions table."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS proposed_actions (
+        id              INTEGER PRIMARY KEY,
+        discussion_id   INTEGER REFERENCES discussions(id),
+        action          TEXT NOT NULL,
+        reasoning       TEXT,
+        priority        TEXT,
+        wait_until      TEXT,
+        assignee        TEXT,
+        model_used      TEXT,
+        created_at      TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_proposed_actions_discussion ON proposed_actions(discussion_id)")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v14] proposed_actions table added")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:

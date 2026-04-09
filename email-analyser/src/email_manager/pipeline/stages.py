@@ -140,6 +140,27 @@ def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, confi
         )
 
 
+def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None) -> int:
+    from email_manager.analysis.propose_actions import propose_actions, load_category_config
+
+    console = console or Console()
+    categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
+
+    with _make_progress(console) as progress:
+        task = progress.add_task("propose_actions", total=None)
+
+        def on_progress(done: int, total: int, name: str = "") -> None:
+            desc = f"propose_actions ({name})" if name and done < total else "propose_actions"
+            progress.update(task, completed=done, total=total or 0, description=desc)
+            logger.info("propose_actions: %d/%d — %s", done, total, name)
+
+        return propose_actions(
+            conn, backend, categories_config=categories_config,
+            limit=limit, force=force, clean=clean, company_domain=company,
+            on_progress=on_progress,
+        )
+
+
 ALL_STAGES = {
     # Phase 1: Ingestion & base extraction
     "sync_calendar": run_sync_calendar,
@@ -150,6 +171,7 @@ ALL_STAGES = {
     "extract_events": run_extract_events,
     "discover_discussions": run_discover_discussions,
     "analyse_discussions": run_analyse_discussions,
-    # Phase 3: Contact enrichment
+    # Phase 3: Proposed actions & contact enrichment
+    "propose_actions": run_propose_actions,
     "contact_memory": run_contact_memory,
 }

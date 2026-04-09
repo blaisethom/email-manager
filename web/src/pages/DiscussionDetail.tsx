@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { api } from '../api';
-import type { DiscussionDetail, DiscussionAction, StateHistoryEntry, Thread, ThreadEmail, CalendarEvent, EventLedgerEntry, Milestone } from '../types';
+import type { DiscussionDetail, DiscussionAction, StateHistoryEntry, Thread, ThreadEmail, CalendarEvent, EventLedgerEntry, Milestone, ProposedAction } from '../types';
 import Badge from '../components/Badge';
 import Markdown from '../components/Markdown';
 import { formatDate, formatDateTime } from '../utils';
@@ -159,6 +159,70 @@ function MilestoneTracker({ milestones }: { milestones: Milestone[] }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+const PRIORITY_STYLES: Record<string, { bg: string; icon: string; label: string }> = {
+  high: { bg: 'bg-red-50 border-red-200', icon: 'text-red-500', label: 'High' },
+  medium: { bg: 'bg-amber-50 border-amber-200', icon: 'text-amber-500', label: 'Medium' },
+  low: { bg: 'bg-slate-50 border-slate-200', icon: 'text-slate-400', label: 'Low' },
+};
+
+function ProposedActionsList({ actions }: { actions: ProposedAction[] }) {
+  if (actions.length === 0) return null;
+
+  return (
+    <div className="space-y-3">
+      {actions.map((pa) => {
+        const style = PRIORITY_STYLES[pa.priority] ?? PRIORITY_STYLES.medium;
+        const isWait = !!pa.wait_until;
+
+        return (
+          <div key={pa.id} className={`rounded-lg border p-4 ${style.bg}`}>
+            <div className="flex items-start gap-3">
+              {/* Priority icon */}
+              <div className={`mt-0.5 flex-shrink-0 ${style.icon}`}>
+                {isWait ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <polyline points="12 6 12 12 16 14" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                  </svg>
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-slate-900 leading-relaxed">
+                  {pa.action}
+                </p>
+                {pa.reasoning && (
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">{pa.reasoning}</p>
+                )}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-2 text-xs text-slate-400">
+                  <span className={`font-medium ${style.icon}`}>{style.label} priority</span>
+                  {pa.wait_until && (
+                    <span>Wait until {formatDate(pa.wait_until)}</span>
+                  )}
+                  {pa.assignee && (
+                    <Link
+                      to={`/contacts/${encodeURIComponent(pa.assignee)}`}
+                      className="text-blue-600 hover:underline"
+                    >
+                      {pa.assignee}
+                    </Link>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -598,6 +662,16 @@ export default function DiscussionDetailPage() {
         <div className="card p-6 mb-6">
           <h2 className="text-base font-semibold text-slate-900 mb-3">Summary</h2>
           <p className="text-slate-700 leading-relaxed">{data.summary}</p>
+        </div>
+      )}
+
+      {/* Proposed Actions (next steps) */}
+      {data.proposed_actions && data.proposed_actions.length > 0 && (
+        <div className="card p-6 mb-6">
+          <h2 className="text-base font-semibold text-slate-900 mb-3">
+            Next Steps
+          </h2>
+          <ProposedActionsList actions={data.proposed_actions} />
         </div>
       )}
 
