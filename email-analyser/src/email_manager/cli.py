@@ -394,43 +394,46 @@ def projects(ctx: click.Context, limit: int) -> None:
 @click.option("--limit", "-n", default=30)
 @click.option("--label", "-l", default=None, help="Filter by label (e.g. customer, vendor, partner)")
 @click.option("--unlabelled", is_flag=True, help="Show only companies without labels")
+@click.option("--updated-after", default=None, help="Only show companies with discussions updated after this date (YYYY-MM-DD)")
+@click.option("--updated-before", default=None, help="Only show companies with discussions updated before this date (YYYY-MM-DD)")
 @click.pass_context
-def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool) -> None:
+def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool, updated_after: str | None, updated_before: str | None) -> None:
     """List companies you interact with and their associated email addresses."""
     config: Config = ctx.obj["config"]
     conn = get_db(config)
 
+    conditions: list[str] = []
+    params: list = []
+
     if label:
-        rows = fetchall(
-            conn,
-            """SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
-               FROM companies c
-               JOIN company_labels cl ON c.id = cl.company_id
-               WHERE cl.label = ?
-               ORDER BY cl.confidence DESC, c.email_count DESC
-               LIMIT ?""",
-            (label, limit),
-        )
+        conditions.append("c.id IN (SELECT company_id FROM company_labels WHERE label = ?)")
+        params.append(label)
     elif unlabelled:
-        rows = fetchall(
-            conn,
-            """SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
-               FROM companies c
-               LEFT JOIN company_labels cl ON c.id = cl.company_id
-               WHERE cl.company_id IS NULL
-               ORDER BY c.email_count DESC
-               LIMIT ?""",
-            (limit,),
-        )
-    else:
-        rows = fetchall(
-            conn,
-            """SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
-               FROM companies c
-               ORDER BY c.email_count DESC
-               LIMIT ?""",
-            (limit,),
-        )
+        conditions.append("c.id NOT IN (SELECT company_id FROM company_labels)")
+
+    if updated_after:
+        conditions.append("c.id IN (SELECT d.company_id FROM discussions d WHERE d.updated_at >= ?)")
+        params.append(updated_after)
+
+    if updated_before:
+        conditions.append("""(
+            c.id NOT IN (SELECT d.company_id FROM discussions d WHERE d.company_id IS NOT NULL)
+            OR c.id IN (SELECT d.company_id FROM discussions d GROUP BY d.company_id HAVING MAX(d.updated_at) < ?)
+        )""")
+        params.append(updated_before)
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+
+    rows = fetchall(
+        conn,
+        f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+            FROM companies c
+            {where}
+            ORDER BY c.email_count DESC
+            LIMIT ?""",
+        tuple(params),
+    )
 
     console = Console()
     if not rows:
@@ -671,8 +674,11 @@ def labels(ctx: click.Context, limit: int, label: str | None) -> None:
 @click.option("--contact", default=None, help="Filter by contact email")
 @click.option("--category", default=None, help="Filter by discussion category")
 @click.option("--state", default=None, help="Filter by current state")
+@click.option("--label", "-l", default=None, help="Filter by company label (e.g. investor)")
+@click.option("--updated-after", default=None, help="Only show discussions updated after this date (YYYY-MM-DD)")
+@click.option("--updated-before", default=None, help="Only show discussions updated before this date (YYYY-MM-DD)")
 @click.pass_context
-def discussions(ctx: click.Context, limit: int, company: str | None, contact: str | None, category: str | None, state: str | None) -> None:
+def discussions(ctx: click.Context, limit: int, company: str | None, contact: str | None, category: str | None, state: str | None, label: str | None, updated_after: str | None, updated_before: str | None) -> None:
     """List extracted discussions and their current status."""
     config: Config = ctx.obj["config"]
     conn = get_db(config)
@@ -716,13 +722,25 @@ def discussions(ctx: click.Context, limit: int, company: str | None, contact: st
         conditions.append("d.current_state = ?")
         params.append(state)
 
+    if label:
+        conditions.append("d.company_id IN (SELECT company_id FROM company_labels WHERE label = ?)")
+        params.append(label)
+
+    if updated_after:
+        conditions.append("d.updated_at >= ?")
+        params.append(updated_after)
+
+    if updated_before:
+        conditions.append("(d.updated_at IS NULL OR d.updated_at < ?)")
+        params.append(updated_before)
+
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
 
     rows = fetchall(
         conn,
         f"""SELECT d.id, d.title, d.category, d.current_state, d.summary,
-                   d.first_seen, d.last_seen, c.name as company_name, c.domain
+                   d.first_seen, d.last_seen, d.updated_at, c.name as company_name, c.domain
             FROM discussions d
             JOIN companies c ON d.company_id = c.id
             {where}
@@ -738,23 +756,25 @@ def discussions(ctx: click.Context, limit: int, company: str | None, contact: st
 
     table = Table(title="Discussions")
     table.add_column("ID", width=5, justify="right")
-    table.add_column("Company", width=30)
-    table.add_column("Category", width=18)
-    table.add_column("State", width=16)
+    table.add_column("Company", width=25)
+    table.add_column("Category", width=16)
+    table.add_column("State", width=14)
     table.add_column("Title", width=35)
     table.add_column("Start", width=10)
     table.add_column("End", width=10)
+    table.add_column("Analysed", width=10)
 
     for row in rows:
         company_display = f"{row['company_name']} ({row['domain']})"
         table.add_row(
             str(row["id"]),
-            company_display[:30],
+            company_display[:25],
             row["category"],
             row["current_state"] or "",
             row["title"][:35],
             (row["first_seen"] or "")[:10],
             (row["last_seen"] or "")[:10],
+            (row["updated_at"] or "")[:10],
         )
 
     console.print(table)
@@ -1178,20 +1198,37 @@ def threads(ctx: click.Context, limit: int) -> None:
 
 @cli.command()
 @click.option("--limit", "-n", default=30)
+@click.option("--updated-after", default=None, help="Only show contacts last seen after this date (YYYY-MM-DD)")
+@click.option("--updated-before", default=None, help="Only show contacts last seen before this date (YYYY-MM-DD)")
 @click.pass_context
-def contacts(ctx: click.Context, limit: int) -> None:
+def contacts(ctx: click.Context, limit: int, updated_after: str | None, updated_before: str | None) -> None:
     """List contacts ranked by frequency."""
     config: Config = ctx.obj["config"]
     conn = get_db(config)
 
+    conditions: list[str] = []
+    params: list = []
+
+    if updated_after:
+        conditions.append("last_seen >= ?")
+        params.append(updated_after)
+
+    if updated_before:
+        conditions.append("(last_seen IS NULL OR last_seen < ?)")
+        params.append(updated_before)
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+
     rows = fetchall(
         conn,
-        """SELECT email, name, company, email_count, sent_count, received_count,
+        f"""SELECT email, name, company, email_count, sent_count, received_count,
                   first_seen, last_seen
            FROM contacts
+           {where}
            ORDER BY email_count DESC
            LIMIT ?""",
-        (limit,),
+        tuple(params),
     )
     conn.close()
 
