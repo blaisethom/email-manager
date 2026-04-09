@@ -25,7 +25,7 @@ def _make_progress(console: Console) -> Progress:
 def run_extract_base(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
     from email_manager.analysis.base_extract import extract_base
 
-    return extract_base(conn, console=console or Console(), limit=limit)
+    return extract_base(conn, console=console or Console(), limit=limit, force=force)
 
 
 

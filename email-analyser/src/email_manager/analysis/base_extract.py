@@ -22,14 +22,37 @@ def _make_progress(console: Console) -> Progress:
     )
 
 
-def extract_base(conn: sqlite3.Connection, console: Console = None, limit: int | None = None) -> int:
+def extract_base(conn: sqlite3.Connection, console: Console = None, limit: int | None = None, force: bool = False) -> int:
     """Extract all structured data from email headers: contacts, companies, domains."""
     if console is None:
         console = Console()
 
+    # Skip if nothing has changed since the last run
+    if not force:
+        last_run = fetchone(
+            conn,
+            "SELECT completed_at FROM pipeline_runs WHERE stage = 'extract_base' AND status = 'success' ORDER BY completed_at DESC LIMIT 1",
+        )
+        if last_run and last_run["completed_at"]:
+            new_emails = fetchone(
+                conn,
+                "SELECT COUNT(*) as cnt FROM emails WHERE fetched_at > ?",
+                (last_run["completed_at"],),
+            )
+            if new_emails and new_emails["cnt"] == 0:
+                console.print("  [dim]No new emails since last extract_base — skipping.[/dim]")
+                return 0
+
     companies_count = _extract_companies(conn, console=console, limit=limit)
     contacts_count = _extract_contacts(conn, console=console)
     co_email_count = _compute_co_email_stats(conn, console=console)
+
+    # Record this run
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO pipeline_runs (stage, email_id, status, started_at, completed_at) VALUES ('extract_base', 0, 'success', ?, ?)",
+        (now, now),
+    )
     conn.commit()
     return companies_count + contacts_count + co_email_count
 
