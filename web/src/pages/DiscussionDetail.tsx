@@ -163,7 +163,23 @@ function MilestoneTracker({ milestones }: { milestones: Milestone[] }) {
   );
 }
 
-function EventTimeline({ events }: { events: EventLedgerEntry[] }) {
+const DOMAIN_COLORS: Record<string, string> = {
+  investment: 'bg-blue-100 text-blue-700',
+  'investor-relations': 'bg-indigo-100 text-indigo-700',
+  'pharma-deal': 'bg-purple-100 text-purple-700',
+  scheduling: 'bg-sky-100 text-sky-700',
+  'contract-negotiation': 'bg-amber-100 text-amber-700',
+  partnership: 'bg-teal-100 text-teal-700',
+  hiring: 'bg-pink-100 text-pink-700',
+  'internal-decision': 'bg-slate-100 text-slate-700',
+  'board-discussion': 'bg-orange-100 text-orange-700',
+  'vendor-selection': 'bg-lime-100 text-lime-700',
+  'support-issue': 'bg-red-100 text-red-700',
+  newsletter: 'bg-gray-100 text-gray-600',
+  other: 'bg-gray-100 text-gray-600',
+};
+
+function EventTimeline({ events, onThreadClick }: { events: EventLedgerEntry[]; onThreadClick: (threadId: string) => void }) {
   if (events.length === 0) return null;
 
   // Group events by date
@@ -173,22 +189,6 @@ function EventTimeline({ events }: { events: EventLedgerEntry[] }) {
     if (!byDate[date]) byDate[date] = [];
     byDate[date].push(ev);
   }
-
-  const domainColors: Record<string, string> = {
-    investment: 'bg-blue-100 text-blue-700',
-    'investor-relations': 'bg-indigo-100 text-indigo-700',
-    'pharma-deal': 'bg-purple-100 text-purple-700',
-    scheduling: 'bg-sky-100 text-sky-700',
-    'contract-negotiation': 'bg-amber-100 text-amber-700',
-    partnership: 'bg-teal-100 text-teal-700',
-    hiring: 'bg-pink-100 text-pink-700',
-    'internal-decision': 'bg-slate-100 text-slate-700',
-    'board-discussion': 'bg-orange-100 text-orange-700',
-    'vendor-selection': 'bg-lime-100 text-lime-700',
-    'support-issue': 'bg-red-100 text-red-700',
-    newsletter: 'bg-gray-100 text-gray-600',
-    other: 'bg-gray-100 text-gray-600',
-  };
 
   return (
     <div className="relative">
@@ -205,17 +205,26 @@ function EventTimeline({ events }: { events: EventLedgerEntry[] }) {
               <div className="text-xs font-medium text-slate-500 mb-2">{formatDate(date)}</div>
               <div className="space-y-1.5">
                 {dateEvents.map((ev) => (
-                  <div key={ev.id} className="flex items-start gap-2">
-                    <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${domainColors[ev.domain] ?? domainColors.other}`}>
+                  <div key={ev.id} className="flex items-start gap-2 group">
+                    <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${DOMAIN_COLORS[ev.domain] ?? DOMAIN_COLORS.other}`}>
                       {ev.type.replace(/_/g, ' ')}
                     </span>
-                    <span className="text-sm text-slate-600 leading-relaxed">
+                    <span className="text-sm text-slate-600 leading-relaxed flex-1">
                       {ev.detail || `${ev.actor ?? ''} ${ev.target ? `→ ${ev.target}` : ''}`}
                     </span>
                     {ev.confidence != null && ev.confidence < 0.7 && (
                       <span className="text-xs text-amber-500 flex-shrink-0">
                         {Math.round(ev.confidence * 100)}%
                       </span>
+                    )}
+                    {ev.thread_id && (
+                      <button
+                        onClick={() => onThreadClick(ev.thread_id!)}
+                        className="text-xs text-blue-500 hover:text-blue-700 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="View source email thread"
+                      >
+                        view email
+                      </button>
                     )}
                   </div>
                 ))}
@@ -556,7 +565,27 @@ export default function DiscussionDetailPage() {
             Event Timeline
             <span className="ml-2 text-sm font-normal text-slate-500">({data.events.length})</span>
           </h2>
-          <EventTimeline events={data.events} />
+          <EventTimeline
+            events={data.events}
+            onThreadClick={(threadId) => {
+              const thread = data.threads.find((t) => t.thread_id === threadId);
+              if (thread) {
+                setSelectedThread(thread);
+              } else {
+                // Thread not in discussion's thread list — open modal with minimal thread info
+                setSelectedThread({
+                  id: 0,
+                  thread_id: threadId,
+                  subject: null,
+                  email_count: 0,
+                  first_date: null,
+                  last_date: null,
+                  participants: [],
+                  summary: null,
+                });
+              }
+            }}
+          />
         </div>
       )}
 
