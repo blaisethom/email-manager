@@ -98,8 +98,10 @@ function loadCategoryConfig(): CategoryConfig[] {
     if (fs.existsSync(p)) {
       const raw = yaml.load(fs.readFileSync(p, 'utf8')) as { categories?: CategoryConfig[] };
       if (raw?.categories) {
-        return raw.categories.map((c) => ({
-          ...c,
+        return raw.categories.map((c: any) => ({
+          name: c.name,
+          description: c.description ?? '',
+          states: c.states ?? c.workflow_states ?? [],
           terminal_states: c.terminal_states ?? [],
         }));
       }
