@@ -446,6 +446,11 @@ def _merge_overlapping_discussions(conn: sqlite3.Connection, company_id: int) ->
                         "DELETE FROM discussion_events WHERE discussion_id = ?",
                         (loser,),
                     )
+                    # Delete proposed actions for loser
+                    conn.execute(
+                        "DELETE FROM proposed_actions WHERE discussion_id = ?",
+                        (loser,),
+                    )
                     # Delete loser discussion
                     conn.execute("DELETE FROM discussions WHERE id = ?", (loser,))
                     total_merges += 1
@@ -515,6 +520,7 @@ def _clean_discussions(
     conn.execute(f"DELETE FROM discussion_threads WHERE discussion_id IN ({id_placeholders})", id_params)
     conn.execute(f"DELETE FROM actions WHERE discussion_id IN ({id_placeholders})", id_params)
     conn.execute(f"DELETE FROM discussion_events WHERE discussion_id IN ({id_placeholders})", id_params)
+    conn.execute(f"DELETE FROM proposed_actions WHERE discussion_id IN ({id_placeholders})", id_params)
     # Delete discussions themselves
     conn.execute(f"DELETE FROM discussions WHERE id IN ({id_placeholders})", id_params)
     conn.commit()
