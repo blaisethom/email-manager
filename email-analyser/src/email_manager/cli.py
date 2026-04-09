@@ -299,8 +299,9 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 @click.option("--contact", default=None, help="Scope to a specific contact's company (email address)")
 @click.option("--per-company", is_flag=True, help="Run all stages per company before moving to the next (requires --label)")
 @click.option("--stale-before", default=None, help="Only process companies whose last analysis is before this date (YYYY-MM-DD)")
+@click.option("--dry-run", is_flag=True, help="Show which companies would be processed without running anything")
 @click.pass_context
-def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], contact: str | None, per_company: bool, stale_before: str | None) -> None:
+def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], contact: str | None, per_company: bool, stale_before: str | None, dry_run: bool) -> None:
     """Run AI analysis pipeline on synced emails.
 
     Pipeline stages (in order):
@@ -328,7 +329,7 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
     config: Config = ctx.obj["config"]
     console = Console()
     stages = list(stage) if stage else None
-    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, label=label, exclude=list(exclude) if exclude else None, contact=contact, per_company=per_company, stale_before=stale_before)
+    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, label=label, exclude=list(exclude) if exclude else None, contact=contact, per_company=per_company, stale_before=stale_before, dry_run=dry_run)
 
 
 @cli.command()

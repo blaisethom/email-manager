@@ -90,6 +90,7 @@ def run_pipeline(
     contact: str | None = None,
     per_company: bool = False,
     stale_before: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, int]:
     if console is None:
         console = Console()
@@ -159,6 +160,30 @@ def run_pipeline(
         target_domains = _resolve_company_domains()
         if target_domains is not None:
             console.print(f"[bold]Targeting {len(target_domains)} companies[/bold]")
+
+    if dry_run:
+        if company:
+            console.print(f"\n[bold]Dry run — would process 1 company:[/bold]")
+            console.print(f"  {company}")
+        elif target_domains is not None:
+            console.print(f"\n[bold]Dry run — would process {len(target_domains)} companies:[/bold]")
+            from email_manager.db import fetchall as _fa
+            for domain in target_domains:
+                row = _fa(conn, "SELECT name, email_count FROM companies WHERE domain = ? COLLATE NOCASE", (domain,))
+                name = row[0]["name"] if row else "?"
+                emails = row[0]["email_count"] if row else 0
+                # Get last analysis date
+                last = _fa(conn,
+                    "SELECT MAX(d.updated_at) as last_update FROM discussions d JOIN companies c ON d.company_id = c.id WHERE c.domain = ? COLLATE NOCASE",
+                    (domain,))
+                last_date = (last[0]["last_update"] or "never")[:10] if last else "never"
+                console.print(f"  {domain:<35s} {name:<25s} {emails:>6} emails  last analysed: {last_date}")
+        else:
+            console.print("\n[bold]Dry run — no company filter, would process all companies[/bold]")
+        console.print(f"\nStages: {', '.join(stage_names)}")
+        console.print(f"Flags: force={force}, clean={clean}, per_company={per_company}")
+        conn.close()
+        return {}
 
     if per_company and target_domains is not None:
         # Company-first mode: run all stages for each company before moving on
