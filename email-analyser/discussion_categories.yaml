@@ -71,17 +71,17 @@ categories:
       - lost
 
   - name: investment
-    description: "Fundraising or investment round discussion"
+    description: "Active fundraising or new investment process — an investor evaluating whether to invest, or a company raising a round. This is NOT for ongoing reporting to existing investors."
 
     event_types:
       - name: intro_made
-        description: "Initial introduction or first contact with investor"
+        description: "Initial introduction or first contact with a potential investor"
       - name: deck_shared
-        description: "Pitch deck or investment materials shared"
+        description: "Pitch deck or investment materials shared with potential investor"
       - name: meeting_held
-        description: "Meeting or call took place with investor"
+        description: "Meeting or call took place with potential investor"
       - name: interest_expressed
-        description: "Investor expressed interest in proceeding"
+        description: "Investor expressed interest in proceeding with evaluation"
       - name: nda_sent
         description: "NDA sent for signature"
       - name: nda_signed
@@ -141,6 +141,59 @@ categories:
     terminal_states:
       - signed
       - passed
+
+  - name: investor-relations
+    description: "Ongoing communication with existing investors — quarterly reporting, fund admin, capital calls, tax documents, portfolio updates. NOT for new fundraising or investment evaluation."
+
+    event_types:
+      - name: report_shared
+        description: "Quarterly or annual report shared with existing investors"
+      - name: metrics_update
+        description: "KPI, financial, or operational metrics update sent to investors"
+      - name: capital_call_issued
+        description: "Capital call or drawdown notice issued by a fund"
+      - name: capital_call_responded
+        description: "Response to a capital call (payment made or acknowledged)"
+      - name: distribution_received
+        description: "Distribution or dividend received from a fund investment"
+      - name: tax_document_sent
+        description: "Tax certificate, K-1, or FATCA/CRS form sent"
+      - name: tax_document_received
+        description: "Tax document or self-certification form received"
+      - name: fund_update_received
+        description: "General fund update or newsletter received from fund manager"
+      - name: admin_request
+        description: "Administrative request from fund administrator (KYC, compliance, forms)"
+      - name: admin_response
+        description: "Response to administrative request"
+      - name: agm_notice
+        description: "Annual general meeting notice or materials sent"
+      - name: consent_requested
+        description: "Investor consent requested for fund matter"
+      - name: consent_given
+        description: "Investor consent provided"
+      - name: meeting_held
+        description: "Investor update meeting or call with existing investor"
+
+    milestones:
+      - name: relationship_active
+        description: "Active investor relationship with regular communications"
+      - name: reporting_current
+        description: "All required reports up to date"
+      - name: tax_docs_complete
+        description: "All tax documentation filed and current"
+      - name: admin_current
+        description: "All administrative requests fulfilled"
+      - name: consent_resolved
+        description: "All pending consent requests resolved"
+
+    workflow_states:
+      - active
+      - action_required
+      - up_to_date
+      - dormant
+    terminal_states:
+      - dormant
 
   - name: scheduling
     description: "Scheduling a meeting, call, or event"
