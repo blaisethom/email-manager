@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any, Callable
 
 from email_manager.ai.base import LLMBackend
@@ -33,6 +34,12 @@ Rules:
 5. Multiple threads can contribute to the same discussion.
 6. List all participant email addresses involved in each discussion.
 7. Set company_domain to the primary external company domain for the discussion.
+8. IMPORTANT — merge aggressively. If two groups of events are about the same underlying deal, process, or topic with the same company, they are ONE discussion even if they span different threads or time periods. For example:
+   - An investor intro thread and a follow-up DD thread for the same round = ONE investment discussion.
+   - A scheduling thread and the actual meeting follow-up for the same deal = part of that deal's discussion.
+   - Multiple emails about the same hiring candidate across threads = ONE hiring discussion.
+   Do NOT create separate discussions just because events come from different threads or have gaps in time. Only create separate discussions when the underlying business matter is genuinely different (e.g. a seed round vs a later Series A are different discussions).
+9. When existing discussions are provided, prefer assigning events to them rather than creating new overlapping ones. Only create a new discussion if the events clearly don't fit any existing one.
 
 Respond with JSON only."""
 
@@ -312,6 +319,132 @@ def _save_discussion(
     return disc_id
 
 
+# ── Post-discovery merge ────────────────────────────────────────────────────
+
+def _merge_overlapping_discussions(conn: sqlite3.Connection, company_id: int) -> int:
+    """Merge discussions within the same company + category that overlap.
+
+    Two discussions are candidates for merging if they share:
+    - Same company_id and category
+    - Overlapping thread IDs, OR high title similarity (>=0.6)
+
+    The discussion with more events is kept; the other's events/threads are
+    reassigned to it, and it is deleted.
+
+    Returns the number of merges performed.
+    """
+    categories = fetchall(
+        conn,
+        "SELECT DISTINCT category FROM discussions WHERE company_id = ?",
+        (company_id,),
+    )
+
+    total_merges = 0
+    for cat_row in categories:
+        category = cat_row["category"]
+        discs = fetchall(
+            conn,
+            """SELECT d.id, d.title,
+                      (SELECT COUNT(*) FROM event_ledger el WHERE el.discussion_id = d.id) as event_count
+               FROM discussions d
+               WHERE d.company_id = ? AND d.category = ?
+               ORDER BY event_count DESC""",
+            (company_id, category),
+        )
+        if len(discs) < 2:
+            continue
+
+        # Build thread sets for overlap detection
+        disc_threads: dict[int, set[str]] = {}
+        for d in discs:
+            threads = fetchall(
+                conn,
+                "SELECT thread_id FROM discussion_threads WHERE discussion_id = ?",
+                (d["id"],),
+            )
+            disc_threads[d["id"]] = {t["thread_id"] for t in threads}
+
+        # Find merge pairs (greedy: merge into the one with more events)
+        merged_into: dict[int, int] = {}  # loser_id -> winner_id
+        disc_list = list(discs)
+
+        for i, d1 in enumerate(disc_list):
+            if d1["id"] in merged_into:
+                continue
+            for j in range(i + 1, len(disc_list)):
+                d2 = disc_list[j]
+                if d2["id"] in merged_into:
+                    continue
+
+                # Check thread overlap
+                threads_overlap = bool(disc_threads.get(d1["id"], set()) & disc_threads.get(d2["id"], set()))
+
+                # Check title similarity
+                title_sim = SequenceMatcher(
+                    None, d1["title"].lower(), d2["title"].lower()
+                ).ratio()
+
+                # Check if titles share key words (beyond stopwords)
+                stopwords = {"the", "a", "an", "and", "or", "of", "in", "to", "for", "with", "on", "at", "by", "from"}
+                words1 = {w for w in d1["title"].lower().split() if w not in stopwords and len(w) > 2}
+                words2 = {w for w in d2["title"].lower().split() if w not in stopwords and len(w) > 2}
+                shared_words = words1 & words2
+                word_overlap = len(shared_words) / max(len(words1 | words2), 1)
+
+                if threads_overlap or title_sim >= 0.6 or (title_sim >= 0.4 and word_overlap >= 0.4):
+                    # Merge d2 into d1 (d1 has more events since sorted DESC)
+                    winner, loser = d1["id"], d2["id"]
+                    merged_into[loser] = winner
+
+                    # Reassign events
+                    conn.execute(
+                        "UPDATE event_ledger SET discussion_id = ? WHERE discussion_id = ?",
+                        (winner, loser),
+                    )
+                    # Move threads
+                    conn.execute(
+                        """INSERT OR IGNORE INTO discussion_threads (discussion_id, thread_id)
+                           SELECT ?, thread_id FROM discussion_threads WHERE discussion_id = ?""",
+                        (winner, loser),
+                    )
+                    conn.execute(
+                        "DELETE FROM discussion_threads WHERE discussion_id = ?",
+                        (loser,),
+                    )
+                    # Move milestones (keep winner's, delete loser's)
+                    conn.execute(
+                        "DELETE FROM milestones WHERE discussion_id = ?",
+                        (loser,),
+                    )
+                    # Move state history
+                    conn.execute(
+                        "UPDATE discussion_state_history SET discussion_id = ? WHERE discussion_id = ?",
+                        (winner, loser),
+                    )
+                    # Move actions
+                    conn.execute(
+                        "UPDATE actions SET discussion_id = ? WHERE discussion_id = ?",
+                        (winner, loser),
+                    )
+                    # Move calendar event links
+                    conn.execute(
+                        "DELETE FROM discussion_events WHERE discussion_id = ?",
+                        (loser,),
+                    )
+                    # Delete loser discussion
+                    conn.execute("DELETE FROM discussions WHERE id = ?", (loser,))
+                    total_merges += 1
+                    logger.info(
+                        "Merged discussion %d (%s) into %d (%s) [%s, title_sim=%.2f, thread_overlap=%s]",
+                        loser, d2["title"][:40], winner, d1["title"][:40],
+                        category, title_sim, threads_overlap,
+                    )
+
+    if total_merges:
+        conn.commit()
+    return total_merges
+
+
 # ── Public entry point ──────────────────────────────────────────────────────
 
 def discover_discussions(
@@ -369,9 +502,13 @@ def discover_discussions(
             total_discussions += 1
 
         conn.commit()
+
+        # Post-discovery merge: detect and merge overlapping discussions
+        merges = _merge_overlapping_discussions(conn, company["id"])
+
         logger.info(
-            "Company %s: %d discussions (%d events)",
-            company["domain"], len(discussions), len(events),
+            "Company %s: %d discussions (%d events, %d merges)",
+            company["domain"], len(discussions), len(events), merges,
         )
 
     if on_progress:

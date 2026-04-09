@@ -390,7 +390,38 @@ def _process_thread(
             "created_at": now,
         })
 
-    return parsed_events
+    return _dedup_events(parsed_events)
+
+
+def _dedup_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove duplicate events from the same thread.
+
+    Two events are considered duplicates if they have the same type, domain,
+    and event_date, and similar actor/target. Keep the one with higher confidence
+    (or the first one if tied).
+    """
+    if len(events) <= 1:
+        return events
+
+    seen: dict[str, dict[str, Any]] = {}
+    for ev in events:
+        # Build a dedup key: domain + type + date + actor (normalized)
+        actor = (ev.get("actor") or "").lower().strip()
+        target = (ev.get("target") or "").lower().strip()
+        date = ev.get("event_date") or ""
+        key = f"{ev['domain']}|{ev['type']}|{date}|{actor}|{target}"
+
+        if key in seen:
+            # Keep the one with higher confidence
+            if (ev.get("confidence") or 0) > (seen[key].get("confidence") or 0):
+                seen[key] = ev
+        else:
+            seen[key] = ev
+
+    deduped = list(seen.values())
+    if len(deduped) < len(events):
+        logger.info("Deduped %d → %d events", len(events), len(deduped))
+    return deduped
 
 
 def _save_events(conn: sqlite3.Connection, events: list[dict[str, Any]]) -> int:

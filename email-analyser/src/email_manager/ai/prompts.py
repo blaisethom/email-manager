@@ -114,6 +114,8 @@ Rules:
 8. If calendar events are provided, extract events from those too (e.g. meeting_held from a past calendar event).
 9. Do NOT infer events that aren't evidenced. If you're unsure, skip it or use low confidence.
 10. Do NOT extract events from automated notifications, newsletters, or marketing emails unless they evidence a real business event.
+11. IMPORTANT: Each real-world event should appear ONLY ONCE. If email 1 says "I'm sending the deck" and email 3 says "thanks for the deck", that is ONE deck_shared event — extract it from the earliest email that evidences it (email 1). Do NOT extract the same event again from later emails that merely reference it.
+12. Set source_email_index to the index of the email where the event FIRST appears or is FIRST evidenced.
 
 Respond with JSON only."""
 
