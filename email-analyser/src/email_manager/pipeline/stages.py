@@ -84,6 +84,26 @@ def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Co
     console = console or Console()
     categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
 
+    # Use a cheaper model for event extraction if configured
+    stage_backend = backend
+    extract_model = getattr(config, "extract_events_model", "")
+    if extract_model and backend is not None:
+        from email_manager.ai.factory import get_backend as _get_backend
+        from email_manager.config import Config as _Config
+
+        override_config = _Config(
+            ai_backend=config.ai_backend,
+            anthropic_api_key=config.anthropic_api_key,
+            claude_model=extract_model,
+            ollama_model=config.ollama_model,
+            ollama_url=config.ollama_url,
+        )
+        try:
+            stage_backend = _get_backend(override_config)
+            console.print(f"  [dim]extract_events using model: {stage_backend.model_name}[/dim]")
+        except Exception:
+            pass  # fall back to default backend
+
     with _make_progress(console) as progress:
         task = progress.add_task("extract_events", total=None)
 
@@ -92,7 +112,7 @@ def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Co
             logger.info("extract_events: %d/%d threads", done, total)
 
         return extract_events(
-            conn, backend, categories_config=categories_config,
+            conn, stage_backend, categories_config=categories_config,
             limit=limit, force=force, clean=clean,
             company_domain=company, company_label=label,
             on_progress=on_progress,

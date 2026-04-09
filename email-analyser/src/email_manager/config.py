@@ -53,6 +53,7 @@ class Config(BaseSettings):
     ai_backend: str = "claude"  # "claude", "claude-cli", or "ollama"
     anthropic_api_key: str = ""
     claude_model: str = ""
+    extract_events_model: str = ""  # model override for extract_events stage (e.g. claude-sonnet-4-6)
     ollama_model: str = "llama3.1:8b"
     ollama_url: str = "http://localhost:11434"
     ai_batch_size: int = 10
