@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { api } from '../api';
-import type { DiscussionDetail, DiscussionAction, StateHistoryEntry, Thread, ThreadEmail, CalendarEvent } from '../types';
+import type { DiscussionDetail, DiscussionAction, StateHistoryEntry, Thread, ThreadEmail, CalendarEvent, EventLedgerEntry, Milestone } from '../types';
 import Badge from '../components/Badge';
 import Markdown from '../components/Markdown';
 import { formatDate, formatDateTime } from '../utils';
@@ -95,6 +95,134 @@ function ActionRow({ action }: { action: DiscussionAction }) {
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MilestoneTracker({ milestones }: { milestones: Milestone[] }) {
+  if (milestones.length === 0) return null;
+
+  const achieved = milestones.filter((m) => m.achieved);
+  const pending = milestones.filter((m) => !m.achieved);
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-4">
+        <div className="flex items-center gap-1.5 text-sm text-slate-500">
+          <span className="font-semibold text-emerald-600">{achieved.length}</span>
+          <span>of</span>
+          <span className="font-semibold">{milestones.length}</span>
+          <span>milestones</span>
+        </div>
+        {/* Progress bar */}
+        <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+            style={{ width: `${(achieved.length / milestones.length) * 100}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        {achieved.map((m) => (
+          <div key={m.name} className="flex items-center gap-3 py-1.5">
+            <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center flex-shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <span className="text-sm font-medium text-slate-900">
+                {m.name.replace(/_/g, ' ')}
+              </span>
+            </div>
+            {m.achieved_date && (
+              <span className="text-xs text-slate-400 flex-shrink-0">{formatDate(m.achieved_date)}</span>
+            )}
+            {m.confidence != null && m.confidence > 0 && (
+              <span className="text-xs text-slate-400 flex-shrink-0">
+                {Math.round(m.confidence * 100)}%
+              </span>
+            )}
+          </div>
+        ))}
+        {pending.map((m) => (
+          <div key={m.name} className="flex items-center gap-3 py-1.5 opacity-50">
+            <div className="w-6 h-6 rounded-full border-2 border-slate-200 flex items-center justify-center flex-shrink-0">
+              <div className="w-2 h-2 rounded-full bg-slate-300" />
+            </div>
+            <span className="text-sm text-slate-500">
+              {m.name.replace(/_/g, ' ')}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EventTimeline({ events }: { events: EventLedgerEntry[] }) {
+  if (events.length === 0) return null;
+
+  // Group events by date
+  const byDate: Record<string, EventLedgerEntry[]> = {};
+  for (const ev of events) {
+    const date = ev.event_date ?? 'Unknown';
+    if (!byDate[date]) byDate[date] = [];
+    byDate[date].push(ev);
+  }
+
+  const domainColors: Record<string, string> = {
+    investment: 'bg-blue-100 text-blue-700',
+    'investor-relations': 'bg-indigo-100 text-indigo-700',
+    'pharma-deal': 'bg-purple-100 text-purple-700',
+    scheduling: 'bg-sky-100 text-sky-700',
+    'contract-negotiation': 'bg-amber-100 text-amber-700',
+    partnership: 'bg-teal-100 text-teal-700',
+    hiring: 'bg-pink-100 text-pink-700',
+    'internal-decision': 'bg-slate-100 text-slate-700',
+    'board-discussion': 'bg-orange-100 text-orange-700',
+    'vendor-selection': 'bg-lime-100 text-lime-700',
+    'support-issue': 'bg-red-100 text-red-700',
+    newsletter: 'bg-gray-100 text-gray-600',
+    other: 'bg-gray-100 text-gray-600',
+  };
+
+  return (
+    <div className="relative">
+      <div className="absolute left-3.5 top-0 bottom-0 w-px bg-slate-200" />
+      <div className="space-y-4">
+        {Object.entries(byDate).map(([date, dateEvents]) => (
+          <div key={date} className="relative pl-9">
+            {/* Date dot */}
+            <div className="absolute left-0 w-7 h-7 rounded-full bg-white border-2 border-slate-300 flex items-center justify-center flex-shrink-0">
+              <div className="w-2 h-2 rounded-full bg-slate-400" />
+            </div>
+
+            <div className="pb-2">
+              <div className="text-xs font-medium text-slate-500 mb-2">{formatDate(date)}</div>
+              <div className="space-y-1.5">
+                {dateEvents.map((ev) => (
+                  <div key={ev.id} className="flex items-start gap-2">
+                    <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${domainColors[ev.domain] ?? domainColors.other}`}>
+                      {ev.type.replace(/_/g, ' ')}
+                    </span>
+                    <span className="text-sm text-slate-600 leading-relaxed">
+                      {ev.detail || `${ev.actor ?? ''} ${ev.target ? `→ ${ev.target}` : ''}`}
+                    </span>
+                    {ev.confidence != null && ev.confidence < 0.7 && (
+                      <span className="text-xs text-amber-500 flex-shrink-0">
+                        {Math.round(ev.confidence * 100)}%
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -384,6 +512,14 @@ export default function DiscussionDetailPage() {
         </div>
       )}
 
+      {/* Milestones */}
+      {data.milestones && data.milestones.length > 0 && (
+        <div className="card p-6 mb-6">
+          <h2 className="text-base font-semibold text-slate-900 mb-3">Milestones</h2>
+          <MilestoneTracker milestones={data.milestones} />
+        </div>
+      )}
+
       {/* Participants */}
       {data.participants.length > 0 && (
         <div className="card p-6 mb-6">
@@ -410,6 +546,17 @@ export default function DiscussionDetailPage() {
         <div className="card p-6 mb-6">
           <h2 className="text-base font-semibold text-slate-900 mb-5">State History</h2>
           <StateTimeline history={data.state_history} />
+        </div>
+      )}
+
+      {/* Event Timeline */}
+      {data.events && data.events.length > 0 && (
+        <div className="card p-6 mb-6">
+          <h2 className="text-base font-semibold text-slate-900 mb-4">
+            Event Timeline
+            <span className="ml-2 text-sm font-normal text-slate-500">({data.events.length})</span>
+          </h2>
+          <EventTimeline events={data.events} />
         </div>
       )}
 

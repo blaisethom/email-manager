@@ -160,11 +160,33 @@ export interface CalendarEventsResponse {
   total: number;
 }
 
+export interface EventLedgerEntry {
+  id: string;
+  domain: string;
+  type: string;
+  actor: string | null;
+  target: string | null;
+  event_date: string | null;
+  detail: string | null;
+  confidence: number | null;
+  thread_id: string | null;
+}
+
+export interface Milestone {
+  name: string;
+  achieved: boolean;
+  achieved_date: string | null;
+  evidence_event_ids: string[];
+  confidence: number | null;
+}
+
 export interface DiscussionDetail extends Discussion {
   state_history: StateHistoryEntry[];
   threads: Thread[];
   actions: DiscussionAction[];
   calendar_events: CalendarEvent[];
+  events: EventLedgerEntry[];
+  milestones: Milestone[];
 }
 
 export interface CompaniesResponse {

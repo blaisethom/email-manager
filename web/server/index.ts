@@ -47,6 +47,36 @@ db.exec(`CREATE TABLE IF NOT EXISTS discussion_events (
 db.exec('CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_time)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_discussion_events_event ON discussion_events(event_id)');
 
+// Ensure event ledger and milestones tables exist (may not yet if Python migration hasn't run)
+db.exec(`CREATE TABLE IF NOT EXISTS event_ledger (
+    id              TEXT PRIMARY KEY,
+    thread_id       TEXT,
+    source_email_id TEXT,
+    source_calendar_event_id TEXT,
+    discussion_id   INTEGER REFERENCES discussions(id),
+    domain          TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    actor           TEXT,
+    target          TEXT,
+    event_date      TEXT,
+    detail          TEXT,
+    confidence      REAL,
+    model_version   TEXT,
+    prompt_version  TEXT,
+    created_at      TEXT NOT NULL
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS milestones (
+    id              INTEGER PRIMARY KEY,
+    discussion_id   INTEGER REFERENCES discussions(id),
+    name            TEXT NOT NULL,
+    achieved        INTEGER DEFAULT 0,
+    achieved_date   TEXT,
+    evidence_event_ids TEXT,
+    confidence      REAL,
+    last_evaluated_at TEXT,
+    UNIQUE(discussion_id, name)
+)`);
+
 console.log(`Database opened: ${DB_PATH}`);
 
 // ── Load discussion category config ────────────────────────────────────────
@@ -750,6 +780,48 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
     attendees: parseJsonField<Array<{ email: string; name?: string; response_status?: string }>>(e.attendees) ?? [],
   }));
 
+  // Events from the event ledger
+  const events = db
+    .prepare(
+      `SELECT id, domain, type, actor, target, event_date, detail, confidence, thread_id
+       FROM event_ledger
+       WHERE discussion_id = ?
+       ORDER BY event_date ASC, created_at ASC`
+    )
+    .all(id) as Array<{
+    id: string;
+    domain: string;
+    type: string;
+    actor: string | null;
+    target: string | null;
+    event_date: string | null;
+    detail: string | null;
+    confidence: number | null;
+    thread_id: string | null;
+  }>;
+
+  // Milestones
+  const milestonesRaw = db
+    .prepare(
+      `SELECT name, achieved, achieved_date, evidence_event_ids, confidence
+       FROM milestones
+       WHERE discussion_id = ?
+       ORDER BY achieved DESC, achieved_date ASC NULLS LAST`
+    )
+    .all(id) as Array<{
+    name: string;
+    achieved: number;
+    achieved_date: string | null;
+    evidence_event_ids: string | null;
+    confidence: number | null;
+  }>;
+
+  const milestones = milestonesRaw.map((m) => ({
+    ...m,
+    achieved: !!m.achieved,
+    evidence_event_ids: parseJsonField<string[]>(m.evidence_event_ids) ?? [],
+  }));
+
   res.json({
     ...discussion,
     participants: parseJsonField<string[]>(discussion.participants) ?? [],
@@ -757,6 +829,8 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
     threads,
     actions,
     calendar_events: calendarEvents,
+    events,
+    milestones,
   });
 });
 
