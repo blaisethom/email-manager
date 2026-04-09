@@ -50,7 +50,7 @@ def extract_base(conn: sqlite3.Connection, console: Console = None, limit: int |
     # Record this run
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "INSERT INTO pipeline_runs (stage, email_id, status, started_at, completed_at) VALUES ('extract_base', 0, 'success', ?, ?)",
+        "INSERT INTO pipeline_runs (stage, email_id, status, started_at, completed_at) VALUES ('extract_base', NULL, 'success', ?, ?)",
         (now, now),
     )
     conn.commit()
