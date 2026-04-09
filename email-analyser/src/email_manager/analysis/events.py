@@ -269,6 +269,29 @@ def _get_threads_to_process(
     return [r["thread_id"] for r in rows]
 
 
+MAX_EMAILS_PER_CHUNK = 12  # Split threads larger than this into chunks
+
+
+def _chunk_emails(emails: list[dict], max_per_chunk: int = MAX_EMAILS_PER_CHUNK) -> list[list[dict]]:
+    """Split a large email list into overlapping chunks.
+
+    Each chunk gets 1 email of overlap with the previous chunk so the LLM
+    has context for what came before.
+    """
+    if len(emails) <= max_per_chunk:
+        return [emails]
+
+    chunks = []
+    start = 0
+    while start < len(emails):
+        end = min(start + max_per_chunk, len(emails))
+        chunks.append(emails[start:end])
+        start = end - 1  # 1 email overlap
+        if start <= 0:
+            break
+    return chunks
+
+
 def _process_thread(
     conn: sqlite3.Connection,
     backend: LLMBackend,
@@ -277,120 +300,126 @@ def _process_thread(
     domains_block: str,
     account_owner: str | None,
 ) -> list[dict[str, Any]]:
-    """Extract events from a single thread."""
-    emails = fetchall(
+    """Extract events from a single thread, chunking large threads."""
+    all_emails = fetchall(
         conn,
         """SELECT message_id, date, from_address, from_name, to_addresses, cc_addresses,
                   subject, body_text
            FROM emails WHERE thread_id = ? ORDER BY date ASC""",
         (thread_id,),
     )
-    if not emails:
+    if not all_emails:
         return []
 
-    # Format emails
-    formatted = _format_thread_emails(emails)
-    messages_text = "\n".join(formatted)
-
-    # Get participant emails for calendar context
+    # Get participant emails for calendar context (from all emails)
     participant_emails: set[str] = set()
-    for e in emails:
+    for e in all_emails:
         for field in ("from_address", "to_addresses", "cc_addresses"):
             val = e[field]
             if val:
                 participant_emails.update(a.lower() for a in _EMAIL_RE.findall(val))
 
-    # Get date range
-    start_date = emails[0]["date"][:10] if emails[0]["date"] else None
-    end_date = emails[-1]["date"][:10] if emails[-1]["date"] else None
-
-    # Calendar context
+    start_date = all_emails[0]["date"][:10] if all_emails[0]["date"] else None
+    end_date = all_emails[-1]["date"][:10] if all_emails[-1]["date"] else None
     calendar_block = _get_calendar_context(conn, participant_emails, start_date, end_date)
 
-    # Build prompt
-    subject = emails[0]["subject"] or "(no subject)"
+    subject = all_emails[0]["subject"] or "(no subject)"
     participants = ", ".join(sorted(participant_emails))
     owner_line = f"\nAccount owner (\"me\"): {account_owner}" if account_owner else ""
 
-    user_prompt = EXTRACT_EVENTS_USER.format(
-        owner_line=owner_line,
-        subject=subject,
-        participants=participants,
-        domains_block=domains_block,
-        messages=messages_text,
-        calendar_block=calendar_block,
-    )
-
-    # Call LLM
-    try:
-        result = backend.complete_json(EXTRACT_EVENTS_SYSTEM, user_prompt)
-    except Exception as e:
-        logger.error("LLM call failed for thread %s: %s", thread_id, e)
-        return []
-
-    # Parse events
-    raw_events = result.get("events", [])
+    # Process in chunks for large threads
+    chunks = _chunk_emails(all_emails)
+    all_parsed: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat()
 
-    parsed_events = []
-    for ev in raw_events:
-        event_type = ev.get("type", "")
-        domain = ev.get("domain", "")
+    for chunk_idx, emails in enumerate(chunks):
+        formatted = _format_thread_emails(emails)
+        messages_text = "\n".join(formatted)
 
-        # Validate event type against category vocabulary
-        # First check the declared domain, then fall back to any domain
-        valid_types_for_domain: set[str] = set()
+        chunk_note = ""
+        if len(chunks) > 1:
+            chunk_note = f"\n\nNote: This is part {chunk_idx + 1} of {len(chunks)} of a long thread. Extract events from ALL emails shown."
+
+        user_prompt = EXTRACT_EVENTS_USER.format(
+            owner_line=owner_line,
+            subject=subject,
+            participants=participants,
+            domains_block=domains_block,
+            messages=messages_text,
+            calendar_block=calendar_block if chunk_idx == 0 else "",
+        ) + chunk_note
+
+        try:
+            result = backend.complete_json(EXTRACT_EVENTS_SYSTEM, user_prompt)
+        except Exception as e:
+            logger.error("LLM call failed for thread %s (chunk %d): %s", thread_id, chunk_idx, e)
+            continue
+
+        raw_events = result.get("events", [])
+
+        # Build type-to-domain lookup once
         all_type_to_domain: dict[str, str] = {}
         for cat in categories:
             for et in cat.get("event_types", []):
                 type_name = et["name"] if isinstance(et, dict) else et
                 all_type_to_domain[type_name] = cat["name"]
+
+        for ev in raw_events:
+            event_type = ev.get("type", "")
+            domain = ev.get("domain", "")
+
+            # Validate event type
+            valid_types_for_domain: set[str] = set()
+            for cat in categories:
                 if cat["name"] == domain:
-                    valid_types_for_domain.add(type_name)
+                    for et in cat.get("event_types", []):
+                        valid_types_for_domain.add(et["name"] if isinstance(et, dict) else et)
+                    break
 
-        if event_type not in valid_types_for_domain:
-            if event_type in all_type_to_domain:
-                # Type exists in a different domain — reassign
-                correct_domain = all_type_to_domain[event_type]
-                logger.info(
-                    "Reassigning event type '%s' from domain '%s' to '%s' in thread %s",
-                    event_type, domain, correct_domain, thread_id,
-                )
-                domain = correct_domain
-            else:
-                logger.warning(
-                    "Skipping unknown event type '%s' for domain '%s' in thread %s",
-                    event_type, domain, thread_id,
-                )
-                continue
+            if event_type not in valid_types_for_domain:
+                if event_type in all_type_to_domain:
+                    correct_domain = all_type_to_domain[event_type]
+                    logger.info(
+                        "Reassigning event type '%s' from domain '%s' to '%s' in thread %s",
+                        event_type, domain, correct_domain, thread_id,
+                    )
+                    domain = correct_domain
+                else:
+                    logger.warning(
+                        "Skipping unknown event type '%s' for domain '%s' in thread %s",
+                        event_type, domain, thread_id,
+                    )
+                    continue
 
-        # Resolve source email
-        source_idx = ev.get("source_email_index")
-        source_email_id = None
-        if source_idx is not None and 0 <= source_idx < len(emails):
-            source_email_id = emails[source_idx]["message_id"]
+            # Resolve source email from this chunk's email list
+            source_idx = ev.get("source_email_index")
+            source_email_id = None
+            if source_idx is not None and 0 <= source_idx < len(emails):
+                source_email_id = emails[source_idx]["message_id"]
 
-        # Check for calendar source
-        source_calendar_id = ev.get("calendar_event_id")
+            source_calendar_id = ev.get("calendar_event_id")
 
-        parsed_events.append({
-            "id": f"evt_{uuid.uuid4().hex[:12]}",
-            "thread_id": thread_id,
-            "source_email_id": source_email_id,
-            "source_calendar_event_id": source_calendar_id,
-            "domain": domain,
-            "type": event_type,
-            "actor": ev.get("actor"),
-            "target": ev.get("target"),
-            "event_date": ev.get("event_date"),
-            "detail": ev.get("detail"),
-            "confidence": ev.get("confidence", 0.5),
-            "model_version": backend.model_name,
-            "prompt_version": PROMPT_VERSION,
-            "created_at": now,
-        })
+            all_parsed.append({
+                "id": f"evt_{uuid.uuid4().hex[:12]}",
+                "thread_id": thread_id,
+                "source_email_id": source_email_id,
+                "source_calendar_event_id": source_calendar_id,
+                "domain": domain,
+                "type": event_type,
+                "actor": ev.get("actor"),
+                "target": ev.get("target"),
+                "event_date": ev.get("event_date"),
+                "detail": ev.get("detail"),
+                "confidence": ev.get("confidence", 0.5),
+                "model_version": backend.model_name,
+                "prompt_version": PROMPT_VERSION,
+                "created_at": now,
+            })
 
-    return _dedup_events(parsed_events)
+    if len(chunks) > 1:
+        logger.info("Thread %s: %d chunks, %d events before dedup", thread_id, len(chunks), len(all_parsed))
+
+    return _dedup_events(all_parsed)
 
 
 def _dedup_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
