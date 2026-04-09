@@ -138,14 +138,19 @@ def run_pipeline(
             params.append(label)
 
         if stale_before:
-            # Companies whose latest discussion updated_at is before the cutoff,
-            # OR companies with no discussions yet
+            # Companies whose latest milestone evaluation is before the cutoff,
+            # OR companies with no analysed discussions yet
             conditions.append("""(
-                NOT EXISTS (SELECT 1 FROM discussions d WHERE d.company_id = c.id)
+                NOT EXISTS (
+                    SELECT 1 FROM discussions d
+                    JOIN milestones m ON m.discussion_id = d.id
+                    WHERE d.company_id = c.id
+                )
                 OR c.id IN (
                     SELECT d.company_id FROM discussions d
+                    LEFT JOIN milestones m ON m.discussion_id = d.id
                     GROUP BY d.company_id
-                    HAVING MAX(d.updated_at) < ?
+                    HAVING MAX(m.last_evaluated_at) < ? OR MAX(m.last_evaluated_at) IS NULL
                 )
             )""")
             params.append(stale_before)

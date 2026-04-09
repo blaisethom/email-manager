@@ -394,8 +394,8 @@ def projects(ctx: click.Context, limit: int) -> None:
 @click.option("--limit", "-n", default=30)
 @click.option("--label", "-l", default=None, help="Filter by label (e.g. customer, vendor, partner)")
 @click.option("--unlabelled", is_flag=True, help="Show only companies without labels")
-@click.option("--updated-after", default=None, help="Only show companies with discussions updated after this date (YYYY-MM-DD)")
-@click.option("--updated-before", default=None, help="Only show companies with discussions updated before this date (YYYY-MM-DD)")
+@click.option("--updated-after", default=None, help="Only show companies analysed after this date (YYYY-MM-DD)")
+@click.option("--updated-before", default=None, help="Only show companies not analysed since this date, or never analysed (YYYY-MM-DD)")
 @click.pass_context
 def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool, updated_after: str | None, updated_before: str | None) -> None:
     """List companies you interact with and their associated email addresses."""
@@ -412,13 +412,26 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
         conditions.append("c.id NOT IN (SELECT company_id FROM company_labels)")
 
     if updated_after:
-        conditions.append("c.id IN (SELECT d.company_id FROM discussions d WHERE d.updated_at >= ?)")
+        conditions.append("""c.id IN (
+            SELECT d.company_id FROM discussions d
+            JOIN milestones m ON m.discussion_id = d.id
+            WHERE m.last_evaluated_at >= ?
+        )""")
         params.append(updated_after)
 
     if updated_before:
         conditions.append("""(
-            c.id NOT IN (SELECT d.company_id FROM discussions d WHERE d.company_id IS NOT NULL)
-            OR c.id IN (SELECT d.company_id FROM discussions d GROUP BY d.company_id HAVING MAX(d.updated_at) < ?)
+            c.id NOT IN (
+                SELECT d.company_id FROM discussions d
+                JOIN milestones m ON m.discussion_id = d.id
+                WHERE d.company_id IS NOT NULL
+            )
+            OR c.id IN (
+                SELECT d.company_id FROM discussions d
+                LEFT JOIN milestones m ON m.discussion_id = d.id
+                GROUP BY d.company_id
+                HAVING MAX(m.last_evaluated_at) < ? OR MAX(m.last_evaluated_at) IS NULL
+            )
         )""")
         params.append(updated_before)
 
@@ -675,8 +688,8 @@ def labels(ctx: click.Context, limit: int, label: str | None) -> None:
 @click.option("--category", default=None, help="Filter by discussion category")
 @click.option("--state", default=None, help="Filter by current state")
 @click.option("--label", "-l", default=None, help="Filter by company label (e.g. investor)")
-@click.option("--updated-after", default=None, help="Only show discussions updated after this date (YYYY-MM-DD)")
-@click.option("--updated-before", default=None, help="Only show discussions updated before this date (YYYY-MM-DD)")
+@click.option("--updated-after", default=None, help="Only show discussions analysed after this date (YYYY-MM-DD)")
+@click.option("--updated-before", default=None, help="Only show discussions not analysed since this date, or never analysed (YYYY-MM-DD)")
 @click.pass_context
 def discussions(ctx: click.Context, limit: int, company: str | None, contact: str | None, category: str | None, state: str | None, label: str | None, updated_after: str | None, updated_before: str | None) -> None:
     """List extracted discussions and their current status."""
@@ -727,11 +740,20 @@ def discussions(ctx: click.Context, limit: int, company: str | None, contact: st
         params.append(label)
 
     if updated_after:
-        conditions.append("d.updated_at >= ?")
+        conditions.append("""d.id IN (
+            SELECT m.discussion_id FROM milestones m WHERE m.last_evaluated_at >= ?
+        )""")
         params.append(updated_after)
 
     if updated_before:
-        conditions.append("(d.updated_at IS NULL OR d.updated_at < ?)")
+        conditions.append("""(
+            NOT EXISTS (SELECT 1 FROM milestones m WHERE m.discussion_id = d.id)
+            OR d.id IN (
+                SELECT m.discussion_id FROM milestones m
+                GROUP BY m.discussion_id
+                HAVING MAX(m.last_evaluated_at) < ?
+            )
+        )""")
         params.append(updated_before)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
