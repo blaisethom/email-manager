@@ -89,6 +89,7 @@ def run_pipeline(
     exclude: list[str] | None = None,
     contact: str | None = None,
     per_company: bool = False,
+    stale_before: str | None = None,
 ) -> dict[str, int]:
     if console is None:
         console = Console()
@@ -114,9 +115,53 @@ def run_pipeline(
 
     logger.info("Pipeline started — stages: %s", ", ".join(stage_names))
 
-    if per_company and label and not company:
-        # Company-first mode: run all stages for each company before moving on
+    def _resolve_company_domains() -> list[str] | None:
+        """Resolve the list of company domains to process, or None for default filtering."""
         from email_manager.db import fetchall
+
+        conditions = []
+        params: list[str] = []
+
+        if label:
+            conditions.append("c.id IN (SELECT company_id FROM company_labels WHERE label = ?)")
+            params.append(label)
+
+        if stale_before:
+            # Companies whose latest discussion updated_at is before the cutoff,
+            # OR companies with no discussions yet
+            conditions.append("""(
+                NOT EXISTS (SELECT 1 FROM discussions d WHERE d.company_id = c.id)
+                OR c.id IN (
+                    SELECT d.company_id FROM discussions d
+                    GROUP BY d.company_id
+                    HAVING MAX(d.updated_at) < ?
+                )
+            )""")
+            params.append(stale_before)
+
+        if not conditions:
+            return None
+
+        where = " AND ".join(conditions)
+        rows = fetchall(
+            conn,
+            f"SELECT DISTINCT c.domain FROM companies c WHERE {where} ORDER BY c.email_count DESC",
+            tuple(params),
+        )
+        domains = [r[0] for r in rows]
+        if limit:
+            domains = domains[:limit]
+        return domains
+
+    # Resolve companies if filtering by label or stale_before
+    target_domains = None
+    if (label or stale_before) and not company:
+        target_domains = _resolve_company_domains()
+        if target_domains is not None:
+            console.print(f"[bold]Targeting {len(target_domains)} companies[/bold]")
+
+    if per_company and target_domains is not None:
+        # Company-first mode: run all stages for each company before moving on
 
         # Run global stages once first
         global_stages = [s for s in stage_names if s in GLOBAL_STAGES]
@@ -124,34 +169,33 @@ def run_pipeline(
 
         for stage_name in global_stages:
             count = _run_stage(stage_name, conn, backend, config, console,
-                               limit=limit, force=force, clean=clean, label=label)
+                               limit=limit, force=force, clean=clean)
             results[stage_name] = count
 
-        # Get companies for this label
-        domains = [r[0] for r in fetchall(
-            conn,
-            """SELECT DISTINCT c.domain FROM companies c
-               JOIN company_labels cl ON c.id = cl.company_id
-               WHERE cl.label = ? ORDER BY c.email_count DESC""",
-            (label,),
-        )]
-        if limit:
-            domains = domains[:limit]
-
-        console.print(f"\n[bold]Processing {len(domains)} companies (per-company mode)[/bold]")
-
-        for i, domain in enumerate(domains):
+        for i, domain in enumerate(target_domains):
             console.print(f"\n{'='*60}")
-            console.print(f"  [bold cyan]Company {i+1}/{len(domains)}: {domain}[/bold cyan]")
+            console.print(f"  [bold cyan]Company {i+1}/{len(target_domains)}: {domain}[/bold cyan]")
             console.print(f"{'='*60}")
 
             for stage_name in per_co_stages:
                 count = _run_stage(stage_name, conn, backend, config, console,
                                    limit=None, force=force, clean=clean, company=domain)
-                key = f"{stage_name}"
-                results[key] = results.get(key, 0) + max(count, 0)
+                results[stage_name] = results.get(stage_name, 0) + max(count, 0)
+    elif target_domains is not None and not per_company:
+        # Stage-first mode with resolved company list
+        for stage_name in stage_names:
+            if stage_name in GLOBAL_STAGES:
+                count = _run_stage(stage_name, conn, backend, config, console,
+                                   limit=limit, force=force, clean=clean)
+            else:
+                count = 0
+                for domain in target_domains:
+                    c = _run_stage(stage_name, conn, backend, config, console,
+                                   limit=None, force=force, clean=clean, company=domain)
+                    count += max(c, 0)
+            results[stage_name] = count
     else:
-        # Stage-first mode (default): run all companies per stage
+        # Single company or no filtering — original behavior
         for stage_name in stage_names:
             count = _run_stage(stage_name, conn, backend, config, console,
                                limit=limit, force=force, clean=clean,
