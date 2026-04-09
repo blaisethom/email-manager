@@ -114,6 +114,16 @@ def run_pipeline(
         console.print("Running non-AI stages only")
         logger.info("Running non-AI stages only")
 
+    # Show what's being processed
+    if company:
+        console.print(f"Scoped to company: [bold]{company}[/bold]")
+    if label:
+        console.print(f"Scoped to label: [bold]{label}[/bold]")
+    if stale_before:
+        console.print(f"Stale before: [bold]{stale_before}[/bold]")
+    if clean:
+        console.print("[yellow]Clean mode: previous output will be deleted before reprocessing[/yellow]")
+
     logger.info("Pipeline started — stages: %s", ", ".join(stage_names))
 
     def _resolve_company_domains() -> list[str] | None:
