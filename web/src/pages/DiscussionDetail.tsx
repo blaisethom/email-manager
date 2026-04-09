@@ -179,7 +179,7 @@ const DOMAIN_COLORS: Record<string, string> = {
   other: 'bg-gray-100 text-gray-600',
 };
 
-function EventTimeline({ events, onThreadClick }: { events: EventLedgerEntry[]; onThreadClick: (threadId: string) => void }) {
+function EventTimeline({ events, onThreadClick }: { events: EventLedgerEntry[]; onThreadClick: (threadId: string, sourceEmailId?: string | null) => void }) {
   if (events.length === 0) return null;
 
   // Group events by date
@@ -219,9 +219,9 @@ function EventTimeline({ events, onThreadClick }: { events: EventLedgerEntry[]; 
                     )}
                     {ev.thread_id && (
                       <button
-                        onClick={() => onThreadClick(ev.thread_id!)}
+                        onClick={() => onThreadClick(ev.thread_id!, ev.source_email_id)}
                         className="text-xs text-blue-500 hover:text-blue-700 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="View source email thread"
+                        title="View source email"
                       >
                         view email
                       </button>
@@ -237,7 +237,7 @@ function EventTimeline({ events, onThreadClick }: { events: EventLedgerEntry[]; 
   );
 }
 
-function ThreadModal({ thread, onClose }: { thread: Thread; onClose: () => void }) {
+function ThreadModal({ thread, onClose, highlightMessageId }: { thread: Thread; onClose: () => void; highlightMessageId?: string | null }) {
   const [emails, setEmails] = useState<ThreadEmail[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -247,14 +247,23 @@ function ThreadModal({ thread, onClose }: { thread: Thread; onClose: () => void 
     api.getThreadEmails(thread.thread_id)
       .then((data) => {
         setEmails(data.emails);
-        // Auto-expand the last email
-        if (data.emails.length > 0) {
-          setExpandedIds(new Set([data.emails[data.emails.length - 1].id]));
+        // Auto-expand the highlighted email, or the last one
+        const target = highlightMessageId
+          ? data.emails.find((e) => e.message_id === highlightMessageId)
+          : data.emails[data.emails.length - 1];
+        if (target) {
+          setExpandedIds(new Set([target.id]));
+          // Scroll to the highlighted email after render
+          if (highlightMessageId) {
+            setTimeout(() => {
+              document.getElementById(`email-${target.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 100);
+          }
         }
       })
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [thread.thread_id]);
+  }, [thread.thread_id, highlightMessageId]);
 
   const handleBackdropClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.target === e.currentTarget) onClose();
@@ -330,7 +339,7 @@ function ThreadModal({ thread, onClose }: { thread: Thread; onClose: () => void 
             emails.map((email) => {
               const isExpanded = expandedIds.has(email.id);
               return (
-                <div key={email.id} className="border border-slate-200 rounded-lg overflow-hidden">
+                <div key={email.id} id={`email-${email.id}`} className={`border rounded-lg overflow-hidden ${highlightMessageId && email.message_id === highlightMessageId ? 'border-blue-400 ring-2 ring-blue-100' : 'border-slate-200'}`}>
                   <button
                     onClick={() => toggleEmail(email.id)}
                     className="w-full text-left px-4 py-3 hover:bg-slate-50 transition-colors flex items-start gap-3"
@@ -426,6 +435,7 @@ export default function DiscussionDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [showDoneActions, setShowDoneActions] = useState(false);
   const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
+  const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -567,12 +577,12 @@ export default function DiscussionDetailPage() {
           </h2>
           <EventTimeline
             events={data.events}
-            onThreadClick={(threadId) => {
+            onThreadClick={(threadId, sourceEmailId) => {
+              setHighlightMessageId(sourceEmailId ?? null);
               const thread = data.threads.find((t) => t.thread_id === threadId);
               if (thread) {
                 setSelectedThread(thread);
               } else {
-                // Thread not in discussion's thread list — open modal with minimal thread info
                 setSelectedThread({
                   id: 0,
                   thread_id: threadId,
@@ -678,14 +688,18 @@ export default function DiscussionDetailPage() {
           </h2>
           <div>
             {data.threads.map((thread) => (
-              <ThreadRow key={thread.id} thread={thread} onClick={() => setSelectedThread(thread)} />
+              <ThreadRow key={thread.id} thread={thread} onClick={() => { setHighlightMessageId(null); setSelectedThread(thread); }} />
             ))}
           </div>
         </div>
       )}
 
       {selectedThread && (
-        <ThreadModal thread={selectedThread} onClose={() => setSelectedThread(null)} />
+        <ThreadModal
+          thread={selectedThread}
+          highlightMessageId={highlightMessageId}
+          onClose={() => { setSelectedThread(null); setHighlightMessageId(null); }}
+        />
       )}
     </div>
   );

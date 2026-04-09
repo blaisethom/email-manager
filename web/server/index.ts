@@ -783,7 +783,7 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
   // Events from the event ledger
   const events = db
     .prepare(
-      `SELECT id, domain, type, actor, target, event_date, detail, confidence, thread_id
+      `SELECT id, domain, type, actor, target, event_date, detail, confidence, thread_id, source_email_id
        FROM event_ledger
        WHERE discussion_id = ?
        ORDER BY event_date ASC, created_at ASC`
@@ -798,6 +798,7 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
     detail: string | null;
     confidence: number | null;
     thread_id: string | null;
+    source_email_id: string | null;
   }>;
 
   // Milestones

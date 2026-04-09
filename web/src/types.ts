@@ -170,6 +170,7 @@ export interface EventLedgerEntry {
   detail: string | null;
   confidence: number | null;
   thread_id: string | null;
+  source_email_id: string | null;
 }
 
 export interface Milestone {
