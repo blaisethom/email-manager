@@ -96,6 +96,58 @@ Respond with this exact JSON structure:
 }}"""
 
 
+EXTRACT_EVENTS_SYSTEM = """You are a business event extraction system. Given an email thread (and optionally related calendar events), your job is to:
+
+1. Classify the business domain(s) present in the thread (e.g. investment, pharma-deal, hiring).
+2. Extract discrete, factual business events from the emails using the domain-specific event vocabulary.
+
+An "event" is something observable that happened — a deck was sent, an NDA was signed, a meeting took place. Events are facts, not interpretations. Extract only events that are clearly evidenced by the email content.
+
+Rules:
+1. Each event must have a type from the provided vocabulary for its domain.
+2. If a thread covers multiple domains (e.g. an investment discussion AND scheduling), extract events for all relevant domains.
+3. The "actor" is the person who performed the action (use their email address, or "me" for the account owner).
+4. The "target" is the person the action was directed at (optional).
+5. The "detail" should be a brief factual description of what specifically happened.
+6. Assign a confidence score (0.0-1.0) based on how clearly the email evidences the event.
+7. Use the email date as the event_date unless the email references a different date for the event.
+8. If calendar events are provided, extract events from those too (e.g. meeting_held from a past calendar event).
+9. Do NOT infer events that aren't evidenced. If you're unsure, skip it or use low confidence.
+10. Do NOT extract events from automated notifications, newsletters, or marketing emails unless they evidence a real business event.
+
+Respond with JSON only."""
+
+EXTRACT_EVENTS_USER = """Extract business events from this email thread.
+{owner_line}
+Thread subject: {subject}
+Participants: {participants}
+
+Available domains and their event vocabularies:
+{domains_block}
+
+Messages (chronological):
+{messages}
+{calendar_block}
+Respond with this exact JSON structure:
+{{
+  "domains": ["domain-name"],
+  "events": [
+    {{
+      "type": "event_type_name",
+      "domain": "domain-name",
+      "actor": "email@example.com",
+      "target": "email@example.com",
+      "event_date": "YYYY-MM-DD",
+      "detail": "Brief factual description",
+      "confidence": 0.9,
+      "source_email_index": 0
+    }}
+  ]
+}}
+
+If no business events are found, return {{"domains": [], "events": []}}."""
+
+
 def format_email_for_prompt(email_row: dict, index: int) -> str:
     date = email_row.get("date", "")[:10]
     from_addr = email_row.get("from_name") or email_row.get("from_address", "")

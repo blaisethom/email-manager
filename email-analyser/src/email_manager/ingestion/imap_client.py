@@ -12,9 +12,9 @@ from email_manager.db import fetchone
 from email_manager.ingestion.parser import parse_raw_email, email_to_db_row
 from email_manager.ingestion.threading import insert_email_references
 
-# Defaults — Yahoo needs smaller values
+# Defaults — Yahoo needs smaller values, especially through a proxy
 DEFAULT_BATCH_SIZE = 100
-YAHOO_BATCH_SIZE = 50
+YAHOO_BATCH_SIZE = 10
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 5  # seconds, doubles each retry
 DB_RETRY_DELAY = 2
@@ -128,7 +128,7 @@ def _connect_imap(host: str, port: int, ssl: bool, user: str, password: str) -> 
         raise ConnectionError(f"Connection to {host}:{port} failed with no result")
 
     client = result[0]
-    client.socket().settimeout(60)
+    client.socket().settimeout(120)
     return client
 
 

@@ -156,7 +156,7 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
                 for acct in gmail_accounts:
                     label = acct.name or "gmail"
                     if needs_calendar_auth(acct):
-                        console.print(f"\n[yellow]Calendar ({label}): needs authorization. Run 'auth --account {acct.name}' first to grant calendar access.[/yellow]")
+                        console.print(f"\n[yellow]Calendar ({label}): needs authorization. Run 'auth --account {acct.name} --calendar' first to grant calendar access.[/yellow]")
                         continue
                     console.print(f"\n[bold]Syncing calendar: {label}[/bold]")
                     try:
@@ -289,7 +289,7 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--stage", "-s", type=click.Choice(["extract_base", "fetch_homepages", "contact_memory", "categorise", "summarise_threads", "label_companies", "discussions"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--stage", "-s", type=click.Choice(["sync_calendar", "extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "contact_memory", "categorise", "summarise_threads", "discussions", "link_calendar"]), multiple=True, help="Run specific stage(s) only")
 @click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
 @click.option("--force", "-f", is_flag=True, help="Force regeneration even if already processed")
 @click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")

@@ -150,14 +150,83 @@ def run_link_calendar(conn: sqlite3.Connection, backend: LLMBackend, config: Con
     return link_calendar_events(conn, console=console or Console(), limit=limit)
 
 
+def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
+    from email_manager.analysis.events import extract_events, load_category_config
+
+    console = console or Console()
+    categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
+
+    with _make_progress(console) as progress:
+        task = progress.add_task("extract_events", total=None)
+
+        def on_progress(done: int, total: int) -> None:
+            progress.update(task, completed=done, total=total or 0)
+            logger.info("extract_events: %d/%d threads", done, total)
+
+        return extract_events(
+            conn, backend, categories_config=categories_config,
+            limit=limit, force=force,
+            company_domain=company, company_label=label,
+            on_progress=on_progress,
+        )
+
+
+def run_discover_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
+    from email_manager.analysis.discover_discussions import discover_discussions
+
+    console = console or Console()
+
+    with _make_progress(console) as progress:
+        task = progress.add_task("discover_discussions", total=None)
+
+        def on_progress(done: int, total: int, name: str = "") -> None:
+            desc = f"discover_discussions ({name})" if name and done < total else "discover_discussions"
+            progress.update(task, completed=done, total=total or 0, description=desc)
+            logger.info("discover_discussions: %d/%d — %s", done, total, name)
+
+        return discover_discussions(
+            conn, backend, limit=limit, force=force,
+            company_domain=company, company_label=label,
+            on_progress=on_progress,
+        )
+
+
+def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None) -> int:
+    from email_manager.analysis.analyse_discussions import analyse_discussions, load_category_config
+
+    console = console or Console()
+    categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
+
+    with _make_progress(console) as progress:
+        task = progress.add_task("analyse_discussions", total=None)
+
+        def on_progress(done: int, total: int, name: str = "") -> None:
+            desc = f"analyse_discussions ({name})" if name and done < total else "analyse_discussions"
+            progress.update(task, completed=done, total=total or 0, description=desc)
+            logger.info("analyse_discussions: %d/%d — %s", done, total, name)
+
+        return analyse_discussions(
+            conn, backend, categories_config=categories_config,
+            limit=limit, force=force, company_domain=company,
+            on_progress=on_progress,
+        )
+
+
 ALL_STAGES = {
+    # Phase 1: Ingestion & base extraction
+    "sync_calendar": run_sync_calendar,
     "extract_base": run_extract_base,
     "fetch_homepages": run_fetch_homepages,
+    "label_companies": run_label_companies,
+    # Phase 2: Event-driven pipeline (new)
+    "extract_events": run_extract_events,
+    "discover_discussions": run_discover_discussions,
+    "analyse_discussions": run_analyse_discussions,
+    # Phase 3: Contact enrichment
     "contact_memory": run_contact_memory,
+    # Legacy stages (kept for backward compatibility)
     "categorise": run_categorise,
     "summarise_threads": run_summarise_threads,
-    "label_companies": run_label_companies,
     "discussions": run_discussions,
-    "sync_calendar": run_sync_calendar,
     "link_calendar": run_link_calendar,
 }

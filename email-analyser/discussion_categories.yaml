@@ -1,0 +1,595 @@
+categories:
+  - name: pharma-deal
+    description: "Sales deal with a pharmaceutical or CRO company"
+
+    event_types:
+      - name: lead_identified
+        description: "Potential customer identified or inbound inquiry received"
+      - name: intro_call_held
+        description: "Initial discovery or intro call completed"
+      - name: demo_given
+        description: "Product demo or presentation delivered"
+      - name: requirements_received
+        description: "Customer shared requirements, RFP, or use case details"
+      - name: proposal_sent
+        description: "Formal proposal or quote sent to customer"
+      - name: proposal_feedback
+        description: "Feedback received on proposal or pricing"
+      - name: champion_identified
+        description: "Internal champion or key decision-maker identified"
+      - name: pilot_agreed
+        description: "Pilot or proof-of-concept agreed upon"
+      - name: pilot_started
+        description: "Pilot or POC underway"
+      - name: pilot_completed
+        description: "Pilot completed with results shared"
+      - name: contract_sent
+        description: "Contract sent for review"
+      - name: contract_redlines
+        description: "Contract redlines or markup received"
+      - name: contract_signed
+        description: "Contract fully executed"
+      - name: deal_lost
+        description: "Deal lost, customer chose competitor, or went cold"
+      - name: follow_up_scheduled
+        description: "Follow-up meeting or check-in scheduled"
+
+    milestones:
+      - name: qualified_lead
+        description: "Lead qualified with confirmed interest and fit"
+      - name: discovery_complete
+        description: "Discovery calls done, needs and use case understood"
+      - name: demo_delivered
+        description: "Product demonstrated to relevant stakeholders"
+      - name: proposal_out
+        description: "Formal proposal submitted and acknowledged"
+      - name: champion_engaged
+        description: "Internal champion actively supporting the deal"
+      - name: pilot_running
+        description: "Pilot or POC actively underway"
+      - name: pilot_success
+        description: "Pilot completed with positive outcome"
+      - name: in_contracting
+        description: "Contract negotiation underway"
+      - name: closed_won
+        description: "Deal signed and closed"
+      - name: closed_lost
+        description: "Deal lost or abandoned"
+
+    workflow_states:
+      - discovery
+      - qualification
+      - demo
+      - proposal
+      - pilot
+      - negotiating
+      - contracting
+      - signed
+      - lost
+    terminal_states:
+      - signed
+      - lost
+
+  - name: investment
+    description: "Fundraising or investment round discussion"
+
+    event_types:
+      - name: intro_made
+        description: "Initial introduction or first contact with investor"
+      - name: deck_shared
+        description: "Pitch deck or investment materials shared"
+      - name: meeting_held
+        description: "Meeting or call took place with investor"
+      - name: interest_expressed
+        description: "Investor expressed interest in proceeding"
+      - name: nda_sent
+        description: "NDA sent for signature"
+      - name: nda_signed
+        description: "NDA fully executed by both parties"
+      - name: l1_data_room_shared
+        description: "Level 1 (basic) data room access granted"
+      - name: l2_data_room_shared
+        description: "Level 2 (detailed) data room access granted"
+      - name: dd_started
+        description: "Formal due diligence process begun"
+      - name: dd_questions_received
+        description: "Due diligence questions or information requests received"
+      - name: dd_responses_sent
+        description: "Due diligence responses provided"
+      - name: term_sheet_received
+        description: "Term sheet received from investor"
+      - name: term_sheet_countered
+        description: "Counter-proposal on term sheet sent"
+      - name: docs_signed
+        description: "Investment documents signed and closed"
+      - name: passed
+        description: "Investor passed or deal terminated"
+      - name: follow_up_scheduled
+        description: "Follow-up meeting or check-in scheduled"
+
+    milestones:
+      - name: intro_complete
+        description: "Initial introduction and mutual interest established"
+      - name: materials_shared
+        description: "Deck and key materials shared with investor"
+      - name: first_meeting_held
+        description: "First substantive meeting or call completed"
+      - name: nda_executed
+        description: "NDA signed by both parties"
+      - name: l1_data_room_open
+        description: "Basic data room access granted"
+      - name: deep_diligence
+        description: "Detailed due diligence underway with L2 data room"
+      - name: term_sheet
+        description: "Term sheet received and under review"
+      - name: final_negotiation
+        description: "Legal docs and final terms in negotiation"
+      - name: closed_signed
+        description: "Investment closed and documents signed"
+      - name: passed
+        description: "Investor passed or deal fell through"
+
+    workflow_states:
+      - intro
+      - materials_out
+      - in_process
+      - due_diligence
+      - term_sheet_negotiation
+      - closing
+      - signed
+      - passed
+    terminal_states:
+      - signed
+      - passed
+
+  - name: scheduling
+    description: "Scheduling a meeting, call, or event"
+
+    event_types:
+      - name: meeting_proposed
+        description: "Meeting or call proposed by either party"
+      - name: times_suggested
+        description: "Available times or scheduling link shared"
+      - name: time_confirmed
+        description: "Meeting time confirmed and accepted"
+      - name: calendar_invite_sent
+        description: "Calendar invitation sent"
+      - name: meeting_rescheduled
+        description: "Meeting rescheduled to a different time"
+      - name: meeting_cancelled
+        description: "Meeting cancelled"
+      - name: meeting_held
+        description: "Meeting took place"
+      - name: no_show
+        description: "One or more parties did not attend"
+
+    milestones:
+      - name: proposed
+        description: "Meeting has been proposed"
+      - name: time_agreed
+        description: "Time confirmed by all parties"
+      - name: invite_sent
+        description: "Calendar invite sent and acknowledged"
+      - name: completed
+        description: "Meeting took place"
+      - name: cancelled
+        description: "Meeting was cancelled"
+
+    workflow_states:
+      - proposed
+      - confirmed
+      - completed
+      - cancelled
+    terminal_states:
+      - completed
+      - cancelled
+
+  - name: contract-negotiation
+    description: "Negotiating terms of a contract or agreement"
+
+    event_types:
+      - name: draft_shared
+        description: "Initial contract draft shared"
+      - name: redlines_received
+        description: "Redlined or marked-up version received"
+      - name: redlines_sent
+        description: "Redlined version sent back"
+      - name: terms_discussed
+        description: "Key terms discussed in meeting or email"
+      - name: concession_made
+        description: "One party made a concession on terms"
+      - name: legal_review_requested
+        description: "Legal review requested by either party"
+      - name: legal_feedback_received
+        description: "Legal feedback or opinion received"
+      - name: final_version_sent
+        description: "Final version sent for signature"
+      - name: contract_signed
+        description: "Contract fully executed"
+      - name: negotiation_abandoned
+        description: "Negotiation abandoned or deal fell through"
+
+    milestones:
+      - name: first_draft
+        description: "Initial draft shared between parties"
+      - name: redlines_exchanged
+        description: "At least one round of redlines exchanged"
+      - name: key_terms_agreed
+        description: "Key commercial terms agreed in principle"
+      - name: legal_cleared
+        description: "Legal review completed by both sides"
+      - name: final_review
+        description: "Final version under review before signature"
+      - name: signed
+        description: "Contract fully executed"
+      - name: abandoned
+        description: "Negotiation abandoned"
+
+    workflow_states:
+      - initial_draft
+      - redlines
+      - final_review
+      - signed
+      - abandoned
+    terminal_states:
+      - signed
+      - abandoned
+
+  - name: vendor-selection
+    description: "Evaluating and selecting a vendor or service provider"
+
+    event_types:
+      - name: need_identified
+        description: "Vendor need or requirement identified"
+      - name: vendor_contacted
+        description: "Reached out to potential vendor"
+      - name: info_received
+        description: "Vendor materials, pricing, or proposal received"
+      - name: demo_scheduled
+        description: "Demo or evaluation session scheduled"
+      - name: demo_completed
+        description: "Demo or evaluation session completed"
+      - name: reference_checked
+        description: "Reference check completed"
+      - name: shortlisted
+        description: "Vendor added to shortlist"
+      - name: vendor_selected
+        description: "Final vendor selection made"
+      - name: contract_initiated
+        description: "Contract or agreement process started"
+      - name: onboarded
+        description: "Vendor onboarded and active"
+      - name: vendor_rejected
+        description: "Vendor rejected or removed from consideration"
+
+    milestones:
+      - name: requirements_defined
+        description: "Vendor requirements clearly defined"
+      - name: vendors_contacted
+        description: "Multiple vendors contacted and engaged"
+      - name: evaluations_complete
+        description: "Demos and evaluations completed"
+      - name: shortlist_ready
+        description: "Shortlist of finalists identified"
+      - name: selection_made
+        description: "Final vendor selected"
+      - name: onboarded
+        description: "Vendor fully onboarded"
+      - name: rejected
+        description: "All vendors rejected, process abandoned"
+
+    workflow_states:
+      - research
+      - shortlisted
+      - evaluating
+      - selected
+      - onboarded
+      - rejected
+    terminal_states:
+      - onboarded
+      - rejected
+
+  - name: internal-decision
+    description: "Internal process or decision-making discussion"
+
+    event_types:
+      - name: issue_raised
+        description: "Issue or decision need raised"
+      - name: options_presented
+        description: "Options or alternatives presented for discussion"
+      - name: input_requested
+        description: "Input or feedback requested from stakeholders"
+      - name: input_received
+        description: "Input or feedback received from stakeholders"
+      - name: meeting_held
+        description: "Discussion meeting held"
+      - name: decision_made
+        description: "Decision reached"
+      - name: action_assigned
+        description: "Action items assigned for implementation"
+      - name: implementation_started
+        description: "Implementation of decision begun"
+      - name: implementation_completed
+        description: "Implementation completed"
+      - name: decision_deferred
+        description: "Decision deferred or postponed"
+
+    milestones:
+      - name: issue_defined
+        description: "Issue clearly defined and stakeholders identified"
+      - name: options_evaluated
+        description: "Options presented and evaluated"
+      - name: consensus_reached
+        description: "Consensus or decision reached"
+      - name: implementation_underway
+        description: "Implementation in progress"
+      - name: implemented
+        description: "Decision fully implemented"
+      - name: deferred
+        description: "Decision deferred indefinitely"
+
+    workflow_states:
+      - raised
+      - under_discussion
+      - decided
+      - implemented
+      - deferred
+    terminal_states:
+      - implemented
+      - deferred
+
+  - name: hiring
+    description: "Recruiting or hiring discussion"
+
+    event_types:
+      - name: role_opened
+        description: "New role opened or job posted"
+      - name: candidate_sourced
+        description: "Candidate identified or referred"
+      - name: resume_received
+        description: "CV or resume received"
+      - name: screen_scheduled
+        description: "Phone screen or initial interview scheduled"
+      - name: screen_completed
+        description: "Phone screen or initial interview completed"
+      - name: interview_scheduled
+        description: "On-site or technical interview scheduled"
+      - name: interview_completed
+        description: "Interview completed"
+      - name: feedback_shared
+        description: "Interview feedback shared internally"
+      - name: offer_extended
+        description: "Job offer extended to candidate"
+      - name: offer_negotiation
+        description: "Candidate negotiating offer terms"
+      - name: offer_accepted
+        description: "Candidate accepted the offer"
+      - name: offer_declined
+        description: "Candidate declined the offer"
+      - name: candidate_rejected
+        description: "Candidate rejected at any stage"
+
+    milestones:
+      - name: pipeline_active
+        description: "Active candidates in the pipeline"
+      - name: screening_complete
+        description: "Initial screening round completed"
+      - name: interviews_complete
+        description: "All interview rounds completed"
+      - name: offer_out
+        description: "Offer extended to top candidate"
+      - name: hired
+        description: "Candidate accepted and hired"
+      - name: passed
+        description: "All candidates rejected or process closed"
+
+    workflow_states:
+      - sourcing
+      - screening
+      - interviewing
+      - offer_extended
+      - hired
+      - passed
+    terminal_states:
+      - hired
+      - passed
+
+  - name: partnership
+    description: "Exploring or establishing a strategic partnership"
+
+    event_types:
+      - name: intro_made
+        description: "Initial introduction between organisations"
+      - name: exploratory_call
+        description: "Exploratory call or meeting held"
+      - name: mutual_interest
+        description: "Both parties expressed interest in partnering"
+      - name: use_case_discussed
+        description: "Specific partnership use case or scope discussed"
+      - name: proposal_shared
+        description: "Partnership proposal or MOU shared"
+      - name: terms_discussed
+        description: "Partnership terms or structure discussed"
+      - name: internal_approval
+        description: "Internal approval obtained"
+      - name: agreement_drafted
+        description: "Partnership agreement drafted"
+      - name: agreement_signed
+        description: "Partnership agreement signed"
+      - name: partnership_abandoned
+        description: "Partnership discussions abandoned"
+      - name: follow_up_scheduled
+        description: "Follow-up meeting scheduled"
+
+    milestones:
+      - name: intro_complete
+        description: "Introductions made and initial interest confirmed"
+      - name: scope_defined
+        description: "Partnership scope and use case defined"
+      - name: proposal_exchanged
+        description: "Formal proposal or MOU exchanged"
+      - name: terms_agreed
+        description: "Key terms agreed in principle"
+      - name: agreement_signed
+        description: "Partnership agreement fully executed"
+      - name: abandoned
+        description: "Partnership abandoned"
+
+    workflow_states:
+      - intro
+      - exploring
+      - proposal
+      - negotiating
+      - agreed
+      - abandoned
+    terminal_states:
+      - agreed
+      - abandoned
+
+  - name: support-issue
+    description: "Technical support or customer service issue"
+
+    event_types:
+      - name: issue_reported
+        description: "Issue or problem reported"
+      - name: acknowledged
+        description: "Issue acknowledged by support team"
+      - name: info_requested
+        description: "Additional information requested from reporter"
+      - name: info_provided
+        description: "Additional information provided"
+      - name: investigation_started
+        description: "Investigation or debugging started"
+      - name: root_cause_found
+        description: "Root cause identified"
+      - name: fix_proposed
+        description: "Fix or workaround proposed"
+      - name: fix_applied
+        description: "Fix applied or deployed"
+      - name: issue_resolved
+        description: "Issue confirmed resolved"
+      - name: issue_escalated
+        description: "Issue escalated to higher tier or management"
+
+    milestones:
+      - name: acknowledged
+        description: "Issue acknowledged and assigned"
+      - name: under_investigation
+        description: "Active investigation underway"
+      - name: root_cause_identified
+        description: "Root cause found"
+      - name: fix_in_progress
+        description: "Fix being developed or applied"
+      - name: resolved
+        description: "Issue resolved and confirmed"
+
+    workflow_states:
+      - reported
+      - investigating
+      - awaiting_response
+      - resolved
+      - escalated
+    terminal_states:
+      - resolved
+
+  - name: board-discussion
+    description: "Board discussion with current members or investors"
+
+    event_types:
+      - name: agenda_shared
+        description: "Board meeting agenda shared"
+      - name: board_pack_sent
+        description: "Board pack or materials distributed"
+      - name: meeting_held
+        description: "Board meeting took place"
+      - name: minutes_shared
+        description: "Board meeting minutes distributed"
+      - name: resolution_proposed
+        description: "Board resolution proposed"
+      - name: resolution_approved
+        description: "Board resolution approved"
+      - name: action_assigned
+        description: "Action item assigned to board member or exec"
+      - name: update_provided
+        description: "Progress update provided on board action"
+      - name: follow_up_scheduled
+        description: "Follow-up meeting or discussion scheduled"
+
+    milestones:
+      - name: materials_distributed
+        description: "Board pack and agenda sent to all members"
+      - name: meeting_completed
+        description: "Board meeting held"
+      - name: minutes_circulated
+        description: "Minutes distributed and acknowledged"
+      - name: resolutions_approved
+        description: "All proposed resolutions approved"
+      - name: actions_complete
+        description: "All board actions completed"
+
+    workflow_states:
+      - active
+      - resolved
+      - stalled
+    terminal_states:
+      - resolved
+      - stalled
+
+  - name: newsletter
+    description: "Newsletter or information updates"
+
+    event_types:
+      - name: newsletter_received
+        description: "Newsletter or update received"
+      - name: content_reviewed
+        description: "Newsletter content reviewed or noted"
+      - name: action_taken
+        description: "Action taken based on newsletter content"
+      - name: unsubscribed
+        description: "Unsubscribed from newsletter"
+
+    milestones:
+      - name: received
+        description: "Newsletter received and noted"
+      - name: actioned
+        description: "Relevant action taken from newsletter content"
+
+    workflow_states:
+      - active
+      - resolved
+    terminal_states:
+      - resolved
+
+  - name: other
+    description: "Discussion that does not fit any other category"
+
+    event_types:
+      - name: conversation_started
+        description: "Initial message or outreach"
+      - name: response_received
+        description: "Response received from other party"
+      - name: info_shared
+        description: "Information or documents shared"
+      - name: meeting_held
+        description: "Meeting or call took place"
+      - name: action_taken
+        description: "Action taken or task completed"
+      - name: follow_up_needed
+        description: "Follow-up identified as needed"
+      - name: resolved
+        description: "Matter resolved or concluded"
+
+    milestones:
+      - name: engaged
+        description: "Active back-and-forth established"
+      - name: resolved
+        description: "Matter resolved"
+      - name: stalled
+        description: "Discussion stalled with no recent activity"
+
+    workflow_states:
+      - active
+      - resolved
+      - stalled
+    terminal_states:
+      - resolved

@@ -146,33 +146,11 @@ def _sync_full(
     service, conn: sqlite3.Connection, config: EmailAccount,
     state_key: str, now_str: str, months_back: int, console: Console,
 ) -> int:
-    console.print("  Performing full calendar sync...")
-
     time_min = (datetime.now(timezone.utc) - timedelta(days=months_back * 30)).isoformat()
 
     all_events = []
     page_token = None
 
-    while True:
-        kwargs = {
-            "calendarId": "primary",
-            "timeMin": time_min,
-            "singleEvents": True,  # expand recurring events
-            "maxResults": 250,
-            "orderBy": "startTime",
-        }
-        if page_token:
-            kwargs["pageToken"] = page_token
-
-        result = service.events().list(**kwargs).execute()
-        all_events.extend(result.get("items", []))
-        page_token = result.get("nextPageToken")
-        if not page_token:
-            break
-
-    next_sync_token = result.get("nextSyncToken")
-
-    count = 0
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -180,11 +158,37 @@ def _sync_full(
         TextColumn("{task.completed}/{task.total}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Saving calendar events", total=len(all_events))
+        fetch_task = progress.add_task("Fetching calendar events", total=None)
+        while True:
+            kwargs = {
+                "calendarId": "primary",
+                "timeMin": time_min,
+                "singleEvents": True,  # expand recurring events
+                "maxResults": 250,
+                # Note: orderBy is intentionally omitted — the API does not
+                # return nextSyncToken when orderBy is specified.
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+
+            result = service.events().list(**kwargs).execute()
+            items = result.get("items", [])
+            all_events.extend(items)
+            progress.update(fetch_task, description="Fetching calendar events", completed=len(all_events))
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
+        progress.update(fetch_task, description="Fetched calendar events", total=len(all_events), completed=len(all_events))
+
+        next_sync_token = result.get("nextSyncToken")
+
+        count = 0
+        save_task = progress.add_task("Saving calendar events", total=len(all_events))
         for event in all_events:
             if _save_event(conn, config, event, now_str):
                 count += 1
-            progress.advance(task)
+            progress.advance(save_task)
 
     # Store sync token
     conn.execute(
@@ -200,31 +204,46 @@ def _sync_incremental(
     service, conn: sqlite3.Connection, config: EmailAccount,
     sync_token: str, state_key: str, now_str: str, console: Console,
 ) -> int:
-    console.print(f"  Incremental calendar sync...")
-
     all_events = []
     page_token = None
+    count = 0
 
-    while True:
-        kwargs = {"calendarId": "primary", "syncToken": sync_token}
-        if page_token:
-            kwargs["pageToken"] = page_token
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        fetch_task = progress.add_task("Fetching calendar changes", total=None)
+        while True:
+            kwargs = {"calendarId": "primary", "syncToken": sync_token}
+            if page_token:
+                kwargs["pageToken"] = page_token
 
-        result = service.events().list(**kwargs).execute()
-        all_events.extend(result.get("items", []))
-        page_token = result.get("nextPageToken")
-        if not page_token:
-            break
+            result = service.events().list(**kwargs).execute()
+            items = result.get("items", [])
+            all_events.extend(items)
+            progress.update(fetch_task, description="Fetching calendar changes", completed=len(all_events))
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
+        if not all_events:
+            progress.update(fetch_task, description="No calendar changes", total=0, completed=0)
+        else:
+            progress.update(fetch_task, description="Fetched calendar changes", total=len(all_events), completed=len(all_events))
+
+            count = 0
+            save_task = progress.add_task("Saving calendar changes", total=len(all_events))
+            for event in all_events:
+                if event.get("status") == "cancelled":
+                    conn.execute("DELETE FROM calendar_events WHERE event_id = ?", (event["id"],))
+                elif _save_event(conn, config, event, now_str):
+                    count += 1
+                progress.advance(save_task)
 
     next_sync_token = result.get("nextSyncToken")
-
-    count = 0
-    for event in all_events:
-        if event.get("status") == "cancelled":
-            # Remove cancelled events
-            conn.execute("DELETE FROM calendar_events WHERE event_id = ?", (event["id"],))
-        elif _save_event(conn, config, event, now_str):
-            count += 1
 
     conn.execute(
         """INSERT OR REPLACE INTO sync_state (folder, uidvalidity, last_uid, last_sync, sync_token)
@@ -232,9 +251,6 @@ def _sync_incremental(
         (state_key, now_str, next_sync_token),
     )
     conn.commit()
-
-    if not all_events:
-        console.print("  [dim]No calendar changes.[/dim]")
     return count
 
 

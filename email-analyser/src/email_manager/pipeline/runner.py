@@ -54,7 +54,7 @@ def run_pipeline(
     results = {}
 
     # Only initialise AI backend if we need it (stages beyond extract_base)
-    NO_AI_STAGES = {"extract_base", "fetch_homepages", "sync_calendar", "link_calendar"}
+    NO_AI_STAGES = {"extract_base", "fetch_homepages", "sync_calendar", "link_calendar", "sync_calendar"}
     needs_ai = any(s not in NO_AI_STAGES for s in stage_names)
     backend = None
     if needs_ai:

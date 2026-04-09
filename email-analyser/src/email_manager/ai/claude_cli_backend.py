@@ -49,7 +49,7 @@ class ClaudeCLIBackend:
             input=user,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Claude CLI failed (exit {result.returncode}): {result.stderr[:500]}")

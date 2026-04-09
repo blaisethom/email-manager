@@ -1,0 +1,472 @@
+"""Extract business events from email threads using the event ledger model.
+
+Each thread is processed in a single LLM call that:
+1. Classifies the business domain(s) present
+2. Extracts fine-grained events using domain-specific vocabulary
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+import yaml
+
+from email_manager.ai.base import LLMBackend
+from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM, EXTRACT_EVENTS_USER
+from email_manager.db import fetchall, fetchone
+
+logger = logging.getLogger("email_manager.analysis.events")
+
+PROMPT_VERSION = "v1"
+
+
+# ── Category config ─────────────────────────────────────────────────────────
+
+
+def load_category_config(config_path: Path | None = None) -> list[dict[str, Any]]:
+    """Load discussion category definitions including event_types from YAML."""
+    if config_path is None:
+        for candidate in (
+            Path("discussion_categories.yaml"),
+            Path("discussion_categories.yml"),
+            Path("data/discussion_categories.yaml"),
+        ):
+            if candidate.exists():
+                config_path = candidate
+                break
+
+    if config_path is None or not config_path.exists():
+        return []
+
+    text = config_path.read_text()
+    data = yaml.safe_load(text)
+
+    if isinstance(data, dict):
+        categories = data.get("categories", [])
+    else:
+        categories = data
+
+    return categories if isinstance(categories, list) else []
+
+
+def _build_domains_block(categories: list[dict[str, Any]]) -> str:
+    """Build the domains + event vocabulary block for the prompt."""
+    parts = []
+    for cat in categories:
+        event_types = cat.get("event_types", [])
+        if not event_types:
+            continue
+        lines = [f'Domain: "{cat["name"]}" — {cat["description"]}']
+        lines.append("  Event types:")
+        for et in event_types:
+            if isinstance(et, dict):
+                lines.append(f'    - {et["name"]}: {et["description"]}')
+            else:
+                lines.append(f"    - {et}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
+# ── Quote stripping (reuse from discussions module) ─────────────────────────
+
+_ON_WROTE_RE = re.compile(r"^On .{10,80} wrote:\s*$", re.MULTILINE)
+
+
+def _strip_quoted_text(body: str) -> str:
+    """Remove quoted/forwarded content from an email body."""
+    if not body:
+        return ""
+    lines = body.split("\n")
+    cleaned: list[str] = []
+    skip_rest = False
+    for line in lines:
+        stripped = line.strip()
+        if skip_rest:
+            continue
+        if stripped.startswith(">"):
+            continue
+        if _ON_WROTE_RE.match(stripped):
+            skip_rest = True
+            continue
+        if re.match(r"^-{2,}\s*Original Message\s*-{2,}$", stripped, re.IGNORECASE):
+            skip_rest = True
+            continue
+        if re.match(r"^From:\s+\S+.*", stripped) and cleaned:
+            prev = cleaned[-1].strip() if cleaned else ""
+            if prev == "" or prev.startswith("--") or prev.startswith("__"):
+                skip_rest = True
+                continue
+        cleaned.append(line)
+    while cleaned and cleaned[-1].strip() == "":
+        cleaned.pop()
+    return "\n".join(cleaned)
+
+
+def _dedup_against_previous(body: str, previous_bodies: list[str], min_dup_lines: int = 3) -> str:
+    """Remove runs of lines that appeared in previous emails."""
+    if not body or not previous_bodies:
+        return body
+    prev_lines: set[str] = set()
+    for pb in previous_bodies:
+        for line in pb.split("\n"):
+            norm = line.strip().lower()
+            if len(norm) > 20:
+                prev_lines.add(norm)
+    lines = body.split("\n")
+    is_dup = [line.strip().lower() in prev_lines for line in lines]
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        if is_dup[i]:
+            run_start = i
+            while i < len(lines) and is_dup[i]:
+                i += 1
+            if i - run_start < min_dup_lines:
+                result.extend(lines[run_start:i])
+        else:
+            result.append(lines[i])
+            i += 1
+    while result and result[-1].strip() == "":
+        result.pop()
+    return "\n".join(result)
+
+
+def _format_thread_emails(emails: list[dict], body_per_email: int = 800) -> list[str]:
+    """Format emails for a thread with quote stripping and deduplication."""
+    previous_bodies: list[str] = []
+    formatted: list[str] = []
+    for idx, e in enumerate(emails):
+        raw_body = e["body_text"] or ""
+        clean_body = _strip_quoted_text(raw_body)
+        clean_body = _dedup_against_previous(clean_body, previous_bodies)
+        previous_bodies.append(clean_body)
+        body = clean_body[:body_per_email]
+        sender = e["from_name"] or e["from_address"]
+        date = (e["date"] or "")[:10]
+        formatted.append(
+            f"[Email {idx}] [{date}] From: {sender} <{e['from_address']}> "
+            f"To: {e['to_addresses'] or ''}\n"
+            f"Subject: {e['subject'] or '(no subject)'}\n"
+            f"{body}\n"
+        )
+    return formatted
+
+
+# ── Account owner detection ─────────────────────────────────────────────────
+
+def _detect_account_owner(conn: sqlite3.Connection) -> str | None:
+    row = fetchone(
+        conn,
+        "SELECT from_address, COUNT(*) as cnt FROM emails GROUP BY from_address ORDER BY cnt DESC LIMIT 1",
+    )
+    return row["from_address"] if row else None
+
+
+# ── Calendar context ────────────────────────────────────────────────────────
+
+def _get_calendar_context(
+    conn: sqlite3.Connection, participant_emails: set[str],
+    start_date: str | None, end_date: str | None,
+) -> str:
+    """Find calendar events involving the same participants in the time window."""
+    if not participant_emails or not start_date:
+        return ""
+
+    # Extend window by 7 days on each side
+    events = fetchall(
+        conn,
+        """SELECT event_id, title, start_time, end_time, attendees, organizer_email
+           FROM calendar_events
+           WHERE start_time >= date(?, '-7 days') AND start_time <= date(?, '+7 days')
+           ORDER BY start_time ASC""",
+        (start_date, end_date or start_date),
+    )
+    if not events:
+        return ""
+
+    # Filter to events that share at least one participant
+    relevant = []
+    for ev in events:
+        attendees_str = (ev["attendees"] or "") + " " + (ev["organizer_email"] or "")
+        attendee_emails = {a.lower() for a in re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", attendees_str)}
+        if attendee_emails & participant_emails:
+            relevant.append(ev)
+
+    if not relevant:
+        return ""
+
+    lines = ["\nRelated calendar events:"]
+    for ev in relevant[:10]:  # limit to 10
+        lines.append(
+            f"  [{ev['start_time'][:10]}] {ev['title']} "
+            f"(attendees: {ev['attendees'] or 'unknown'}, id: {ev['event_id']})"
+        )
+    return "\n".join(lines)
+
+
+# ── Core extraction ─────────────────────────────────────────────────────────
+
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+
+
+def _get_threads_to_process(
+    conn: sqlite3.Connection, limit: int | None = None, force: bool = False,
+    company_domain: str | None = None, company_label: str | None = None,
+) -> list[str]:
+    """Get thread IDs that need event extraction.
+
+    A thread needs processing if it has no events in the ledger yet,
+    or if force=True. Can filter by company domain or label.
+    """
+    # Build company filter
+    company_filter = ""
+    params: list[Any] = []
+
+    if company_domain:
+        like = f"%@{company_domain}%"
+        company_filter = """AND e.thread_id IN (
+            SELECT DISTINCT e2.thread_id FROM emails e2
+            WHERE e2.from_address LIKE ? OR e2.to_addresses LIKE ? OR e2.cc_addresses LIKE ?
+        )"""
+        params = [like, like, like]
+    elif company_label:
+        company_filter = """AND e.thread_id IN (
+            SELECT DISTINCT e2.thread_id FROM emails e2
+            JOIN company_contacts cc ON (e2.from_address = cc.contact_email
+                                         OR e2.to_addresses LIKE '%' || cc.contact_email || '%')
+            JOIN company_labels cl ON cc.company_id = cl.company_id
+            WHERE cl.label = ?
+        )"""
+        params = [company_label]
+
+    if force:
+        sql = f"""SELECT DISTINCT e.thread_id FROM emails e
+                 WHERE e.thread_id IS NOT NULL
+                 {company_filter}
+                 ORDER BY e.date DESC"""
+    else:
+        sql = f"""SELECT DISTINCT e.thread_id
+                 FROM emails e
+                 WHERE e.thread_id IS NOT NULL
+                   AND e.thread_id NOT IN (
+                       SELECT DISTINCT el.thread_id FROM event_ledger el
+                       WHERE el.thread_id IS NOT NULL
+                   )
+                 {company_filter}
+                 ORDER BY e.date DESC"""
+
+    if limit:
+        sql += f" LIMIT {limit}"
+
+    rows = fetchall(conn, sql, tuple(params))
+    return [r["thread_id"] for r in rows]
+
+
+def _process_thread(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    thread_id: str,
+    categories: list[dict[str, Any]],
+    domains_block: str,
+    account_owner: str | None,
+) -> list[dict[str, Any]]:
+    """Extract events from a single thread."""
+    emails = fetchall(
+        conn,
+        """SELECT message_id, date, from_address, from_name, to_addresses, cc_addresses,
+                  subject, body_text
+           FROM emails WHERE thread_id = ? ORDER BY date ASC""",
+        (thread_id,),
+    )
+    if not emails:
+        return []
+
+    # Format emails
+    formatted = _format_thread_emails(emails)
+    messages_text = "\n".join(formatted)
+
+    # Get participant emails for calendar context
+    participant_emails: set[str] = set()
+    for e in emails:
+        for field in ("from_address", "to_addresses", "cc_addresses"):
+            val = e[field]
+            if val:
+                participant_emails.update(a.lower() for a in _EMAIL_RE.findall(val))
+
+    # Get date range
+    start_date = emails[0]["date"][:10] if emails[0]["date"] else None
+    end_date = emails[-1]["date"][:10] if emails[-1]["date"] else None
+
+    # Calendar context
+    calendar_block = _get_calendar_context(conn, participant_emails, start_date, end_date)
+
+    # Build prompt
+    subject = emails[0]["subject"] or "(no subject)"
+    participants = ", ".join(sorted(participant_emails))
+    owner_line = f"\nAccount owner (\"me\"): {account_owner}" if account_owner else ""
+
+    user_prompt = EXTRACT_EVENTS_USER.format(
+        owner_line=owner_line,
+        subject=subject,
+        participants=participants,
+        domains_block=domains_block,
+        messages=messages_text,
+        calendar_block=calendar_block,
+    )
+
+    # Call LLM
+    try:
+        result = backend.complete_json(EXTRACT_EVENTS_SYSTEM, user_prompt)
+    except Exception as e:
+        logger.error("LLM call failed for thread %s: %s", thread_id, e)
+        return []
+
+    # Parse events
+    raw_events = result.get("events", [])
+    now = datetime.now(timezone.utc).isoformat()
+
+    parsed_events = []
+    for ev in raw_events:
+        event_type = ev.get("type", "")
+        domain = ev.get("domain", "")
+
+        # Validate event type against category vocabulary
+        # First check the declared domain, then fall back to any domain
+        valid_types_for_domain: set[str] = set()
+        all_type_to_domain: dict[str, str] = {}
+        for cat in categories:
+            for et in cat.get("event_types", []):
+                type_name = et["name"] if isinstance(et, dict) else et
+                all_type_to_domain[type_name] = cat["name"]
+                if cat["name"] == domain:
+                    valid_types_for_domain.add(type_name)
+
+        if event_type not in valid_types_for_domain:
+            if event_type in all_type_to_domain:
+                # Type exists in a different domain — reassign
+                correct_domain = all_type_to_domain[event_type]
+                logger.info(
+                    "Reassigning event type '%s' from domain '%s' to '%s' in thread %s",
+                    event_type, domain, correct_domain, thread_id,
+                )
+                domain = correct_domain
+            else:
+                logger.warning(
+                    "Skipping unknown event type '%s' for domain '%s' in thread %s",
+                    event_type, domain, thread_id,
+                )
+                continue
+
+        # Resolve source email
+        source_idx = ev.get("source_email_index")
+        source_email_id = None
+        if source_idx is not None and 0 <= source_idx < len(emails):
+            source_email_id = emails[source_idx]["message_id"]
+
+        # Check for calendar source
+        source_calendar_id = ev.get("calendar_event_id")
+
+        parsed_events.append({
+            "id": f"evt_{uuid.uuid4().hex[:12]}",
+            "thread_id": thread_id,
+            "source_email_id": source_email_id,
+            "source_calendar_event_id": source_calendar_id,
+            "domain": domain,
+            "type": event_type,
+            "actor": ev.get("actor"),
+            "target": ev.get("target"),
+            "event_date": ev.get("event_date"),
+            "detail": ev.get("detail"),
+            "confidence": ev.get("confidence", 0.5),
+            "model_version": backend.model_name,
+            "prompt_version": PROMPT_VERSION,
+            "created_at": now,
+        })
+
+    return parsed_events
+
+
+def _save_events(conn: sqlite3.Connection, events: list[dict[str, Any]]) -> int:
+    """Save events to the event_ledger table."""
+    if not events:
+        return 0
+    conn.executemany(
+        """INSERT OR IGNORE INTO event_ledger
+           (id, thread_id, source_email_id, source_calendar_event_id, discussion_id,
+            domain, type, actor, target, event_date, detail, confidence,
+            model_version, prompt_version, created_at)
+           VALUES (:id, :thread_id, :source_email_id, :source_calendar_event_id, NULL,
+                   :domain, :type, :actor, :target, :event_date, :detail, :confidence,
+                   :model_version, :prompt_version, :created_at)""",
+        events,
+    )
+    conn.commit()
+    return len(events)
+
+
+# ── Public entry point ──────────────────────────────────────────────────────
+
+def extract_events(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    categories_config: list[dict[str, Any]] | None = None,
+    config_path: Path | None = None,
+    limit: int | None = None,
+    force: bool = False,
+    company_domain: str | None = None,
+    company_label: str | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """Extract business events from email threads.
+
+    Returns the number of events extracted.
+    """
+    if categories_config is None:
+        categories_config = load_category_config(config_path)
+
+    if not categories_config:
+        logger.warning("No category config found — cannot extract events")
+        return 0
+
+    domains_block = _build_domains_block(categories_config)
+    account_owner = _detect_account_owner(conn)
+
+    thread_ids = _get_threads_to_process(
+        conn, limit=limit, force=force,
+        company_domain=company_domain, company_label=company_label,
+    )
+    if not thread_ids:
+        logger.info("No threads to process for event extraction")
+        return 0
+
+    logger.info("Extracting events from %d threads", len(thread_ids))
+    total_events = 0
+
+    for i, thread_id in enumerate(thread_ids):
+        if on_progress:
+            on_progress(i, len(thread_ids))
+
+        events = _process_thread(
+            conn, backend, thread_id, categories_config, domains_block, account_owner
+        )
+        saved = _save_events(conn, events)
+        total_events += saved
+
+        if events:
+            logger.info(
+                "Thread %s: extracted %d events (domains: %s)",
+                thread_id, len(events),
+                ", ".join(set(e["domain"] for e in events)),
+            )
+
+    if on_progress:
+        on_progress(len(thread_ids), len(thread_ids))
+
+    return total_events

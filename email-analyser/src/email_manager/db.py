@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -246,6 +246,81 @@ CREATE TABLE IF NOT EXISTS discussion_events (
 
 CREATE INDEX IF NOT EXISTS idx_discussion_events_event ON discussion_events(event_id);
 
+CREATE TABLE IF NOT EXISTS event_ledger (
+    id              TEXT PRIMARY KEY,
+    thread_id       TEXT,
+    source_email_id TEXT,
+    source_calendar_event_id TEXT,
+    discussion_id   INTEGER REFERENCES discussions(id),
+    domain          TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    actor           TEXT,
+    target          TEXT,
+    event_date      TEXT,
+    detail          TEXT,
+    confidence      REAL,
+    model_version   TEXT,
+    prompt_version  TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_ledger_thread ON event_ledger(thread_id);
+CREATE INDEX IF NOT EXISTS idx_event_ledger_discussion ON event_ledger(discussion_id);
+CREATE INDEX IF NOT EXISTS idx_event_ledger_domain ON event_ledger(domain);
+CREATE INDEX IF NOT EXISTS idx_event_ledger_type ON event_ledger(type);
+CREATE INDEX IF NOT EXISTS idx_event_ledger_date ON event_ledger(event_date);
+
+CREATE TABLE IF NOT EXISTS milestones (
+    id              INTEGER PRIMARY KEY,
+    discussion_id   INTEGER REFERENCES discussions(id),
+    name            TEXT NOT NULL,
+    achieved        INTEGER DEFAULT 0,
+    achieved_date   TEXT,
+    evidence_event_ids TEXT,
+    confidence      REAL,
+    last_evaluated_at TEXT,
+    UNIQUE(discussion_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_milestones_discussion ON milestones(discussion_id);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id              INTEGER PRIMARY KEY,
+    layer           TEXT NOT NULL,
+    target_type     TEXT NOT NULL,
+    target_id       TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    old_value       TEXT,
+    new_value       TEXT,
+    reason          TEXT,
+    applied         INTEGER DEFAULT 0,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_layer ON feedback(layer);
+CREATE INDEX IF NOT EXISTS idx_feedback_target ON feedback(target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS few_shot_examples (
+    id              INTEGER PRIMARY KEY,
+    layer           TEXT NOT NULL,
+    category        TEXT,
+    input_text      TEXT NOT NULL,
+    wrong_output    TEXT,
+    correct_output  TEXT NOT NULL,
+    source_feedback_ids TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS learned_rules (
+    id              INTEGER PRIMARY KEY,
+    layer           TEXT NOT NULL,
+    category        TEXT,
+    rule_text       TEXT NOT NULL,
+    source_feedback_ids TEXT,
+    active          INTEGER DEFAULT 1,
+    created_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -306,6 +381,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v11(conn)
     if current_version < 12:
         _migrate_to_v12(conn)
+    if current_version < 13:
+        _migrate_to_v13(conn)
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
@@ -647,6 +724,87 @@ def _migrate_to_v12(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     print("  [migration v12] calendar_events and discussion_events tables added")
+
+
+def _migrate_to_v13(conn: sqlite3.Connection) -> None:
+    """Migration v12 -> v13: add event ledger, milestones, feedback, few-shot, learned rules tables."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS event_ledger (
+        id              TEXT PRIMARY KEY,
+        thread_id       TEXT,
+        source_email_id TEXT,
+        source_calendar_event_id TEXT,
+        discussion_id   INTEGER REFERENCES discussions(id),
+        domain          TEXT NOT NULL,
+        type            TEXT NOT NULL,
+        actor           TEXT,
+        target          TEXT,
+        event_date      TEXT,
+        detail          TEXT,
+        confidence      REAL,
+        model_version   TEXT,
+        prompt_version  TEXT,
+        created_at      TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_event_ledger_thread ON event_ledger(thread_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_event_ledger_discussion ON event_ledger(discussion_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_event_ledger_domain ON event_ledger(domain)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_event_ledger_type ON event_ledger(type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_event_ledger_date ON event_ledger(event_date)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS milestones (
+        id              INTEGER PRIMARY KEY,
+        discussion_id   INTEGER REFERENCES discussions(id),
+        name            TEXT NOT NULL,
+        achieved        INTEGER DEFAULT 0,
+        achieved_date   TEXT,
+        evidence_event_ids TEXT,
+        confidence      REAL,
+        last_evaluated_at TEXT,
+        UNIQUE(discussion_id, name)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_milestones_discussion ON milestones(discussion_id)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS feedback (
+        id              INTEGER PRIMARY KEY,
+        layer           TEXT NOT NULL,
+        target_type     TEXT NOT NULL,
+        target_id       TEXT NOT NULL,
+        action          TEXT NOT NULL,
+        old_value       TEXT,
+        new_value       TEXT,
+        reason          TEXT,
+        applied         INTEGER DEFAULT 0,
+        created_at      TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_layer ON feedback(layer)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_target ON feedback(target_type, target_id)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS few_shot_examples (
+        id              INTEGER PRIMARY KEY,
+        layer           TEXT NOT NULL,
+        category        TEXT,
+        input_text      TEXT NOT NULL,
+        wrong_output    TEXT,
+        correct_output  TEXT NOT NULL,
+        source_feedback_ids TEXT,
+        created_at      TEXT NOT NULL
+    )""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS learned_rules (
+        id              INTEGER PRIMARY KEY,
+        layer           TEXT NOT NULL,
+        category        TEXT,
+        rule_text       TEXT NOT NULL,
+        source_feedback_ids TEXT,
+        active          INTEGER DEFAULT 1,
+        created_at      TEXT NOT NULL
+    )""")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v13] event ledger, milestones, feedback tables added")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:
