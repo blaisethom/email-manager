@@ -229,7 +229,7 @@ def _format_events_for_prompt(events: list[dict[str, Any]]) -> str:
     lines = []
     for ev in events:
         detail = (ev.get("detail") or "")[:80]
-        thread = (ev.get("thread_id") or "")[:20]
+        thread = ev.get("thread_id") or ""
         actor = ev.get("actor", "")
         target = ev.get("target", "")
         target_str = f"→{target}" if target else ""
@@ -316,12 +316,24 @@ def _save_discussion(
         )
         disc_id = cursor.lastrowid
 
-    # Link threads
+    # Link threads — resolve potentially truncated thread IDs from LLM
     for tid in thread_ids:
-        conn.execute(
-            "INSERT OR IGNORE INTO discussion_threads (discussion_id, thread_id) VALUES (?, ?)",
-            (disc_id, tid),
-        )
+        if tid:
+            # Try exact match first, then prefix match
+            exact = fetchone(conn, "SELECT thread_id FROM threads WHERE thread_id = ?", (tid,))
+            if exact:
+                resolved_tid = exact["thread_id"]
+            else:
+                prefix = fetchone(
+                    conn,
+                    "SELECT thread_id FROM threads WHERE thread_id LIKE ? LIMIT 1",
+                    (tid + "%",),
+                )
+                resolved_tid = prefix["thread_id"] if prefix else tid
+            conn.execute(
+                "INSERT OR IGNORE INTO discussion_threads (discussion_id, thread_id) VALUES (?, ?)",
+                (disc_id, resolved_tid),
+            )
 
     # Assign events to this discussion
     if event_ids:
