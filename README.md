@@ -1,6 +1,6 @@
 # Email Manager
 
-A personal email data pipeline that syncs your emails into a local SQLite database, uses AI to categorise them into projects, builds contact memories, labels company relationships, summarises threads, and provides an interactive chat agent for exploring and refining your email data.
+A personal email data pipeline that syncs your emails into a local SQLite database, uses AI to extract business events, track discussions with milestones and workflow states, label company relationships, build contact memories, and provides an interactive chat agent and web dashboard for exploring your email data.
 
 All data stays local. You choose the AI backend.
 
@@ -40,32 +40,35 @@ email-manager chat
 ┌──────────────────┐     ┌──────────────┐     ┌──────────────────────────┐
 │  Email Accounts  │     │   SQLite     │     │  AI Backend              │
 │  Gmail / IMAP    │────>│   Database   │<───>│  (Claude/CLI/Ollama)     │
-│  (multi-account) │     │              │     └──────────────────────────┘
+│  Calendar        │     │              │     └──────────────────────────┘
 └──────────────────┘     │  emails      │              │
-                         │  threads     │     ┌────────┴─────────────────┐
-                         │  contacts    │     │  Pipeline Stages         │
-                         │  co_email_   │     │  1. Extract Base (no AI) │
-                         │    stats     │     │  2. Fetch Homepages      │
-                         │  contact_    │     │  3. Contact Memory       │
-                         │    memories  │     │  4. Categorise           │
-                         │  companies   │     │  5. Summarise Threads    │
-                         │  projects    │     │  6. Label Companies      │
-                         │              │     └──────────────────────────┘
-                         └──────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │  CLI / Chat Agent   │
-                    │  Memory System      │
+                         │  event_ledger│     ┌────────┴─────────────────┐
+                         │  discussions │     │  Pipeline Stages         │
+                         │  milestones  │     │  1. Sync Calendar        │
+                         │  contacts    │     │  2. Extract Base (no AI) │
+                         │  companies   │     │  3. Fetch Homepages      │
+                         │  contact_    │     │  4. Label Companies      │
+                         │    memories  │     │  5. Extract Events       │
+                         │              │     │  6. Discover Discussions  │
+                         └──────────────┘     │  7. Analyse Discussions  │
+                               │              │  8. Contact Memory       │
+                    ┌──────────┴──────────┐   └──────────────────────────┘
+                    │  CLI / Web UI       │
+                    │  Chat Agent         │
                     └─────────────────────┘
 ```
 
 ### Data Flow
 
-1. **Sync** — Emails are fetched from all configured accounts (Gmail API, IMAP) and stored in SQLite. Incremental sync means only new emails are fetched on subsequent runs.
+1. **Sync** — Emails are fetched from all configured accounts (Gmail API, IMAP) and stored in SQLite. Calendar events are also synced. Incremental sync means only new data is fetched on subsequent runs.
 2. **Extract Base** — Contacts, companies, and co-email statistics are extracted from email headers. No AI needed.
 3. **Fetch Homepages** — Company homepage content is downloaded and converted to markdown for use by later stages. No AI needed.
-4. **Analyse** — The AI pipeline processes emails in stages: contact memories, categorisation, thread summarisation, and company labelling. Each stage is independently resumable.
-5. **Explore** — CLI commands and the interactive chat agent let you query, reorganise, and refine the data.
+4. **Label Companies** — AI classifies each company's relationship to you (investor, customer, vendor, partner, etc.).
+5. **Extract Events** — AI reads each email thread (with calendar context) and extracts fine-grained business events (e.g. `deck_shared`, `nda_signed`, `meeting_held`) into an append-only event ledger.
+6. **Discover Discussions** — AI clusters events into discussions by company, topic, and participants. A thread can contribute events to multiple discussions.
+7. **Analyse Discussions** — For each discussion, AI evaluates milestones (~10 per category), infers the current workflow state, and generates a narrative summary — all in a single call.
+8. **Contact Memory** — AI generates relationship profiles for contacts (summary, key facts, discussion topics).
+9. **Explore** — CLI commands, web dashboard, and the interactive chat agent let you query, explore, and refine the data.
 
 ## Multi-Account Setup
 
@@ -152,41 +155,56 @@ OLLAMA_URL=http://localhost:11434
 
 ## Pipeline
 
-The analysis pipeline has six stages. Each is independently resumable — if interrupted, re-running skips already-processed items.
+The analysis pipeline has 8 stages. Each is independently resumable — if interrupted, re-running skips already-processed items.
 
-| Stage | AI? | What it does |
-|---|---|---|
-| `extract_base` | No | Extracts contacts, companies, and co-email pair statistics from email headers |
-| `fetch_homepages` | No | Downloads company homepages and converts to markdown (concurrent, 10 workers by default) |
-| `contact_memory` | Yes | Generates AI memory profiles for contacts (relationship, discussions, key facts) |
-| `categorise` | Yes | Assigns each email to 1-3 projects. Creates projects automatically |
-| `summarise_threads` | Yes | Generates summaries for email threads |
-| `label_companies` | Yes | Assigns relationship labels (customer, vendor, partner, etc.) to companies using emails + homepage content |
+| # | Stage | AI? | What it does |
+|---|---|---|---|
+| 1 | `sync_calendar` | No | Syncs Google Calendar events for calendar-email correlation |
+| 2 | `extract_base` | No | Extracts contacts, companies, and co-email pair statistics from email headers |
+| 3 | `fetch_homepages` | No | Downloads company homepages and converts to markdown (concurrent, 10 workers) |
+| 4 | `label_companies` | Yes | Assigns relationship labels (investor, customer, vendor, etc.) to companies |
+| 5 | `extract_events` | Yes | Reads each email thread + calendar context, extracts fine-grained business events into an append-only event ledger |
+| 6 | `discover_discussions` | Yes | Clusters events into discussions by company, topic, and participants |
+| 7 | `analyse_discussions` | Yes | Evaluates milestones, infers workflow state, and generates narrative summary per discussion |
+| 8 | `contact_memory` | Yes | Generates AI memory profiles for contacts (relationship, discussions, key facts) |
 
 ```bash
-email-manager analyse                           # run all stages
-email-manager analyse --stage extract_base      # run one stage (no AI needed)
-email-manager analyse --stage fetch_homepages   # download company homepages
-email-manager analyse --stage label_companies   # classify company relationships
-email-manager analyse --stage categorise -n 100 # process 100 most recent emails
-email-manager run                               # sync + analyse in one command
+email-analyser analyse                           # run all stages
+email-analyser analyse --stage extract_base      # run one stage (no AI needed)
+email-analyser analyse --stage label_companies   # classify company relationships
+email-analyser run                               # sync + analyse in one command
+
+# Rebuild a specific company from scratch
+email-analyser analyse -s extract_events -s discover_discussions \
+  -s analyse_discussions --company acme.com --clean
+
+# Process all investor companies
+email-analyser analyse -s extract_events --label investor --force
 ```
 
-### Resumability
+### Event-Driven Discussion Pipeline
 
-Each stage tracks progress in the `pipeline_runs` table. To reprocess:
+The core analysis pipeline (stages 5-7) follows an event-driven architecture:
 
-```sql
-DELETE FROM pipeline_runs WHERE stage = 'categorise';
-```
+1. **Extract Events** — Each email thread is read once. The AI classifies the business domain(s) present (investment, pharma-deal, hiring, etc.) and extracts fine-grained events using a domain-specific vocabulary (~15 event types per category). Events are stored in an append-only ledger with source email links.
 
-### Batching
+2. **Discover Discussions** — Events are clustered into discussions by company, topic, and participants. One thread can contribute events to multiple discussions. Overlapping discussions are automatically detected and merged.
 
-AI stages batch emails (default 10) to reduce API calls. Failed batches are retried individually.
+3. **Analyse Discussions** — For each discussion, the AI evaluates ~10 category-specific milestones (e.g. `intro_complete`, `materials_shared`, `nda_executed`, `deep_diligence`), infers the current workflow state, and generates a narrative summary — all in a single call.
 
-```
-AI_BATCH_SIZE=10
-```
+### Discussion Categories
+
+Categories and their event types, milestones, and workflow states are defined in `discussion_categories.yaml`. Includes: investment, investor-relations, pharma-deal, scheduling, contract-negotiation, vendor-selection, internal-decision, hiring, partnership, support-issue, board-discussion, newsletter, and other.
+
+### Flags
+
+| Flag | Effect |
+|---|---|
+| `--force` / `-f` | Reprocess items even if already done (keeps old data) |
+| `--clean` | Delete previous output for the scoped stages before reprocessing |
+| `--company` / `-c` | Scope to a specific company domain |
+| `--label` / `-l` | Scope to all companies with this label (e.g. `investor`) |
+| `--limit` / `-n` | Only process the N most recent items |
 
 ## Contact Memory System
 
@@ -292,13 +310,16 @@ SQLite with WAL mode and 30-second busy timeout. Stored at `data/email_manager.d
 | `sync_state` | Per-folder sync cursor (UIDVALIDITY + last UID for IMAP, historyId for Gmail). |
 | `contacts` | Aggregated contact info — name, company, email counts, first/last seen. |
 | `companies` | Companies extracted from email domains, with email counts and homepage fetch status. |
-| `company_contacts` | Maps companies to their contact email addresses. |
-| `company_labels` | AI-assigned relationship labels (customer, vendor, etc.) with confidence and reasoning. |
-| `co_email_stats` | Co-emailing statistics for every pair of addresses that appear on the same email. |
+| `company_labels` | AI-assigned relationship labels (investor, customer, vendor, etc.) with confidence and reasoning. |
+| `event_ledger` | Append-only business events extracted from emails — type, domain, actor, date, detail, confidence. |
+| `discussions` | Business discussions with category, workflow state, summary, participants. |
+| `milestones` | Per-discussion milestone achievements with dates, evidence event IDs, and confidence. |
+| `discussion_threads` | Maps discussions to email threads (many-to-many). |
+| `discussion_state_history` | State transition history for discussions. |
+| `calendar_events` | Synced Google Calendar events. |
 | `contact_memories` | AI-generated memory profiles — relationship, discussions, key facts. |
-| `threads` | Thread groupings computed from References/In-Reply-To headers, with AI summaries. |
-| `projects` | AI-discovered or user-created project categories. |
-| `email_projects` | Many-to-many mapping of emails to projects, with confidence scores. |
+| `feedback` | User corrections to events, milestones, and discussion classifications. |
+| `threads` | Thread groupings computed from References/In-Reply-To headers. |
 | `pipeline_runs` | Tracks which emails have been processed by which pipeline stage. |
 
 ### Email Threading
@@ -311,30 +332,31 @@ Threads are computed using a union-find algorithm:
 ## CLI Commands
 
 ```
-email-manager accounts                          List configured email accounts
-email-manager sync                              Sync all accounts
-email-manager sync --account personal-gmail     Sync one account
-email-manager sync --list-folders               List available IMAP folders
-email-manager analyse                           Run all analysis stages
-email-manager analyse --stage extract_base      Run one stage
-email-manager analyse --stage categorise -n 50  Process N most recent items
-email-manager run                               Sync + analyse
-email-manager list                              Show recent emails
-email-manager list --limit 50                   Show more emails
-email-manager search "quarterly report"         Full-text search
-email-manager projects                          List projects with email counts
-email-manager threads                           List threads with summaries
-email-manager contacts                          List contacts by frequency
-email-manager contact alice@example.com         Detail view for one contact
-email-manager coemail                           Top co-emailing pairs
-email-manager coemail alice@example.com         Who does alice co-email with most
-email-manager entities                          List extracted entities
-email-manager entities --type person            Filter by entity type
-email-manager memory                            List contact memories
-email-manager memory alice@example.com          View/generate one contact's memory
-email-manager memory --all --limit 10           Generate for top 10 contacts
-email-manager status                            Sync state, pipeline progress, stats
-email-manager chat                              Interactive AI agent
+email-analyser accounts                          List configured email accounts
+email-analyser sync                              Sync all accounts
+email-analyser sync --account personal-gmail     Sync one account
+email-analyser sync --list-folders               List available IMAP folders
+email-analyser analyse                           Run all analysis stages
+email-analyser analyse --stage extract_events    Run one stage
+email-analyser analyse -s extract_events -s discover_discussions -s analyse_discussions
+                                                 Run the discussion pipeline
+email-analyser analyse --company acme.com --clean
+                                                 Rebuild analysis for one company
+email-analyser analyse --label investor --force  Reprocess all investor companies
+email-analyser run                               Sync + analyse
+email-analyser list                              Show recent emails
+email-analyser search "quarterly report"         Full-text search
+email-analyser companies                         List companies with labels
+email-analyser company acme.com                  Detail view for one company
+email-analyser discussions                       List discussions
+email-analyser discussion 123                    Detail view for one discussion
+email-analyser contacts                          List contacts by frequency
+email-analyser contact alice@example.com         Detail view for one contact
+email-analyser memory                            List contact memories
+email-analyser memory alice@example.com          View/generate one contact's memory
+email-analyser memory --all --limit 10           Generate for top 10 contacts
+email-analyser status                            Sync state, pipeline progress, stats
+email-analyser chat                              Interactive AI agent
 ```
 
 ## Interactive Chat Agent
@@ -353,46 +375,55 @@ The agent has access to 11 tools for querying and modifying your email data. For
 ## Project Structure
 
 ```
-src/email_manager/
-├── cli.py                  CLI entrypoint (Click)
-├── config.py               Settings, multi-account config (Pydantic)
-├── db.py                   SQLite schema and helpers
-├── models.py               Data models (Email, Contact, Thread, Project)
+email-analyser/src/email_manager/
+├── cli.py                          CLI entrypoint (Click)
+├── config.py                       Settings, multi-account config (Pydantic)
+├── db.py                           SQLite schema, migrations, helpers
+├── models.py                       Data models (Email, Contact, Thread)
 ├── ingestion/
-│   ├── imap_client.py      IMAP sync with Yahoo resilience
-│   ├── gmail_client.py     Gmail API sync with historyId tracking
-│   ├── parser.py           Raw email bytes → structured Email objects
-│   └── threading.py        Thread detection (union-find algorithm)
+│   ├── imap_client.py              IMAP sync with Yahoo resilience
+│   ├── gmail_client.py             Gmail API sync with historyId tracking
+│   ├── calendar_client.py          Google Calendar sync
+│   ├── parser.py                   Raw email bytes → structured Email objects
+│   └── threading.py                Thread detection (union-find algorithm)
 ├── ai/
-│   ├── base.py             LLMBackend protocol
-│   ├── claude_backend.py   Claude API implementation
-│   ├── claude_cli_backend.py  Claude CLI subprocess implementation
-│   ├── ollama_backend.py   Ollama HTTP implementation
-│   ├── prompts.py          Prompt templates
-│   └── factory.py          Backend selection
+│   ├── base.py                     LLMBackend protocol
+│   ├── claude_backend.py           Claude API implementation
+│   ├── claude_cli_backend.py       Claude CLI subprocess implementation
+│   ├── ollama_backend.py           Ollama HTTP implementation
+│   ├── prompts.py                  Prompt templates
+│   └── factory.py                  Backend selection
 ├── memory/
-│   ├── base.py             ContactMemory dataclass, MemoryBackend + MemoryStrategy protocols
-│   ├── factory.py          Backend and strategy selection
-│   ├── sqlite_backend.py   SQLite memory storage
-│   ├── markdown_backend.py Markdown file memory storage
+│   ├── base.py                     ContactMemory dataclass, MemoryBackend + MemoryStrategy protocols
+│   ├── factory.py                  Backend and strategy selection
+│   ├── sqlite_backend.py           SQLite memory storage
+│   ├── markdown_backend.py         Markdown file memory storage
 │   └── strategies/
-│       ├── default.py      Default strategy (single AI call)
-│       └── detailed.py     Detailed strategy (two AI calls)
+│       ├── default.py              Default strategy (single AI call)
+│       └── detailed.py             Detailed strategy (two AI calls)
 ├── pipeline/
-│   ├── runner.py           Pipeline orchestrator
-│   ├── stages.py           Stage registry
-│   └── batch.py            Batching utilities
+│   ├── runner.py                   Pipeline orchestrator
+│   └── stages.py                   Stage registry (8 stages)
 ├── analysis/
-│   ├── base_extract.py     No-AI extraction (contacts, companies, co-email stats)
-│   ├── homepage.py         Concurrent homepage fetcher (no AI)
-│   ├── company_labels.py   AI company relationship labelling
-│   ├── contact_memory.py   Contact memory generation pipeline
-│   ├── categoriser.py      Email → project assignment
-│   └── summariser.py       Thread summarisation
+│   ├── base_extract.py             No-AI extraction (contacts, companies, co-email stats)
+│   ├── homepage.py                 Concurrent homepage fetcher (no AI)
+│   ├── company_labels.py           AI company relationship labelling
+│   ├── events.py                   Event extraction from email threads
+│   ├── discover_discussions.py     Discussion discovery from event clusters
+│   ├── analyse_discussions.py      Milestone evaluation, state inference, summary
+│   ├── contact_memory.py           Contact memory generation pipeline
+│   └── discussions.py              (legacy) Direct discussion extraction
 └── agent/
-    ├── repl.py             Interactive chat (Claude API / CLI / generic)
-    ├── tools.py            11 agent tool definitions and handlers
-    └── context.py          Conversation memory management
+    ├── repl.py                     Interactive chat (Claude API / CLI / generic)
+    ├── tools.py                    Agent tool definitions and handlers
+    └── context.py                  Conversation memory management
+
+web/
+├── src/                            React + TypeScript frontend
+│   ├── pages/                      Companies, Contacts, Discussions, Actions, Calendar
+│   └── components/                 Badge, Pagination, SearchBar, Markdown, etc.
+├── server/                         Express API server (SQLite → JSON)
+└── discussion_categories.yaml      Category config (event types, milestones, states)
 ```
 
 ## Development

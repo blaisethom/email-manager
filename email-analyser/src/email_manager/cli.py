@@ -289,7 +289,7 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--stage", "-s", type=click.Choice(["sync_calendar", "extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "contact_memory", "categorise", "summarise_threads", "discussions", "link_calendar"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--stage", "-s", type=click.Choice(["sync_calendar", "extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "contact_memory"]), multiple=True, help="Run specific stage(s) only")
 @click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
 @click.option("--force", "-f", is_flag=True, help="Force regeneration even if already processed")
 @click.option("--clean", is_flag=True, help="Delete previous output for the scoped stages before reprocessing")
@@ -299,7 +299,27 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 @click.option("--contact", default=None, help="Scope to a specific contact's company (email address)")
 @click.pass_context
 def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], contact: str | None) -> None:
-    """Run AI analysis pipeline on synced emails."""
+    """Run AI analysis pipeline on synced emails.
+
+    Pipeline stages (in order):
+
+    \b
+      1. sync_calendar        Sync Google Calendar events
+      2. extract_base         Extract contacts, companies, domains (no AI)
+      3. fetch_homepages      Download company homepages (no AI)
+      4. label_companies      Classify company relationships (AI)
+      5. extract_events       Extract business events from threads (AI)
+      6. discover_discussions  Cluster events into discussions (AI)
+      7. analyse_discussions   Evaluate milestones, state & summary (AI)
+      8. contact_memory       Generate contact relationship profiles (AI)
+
+    Use --stage/-s to run specific stages. Use --company/-c to scope to one
+    company. Use --clean to delete previous output before reprocessing.
+
+    Example: Rebuild analysis for one company from scratch:
+      email-analyser analyse -s extract_events -s discover_discussions \\
+        -s analyse_discussions --company acme.com --clean
+    """
     from email_manager.pipeline.runner import run_pipeline
 
     config: Config = ctx.obj["config"]
