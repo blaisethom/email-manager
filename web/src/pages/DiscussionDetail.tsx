@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { api } from '../api';
-import type { DiscussionDetail, DiscussionAction, StateHistoryEntry, Thread, ThreadEmail, CalendarEvent, EventLedgerEntry, Milestone, ProposedAction } from '../types';
+import type { Discussion, DiscussionDetail, DiscussionAction, StateHistoryEntry, Thread, ThreadEmail, CalendarEvent, EventLedgerEntry, Milestone, ProposedAction } from '../types';
 import Badge from '../components/Badge';
+import Breadcrumbs, { extendBreadcrumbs } from '../components/Breadcrumbs';
 import Markdown from '../components/Markdown';
 import { formatDate, formatDateTime } from '../utils';
 
@@ -48,7 +49,7 @@ function StateTimeline({ history }: { history: StateHistoryEntry[] }) {
   );
 }
 
-function ActionRow({ action }: { action: DiscussionAction }) {
+function ActionRow({ action, linkState }: { action: DiscussionAction; linkState?: object }) {
   return (
     <div className="py-3 border-b border-slate-100 last:border-0">
       <div className="flex items-start gap-3">
@@ -77,6 +78,7 @@ function ActionRow({ action }: { action: DiscussionAction }) {
                   <Link
                     key={email}
                     to={`/contacts/${encodeURIComponent(email)}`}
+                    state={linkState}
                     className="text-blue-600 hover:underline"
                   >
                     {email}
@@ -562,8 +564,6 @@ export default function DiscussionDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const listSearch = (location.state as { listSearch?: string } | null)?.listSearch;
-  const backTo = listSearch ? `/discussions?${listSearch}` : '/discussions';
   const [data, setData] = useState<DiscussionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -597,7 +597,7 @@ export default function DiscussionDetailPage() {
   if (error || !data) {
     return (
       <div className="p-4 sm:p-8">
-        <button onClick={() => navigate(backTo)} className="btn-secondary mb-6">
+        <button onClick={() => navigate('/discussions')} className="btn-secondary mb-6">
           ← Back
         </button>
         <div className="card p-6 text-center text-red-600">
@@ -609,13 +609,10 @@ export default function DiscussionDetailPage() {
 
   return (
     <div className="p-4 sm:p-8 max-w-4xl">
-      {/* Back */}
-      <button
-        onClick={() => navigate(backTo)}
-        className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors mb-6"
-      >
-        ← Back to Discussions
-      </button>
+      <Breadcrumbs
+        current={data.title}
+        defaultTrail={[{ label: 'Discussions', path: '/discussions' }]}
+      />
 
       {/* Header */}
       <div className="mb-6">
@@ -626,11 +623,21 @@ export default function DiscussionDetailPage() {
         <div className="flex flex-wrap items-center gap-2 mb-3">
           {data.current_state && <Badge label={data.current_state} variant="state" />}
           {data.category && <Badge label={data.category} variant="category" />}
+          {data.parent_id && (
+            <Link
+              to={`/discussions/${data.parent_id}`}
+              state={extendBreadcrumbs(location.state, { label: data.title, path: `/discussions/${data.id}` })}
+              className="text-xs text-slate-500 hover:text-blue-600 transition-colors"
+            >
+              sub-discussion →
+            </Link>
+          )}
         </div>
 
         {data.company_name && data.company_id && (
           <Link
             to={`/companies/${data.company_id}`}
+            state={extendBreadcrumbs(location.state, { label: data.title, path: `/discussions/${data.id}` })}
             className="text-blue-600 hover:text-blue-700 font-medium"
           >
             {data.company_name} →
@@ -662,6 +669,37 @@ export default function DiscussionDetailPage() {
         <div className="card p-6 mb-6">
           <h2 className="text-base font-semibold text-slate-900 mb-3">Summary</h2>
           <p className="text-slate-700 leading-relaxed">{data.summary}</p>
+        </div>
+      )}
+
+      {/* Sub-discussions */}
+      {data.children && data.children.length > 0 && (
+        <div className="card p-6 mb-6">
+          <h2 className="text-base font-semibold text-slate-900 mb-3">
+            Sub-Discussions
+            <span className="ml-2 text-sm font-normal text-slate-500">({data.children.length})</span>
+          </h2>
+          <div className="divide-y divide-slate-100">
+            {data.children.map((child: Discussion) => (
+              <Link
+                key={child.id}
+                to={`/discussions/${child.id}`}
+                state={extendBreadcrumbs(location.state, { label: data.title, path: `/discussions/${data.id}` })}
+                className="flex items-start justify-between gap-3 py-3 hover:bg-slate-50 -mx-2 px-2 rounded transition-colors block"
+              >
+                <div className="flex-1 min-w-0">
+                  <h4 className="font-medium text-slate-900">{child.title}</h4>
+                  {child.summary && (
+                    <p className="text-sm text-slate-500 mt-0.5 line-clamp-2">{child.summary}</p>
+                  )}
+                </div>
+                <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                  {child.current_state && <Badge label={child.current_state} variant="state" />}
+                  {child.category && <Badge label={child.category} variant="category" />}
+                </div>
+              </Link>
+            ))}
+          </div>
         </div>
       )}
 
@@ -768,7 +806,7 @@ export default function DiscussionDetailPage() {
             </div>
             <div>
               {visibleActions.map((action) => (
-                <ActionRow key={action.id} action={action} />
+                <ActionRow key={action.id} action={action} linkState={extendBreadcrumbs(location.state, { label: data.title, path: `/discussions/${data.id}` })} />
               ))}
               {visibleActions.length === 0 && (
                 <p className="text-sm text-slate-400 py-2">No open actions</p>

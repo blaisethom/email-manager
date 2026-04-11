@@ -27,32 +27,41 @@ def extract_base(conn: sqlite3.Connection, console: Console = None, limit: int |
     if console is None:
         console = Console()
 
-    # Skip if nothing has changed since the last run
+    # Fast check: compare max email ID against the last value we processed
     if not force:
-        last_run = fetchone(
+        max_id_row = fetchone(conn, "SELECT MAX(id) as max_id FROM emails")
+        current_max = max_id_row["max_id"] if max_id_row else None
+        last_max = fetchone(
             conn,
-            "SELECT completed_at FROM pipeline_runs WHERE stage = 'extract_base' AND status = 'success' ORDER BY completed_at DESC LIMIT 1",
+            "SELECT completed_at FROM pipeline_runs WHERE stage = 'extract_base_max_id' LIMIT 1",
         )
-        if last_run and last_run["completed_at"]:
-            new_emails = fetchone(
-                conn,
-                "SELECT COUNT(*) as cnt FROM emails WHERE fetched_at > ?",
-                (last_run["completed_at"],),
-            )
-            if new_emails and new_emails["cnt"] == 0:
-                console.print("  [dim]No new emails since last extract_base — skipping.[/dim]")
-                return 0
+        last_max_id = int(last_max["completed_at"]) if last_max and last_max["completed_at"] else None
+
+        if current_max is not None and last_max_id is not None and current_max <= last_max_id:
+            console.print("  [dim]No new emails since last extract_base — skipping.[/dim]")
+            return 0
 
     companies_count = _extract_companies(conn, console=console, limit=limit)
+
+    if companies_count == 0 and not force:
+        console.print("  [dim]No new emails to extract — skipping contacts and co-email stats.[/dim]")
+        return 0
+
     contacts_count = _extract_contacts(conn, console=console)
     co_email_count = _compute_co_email_stats(conn, console=console)
 
-    # Record this run
+    # Record this run and store the max email ID for fast skip checks
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT INTO pipeline_runs (stage, email_id, status, started_at, completed_at) VALUES ('extract_base', NULL, 'success', ?, ?)",
         (now, now),
     )
+    max_id_row = fetchone(conn, "SELECT MAX(id) as max_id FROM emails")
+    if max_id_row and max_id_row["max_id"] is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO pipeline_runs (stage, email_id, status, started_at, completed_at) VALUES ('extract_base_max_id', NULL, 'success', ?, ?)",
+            (now, str(max_id_row["max_id"])),
+        )
     conn.commit()
     return companies_count + contacts_count + co_email_count
 

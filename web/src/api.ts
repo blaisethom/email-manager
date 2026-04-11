@@ -9,6 +9,7 @@ import type {
   MetaResponse,
   ThreadEmail,
   CalendarEventsResponse,
+  ProposedAction,
 } from './types';
 
 const BASE = '/api';
@@ -117,6 +118,10 @@ export const api = {
 
   getDiscussion(id: number): Promise<DiscussionDetail> {
     return fetchJson<DiscussionDetail>(`${BASE}/discussions/${id}`);
+  },
+
+  getProposedActions(discussionId: number): Promise<ProposedAction[]> {
+    return fetchJson<ProposedAction[]>(`${BASE}/discussions/${discussionId}/proposed-actions`);
   },
 
   getThreadEmails(threadId: string): Promise<{ emails: ThreadEmail[] }> {

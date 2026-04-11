@@ -319,7 +319,7 @@ app.get('/api/companies/:id', (req: Request, res: Response) => {
   const discussionsRaw = db
     .prepare(
       `SELECT id, title, category, current_state, summary, participants, first_seen, last_seen
-       FROM discussions WHERE company_id = ?
+       FROM discussions WHERE company_id = ? AND parent_id IS NULL
        ORDER BY last_seen DESC`
     )
     .all(id) as Array<{
@@ -564,9 +564,12 @@ app.get('/api/discussions', (req: Request, res: Response) => {
   const params: unknown[] = [];
   const where: string[] = [];
 
+  // Only show root discussions by default (hide sub-discussions)
+  where.push('d.parent_id IS NULL');
+
   if (q) {
-    where.push('(d.title LIKE ? OR d.summary LIKE ?)');
-    params.push(`%${q}%`, `%${q}%`);
+    where.push('(d.title LIKE ? OR d.summary LIKE ? OR c.name LIKE ?)');
+    params.push(`%${q}%`, `%${q}%`, `%${q}%`);
   }
 
   if (category) {
@@ -596,15 +599,18 @@ app.get('/api/discussions', (req: Request, res: Response) => {
   const whereClause = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
 
   const totalRow = db
-    .prepare(`SELECT COUNT(*) AS cnt FROM discussions d ${whereClause}`)
+    .prepare(`SELECT COUNT(*) AS cnt FROM discussions d LEFT JOIN companies c ON c.id = d.company_id ${whereClause}`)
     .get(...params) as { cnt: number };
   const total = totalRow.cnt;
 
   const items = db
     .prepare(
-      `SELECT d.id, d.title, d.category, d.current_state, d.company_id, d.summary,
+      `SELECT d.id, d.title, d.category, d.current_state, d.company_id, d.parent_id, d.summary,
               d.participants, d.first_seen, d.last_seen, d.updated_at,
-              c.name AS company_name
+              c.name AS company_name,
+              (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id) AS proposed_action_count,
+              (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND pa.priority = 'high') AS high_priority_count,
+              (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND pa.priority = 'medium') AS med_priority_count
        FROM discussions d
        LEFT JOIN companies c ON c.id = d.company_id
        ${whereClause}
@@ -617,12 +623,16 @@ app.get('/api/discussions', (req: Request, res: Response) => {
     category: string | null;
     current_state: string | null;
     company_id: number | null;
+    parent_id: number | null;
     summary: string | null;
     participants: string | null;
     first_seen: string | null;
     last_seen: string | null;
     updated_at: string | null;
     company_name: string | null;
+    proposed_action_count: number;
+    high_priority_count: number;
+    med_priority_count: number;
   }>;
 
   const enriched = items.map((d) => ({
@@ -672,6 +682,7 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
         category: string | null;
         current_state: string | null;
         company_id: number | null;
+        parent_id: number | null;
         company_name: string | null;
         summary: string | null;
         participants: string | null;
@@ -852,6 +863,37 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
     }
   })();
 
+  // Fetch child (sub) discussions
+  const childrenRaw = db
+    .prepare(
+      `SELECT d.id, d.title, d.category, d.current_state, d.company_id, d.parent_id, d.summary,
+              d.participants, d.first_seen, d.last_seen, d.updated_at,
+              c.name AS company_name
+       FROM discussions d
+       LEFT JOIN companies c ON c.id = d.company_id
+       WHERE d.parent_id = ?
+       ORDER BY d.last_seen DESC`
+    )
+    .all(id) as Array<{
+    id: number;
+    title: string;
+    category: string | null;
+    current_state: string | null;
+    company_id: number | null;
+    parent_id: number | null;
+    summary: string | null;
+    participants: string | null;
+    first_seen: string | null;
+    last_seen: string | null;
+    updated_at: string | null;
+    company_name: string | null;
+  }>;
+
+  const children = childrenRaw.map((d) => ({
+    ...d,
+    participants: parseJsonField<string[]>(d.participants) ?? [],
+  }));
+
   res.json({
     ...discussion,
     participants: parseJsonField<string[]>(discussion.participants) ?? [],
@@ -862,7 +904,42 @@ app.get('/api/discussions/:id', (req: Request, res: Response) => {
     events,
     milestones,
     proposed_actions: proposedActions,
+    children,
   });
+});
+
+// ── /api/discussions/:id/proposed-actions ──────────────────────────────────
+
+app.get('/api/discussions/:id/proposed-actions', (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ error: 'Invalid discussion id' });
+    return;
+  }
+
+  try {
+    const actions = db
+      .prepare(
+        `SELECT id, action, reasoning, priority, wait_until, assignee, created_at
+         FROM proposed_actions
+         WHERE discussion_id = ?
+         ORDER BY
+           CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+           id ASC`
+      )
+      .all(id) as Array<{
+      id: number;
+      action: string;
+      reasoning: string | null;
+      priority: string;
+      wait_until: string | null;
+      assignee: string | null;
+      created_at: string;
+    }>;
+    res.json(actions);
+  } catch {
+    res.json([]);
+  }
 });
 
 // ── /api/threads/:threadId/emails ─────────────────────────────────────────

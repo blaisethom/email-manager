@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
-import type { Discussion, CategoryConfig } from '../types';
+import type { Discussion, CategoryConfig, ProposedAction } from '../types';
 import Badge from '../components/Badge';
 import SearchBar from '../components/SearchBar';
 import Pagination from '../components/Pagination';
@@ -12,7 +12,59 @@ const LIMIT = 20;
 
 // ── Shared card used in both list and kanban views ─────────────────────────
 
-function DiscussionCard({ disc, onClick, compact }: { disc: Discussion; onClick: () => void; compact?: boolean }) {
+const PRIORITY_PILL: Record<string, string> = {
+  high: 'text-white bg-red-500',
+  medium: 'text-white bg-amber-500',
+  low: 'text-slate-600 bg-slate-200',
+};
+
+const PRIORITY_DETAIL: Record<string, string> = {
+  high: 'text-red-600 bg-red-50',
+  medium: 'text-amber-600 bg-amber-50',
+  low: 'text-slate-500 bg-slate-100',
+};
+
+function NextStepsPanel({ discussionId }: { discussionId: number }) {
+  const [actions, setActions] = useState<ProposedAction[] | null>(null);
+
+  useEffect(() => {
+    api.getProposedActions(discussionId).then(setActions);
+  }, [discussionId]);
+
+  if (!actions) {
+    return <div className="px-5 pb-4 text-xs text-slate-400">Loading...</div>;
+  }
+
+  return (
+    <div className="px-5 pb-4">
+      <div className="border-t border-slate-100 pt-3 space-y-2">
+        {actions.map((a) => (
+          <div key={a.id} className="flex items-start gap-2 text-sm">
+            <span className={`text-xs font-medium px-1.5 py-0.5 rounded flex-shrink-0 ${PRIORITY_DETAIL[a.priority] ?? PRIORITY_DETAIL.low}`}>
+              {a.priority}
+            </span>
+            <div className="min-w-0">
+              <p className="text-slate-700">{a.action}</p>
+              {a.reasoning && (
+                <p className="text-xs text-slate-400 mt-0.5">{a.reasoning}</p>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DiscussionCard({ disc, onClick, compact, showActions = false }: { disc: Discussion; onClick: () => void; compact?: boolean; showActions?: boolean }) {
+  const highCount = disc.high_priority_count ?? 0;
+  const medCount = disc.med_priority_count ?? 0;
+  const hasPills = highCount > 0 || medCount > 0;
+  const [localToggle, setLocalToggle] = useState<boolean | null>(null);
+  // Reset local override when page-level toggle changes
+  useEffect(() => setLocalToggle(null), [showActions]);
+  const expanded = hasPills && (localToggle ?? showActions);
+
   if (compact) {
     return (
       <div
@@ -28,44 +80,65 @@ function DiscussionCard({ disc, onClick, compact }: { disc: Discussion; onClick:
   }
 
   return (
-    <div
-      onClick={onClick}
-      className="card p-5 cursor-pointer hover:shadow-md hover:border-slate-300 transition-all"
-    >
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 sm:gap-4">
-        <div className="flex-1 min-w-0">
-          <h3 className="font-semibold text-slate-900 leading-snug">{disc.title}</h3>
+    <div className="card hover:shadow-md hover:border-slate-300 transition-all">
+      <div
+        onClick={onClick}
+        className="p-5 cursor-pointer"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 sm:gap-4">
+          <div className="flex-1 min-w-0">
+            <h3 className="font-semibold text-slate-900 leading-snug">{disc.title}</h3>
 
-          {disc.company_name && (
-            <p className="text-sm text-blue-600 mt-0.5 hover:underline">
-              {disc.company_name}
-            </p>
-          )}
+            {disc.company_name && (
+              <p className="text-sm text-blue-600 mt-0.5 hover:underline">
+                {disc.company_name}
+              </p>
+            )}
 
-          {disc.summary && (
-            <p className="text-sm text-slate-600 mt-2 line-clamp-2 leading-relaxed">
-              {disc.summary}
-            </p>
-          )}
+            {disc.summary && (
+              <p className="text-sm text-slate-600 mt-2 line-clamp-2 leading-relaxed">
+                {disc.summary}
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-wrap sm:flex-col sm:items-end gap-1.5 flex-shrink-0">
+            {disc.current_state && <Badge label={disc.current_state} variant="state" />}
+            {disc.category && <Badge label={disc.category} variant="category" />}
+          </div>
         </div>
 
-        <div className="flex flex-wrap sm:flex-col sm:items-end gap-1.5 flex-shrink-0">
-          {disc.current_state && <Badge label={disc.current_state} variant="state" />}
-          {disc.category && <Badge label={disc.category} variant="category" />}
+        <div className="mt-3 flex items-center gap-4 text-xs text-slate-400">
+          {hasPills && (
+            <span
+              onClick={(e) => { e.stopPropagation(); setLocalToggle(!expanded); }}
+              className="flex items-center gap-1.5 cursor-pointer"
+            >
+              {highCount > 0 && (
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${PRIORITY_PILL.high}`}>
+                  {highCount} high
+                </span>
+              )}
+              {medCount > 0 && (
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${PRIORITY_PILL.medium}`}>
+                  {medCount} med
+                </span>
+              )}
+            </span>
+          )}
+          {disc.participants.length > 0 && (
+            <span>{disc.participants.length} participant{disc.participants.length !== 1 ? 's' : ''}</span>
+          )}
+          {disc.last_seen && (
+            <span>Last active {formatDate(disc.last_seen)}</span>
+          )}
+          {disc.first_seen && (
+            <span>Started {formatDate(disc.first_seen)}</span>
+          )}
         </div>
       </div>
 
-      <div className="mt-3 flex items-center gap-4 text-xs text-slate-400">
-        {disc.participants.length > 0 && (
-          <span>{disc.participants.length} participant{disc.participants.length !== 1 ? 's' : ''}</span>
-        )}
-        {disc.last_seen && (
-          <span>Last active {formatDate(disc.last_seen)}</span>
-        )}
-        {disc.first_seen && (
-          <span>Started {formatDate(disc.first_seen)}</span>
-        )}
-      </div>
+      {expanded && <NextStepsPanel discussionId={disc.id} />}
     </div>
   );
 }
@@ -155,6 +228,7 @@ export default function DiscussionsPage() {
   const [categoryConfig, setCategoryConfig] = useState<CategoryConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showNextSteps, setShowNextSteps] = useState(true);
 
   const q = searchParams.get('q') ?? '';
   const category = searchParams.get('category') ?? '';
@@ -295,7 +369,7 @@ export default function DiscussionsPage() {
         <SearchBar
           value={q}
           onChange={(v) => updateParam('q', v)}
-          placeholder="Search title or summary..."
+          placeholder="Search title, summary or company..."
           className="w-full sm:w-72"
         />
 
@@ -341,6 +415,16 @@ export default function DiscussionsPage() {
           <option value="title:asc">Title A-Z</option>
           <option value="title:desc">Title Z-A</option>
         </select>
+
+        <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showNextSteps}
+            onChange={(e) => setShowNextSteps(e.target.checked)}
+            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+          />
+          Next steps
+        </label>
 
         {terminalStates.size > 0 && (
           <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
@@ -393,7 +477,7 @@ export default function DiscussionsPage() {
             <KanbanBoard
               items={items}
               columns={kanbanColumns}
-              onClickDiscussion={(id) => navigate(`/discussions/${id}`, { state: { listSearch: searchParams.toString() } })}
+              onClickDiscussion={(id) => navigate(`/discussions/${id}`, { state: { breadcrumbs: [{ label: 'Discussions', path: searchParams.toString() ? `/discussions?${searchParams.toString()}` : '/discussions' }] } })}
             />
           ) : (
             <div className="space-y-4">
@@ -401,7 +485,8 @@ export default function DiscussionsPage() {
                 <DiscussionCard
                   key={disc.id}
                   disc={disc}
-                  onClick={() => navigate(`/discussions/${disc.id}`, { state: { listSearch: searchParams.toString() } })}
+                  showActions={showNextSteps}
+                  onClick={() => navigate(`/discussions/${disc.id}`, { state: { breadcrumbs: [{ label: 'Discussions', path: searchParams.toString() ? `/discussions?${searchParams.toString()}` : '/discussions' }] } })}
                 />
               ))}
             </div>

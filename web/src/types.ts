@@ -92,6 +92,7 @@ export interface DiscussionSummary {
   category: string | null;
   current_state: string | null;
   company_id: number | null;
+  parent_id: number | null;
   summary: string | null;
   participants: string[];
   first_seen: string | null;
@@ -101,6 +102,9 @@ export interface DiscussionSummary {
 export interface Discussion extends DiscussionSummary {
   company_name: string | null;
   updated_at: string | null;
+  proposed_action_count?: number;
+  high_priority_count?: number;
+  med_priority_count?: number;
 }
 
 export interface StateHistoryEntry {
@@ -199,6 +203,7 @@ export interface DiscussionDetail extends Discussion {
   events: EventLedgerEntry[];
   milestones: Milestone[];
   proposed_actions: ProposedAction[];
+  children: Discussion[];
 }
 
 export interface CompaniesResponse {

@@ -79,6 +79,8 @@ export default function ContactsPage() {
           onChange={(e) => updateParam('company', e.target.value)}
           placeholder="Filter by company…"
           className="filter-input w-full sm:w-48"
+          spellCheck={false}
+          autoComplete="off"
         />
 
         <select
@@ -155,7 +157,7 @@ export default function ContactsPage() {
               {items.map((contact) => (
                 <tr
                   key={contact.id}
-                  onClick={() => navigate(`/contacts/${encodeURIComponent(contact.email)}`)}
+                  onClick={() => navigate(`/contacts/${encodeURIComponent(contact.email)}`, { state: { breadcrumbs: [{ label: 'Contacts', path: '/contacts' }] } })}
                   className="table-row-clickable"
                 >
                   <td className="px-6 py-4">

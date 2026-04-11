@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -162,6 +162,7 @@ CREATE TABLE IF NOT EXISTS discussions (
     category        TEXT NOT NULL,
     current_state   TEXT,
     company_id      INTEGER REFERENCES companies(id),
+    parent_id       INTEGER REFERENCES discussions(id),
     summary         TEXT,
     participants    TEXT,
     first_seen      TEXT,
@@ -173,6 +174,7 @@ CREATE TABLE IF NOT EXISTS discussions (
 CREATE INDEX IF NOT EXISTS idx_discussions_company ON discussions(company_id);
 CREATE INDEX IF NOT EXISTS idx_discussions_category ON discussions(category);
 CREATE INDEX IF NOT EXISTS idx_discussions_state ON discussions(current_state);
+-- idx_discussions_parent created by _migrate_to_v15
 
 CREATE TABLE IF NOT EXISTS discussion_threads (
     discussion_id   INTEGER REFERENCES discussions(id),
@@ -399,6 +401,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v13(conn)
     if current_version < 14:
         _migrate_to_v14(conn)
+    if current_version < 15:
+        _migrate_to_v15(conn)
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
@@ -842,6 +846,19 @@ def _migrate_to_v14(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     print("  [migration v14] proposed_actions table added")
+
+
+def _migrate_to_v15(conn: sqlite3.Connection) -> None:
+    """Migration v14 -> v15: add parent_id to discussions for sub-discussions."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(discussions)").fetchall()}
+    if "parent_id" not in cols:
+        conn.execute("ALTER TABLE discussions ADD COLUMN parent_id INTEGER REFERENCES discussions(id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_discussions_parent ON discussions(parent_id)")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v15] parent_id column added to discussions")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:

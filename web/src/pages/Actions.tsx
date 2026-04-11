@@ -137,6 +137,7 @@ function ActionCard({ action }: { action: Action }) {
                   <Link
                     key={email}
                     to={`/contacts/${encodeURIComponent(email)}`}
+                    state={{ breadcrumbs: [{ label: 'Actions', path: '/actions' }] }}
                     className="text-blue-600 hover:text-blue-700 hover:underline"
                     onClick={(e) => e.stopPropagation()}
                   >
@@ -148,6 +149,7 @@ function ActionCard({ action }: { action: Action }) {
             {action.discussion_title && (
               <Link
                 to={`/discussions/${action.discussion_id}`}
+                state={{ breadcrumbs: [{ label: 'Actions', path: '/actions' }] }}
                 className="text-blue-600 hover:text-blue-700 hover:underline truncate max-w-xs"
                 onClick={(e) => e.stopPropagation()}
               >
@@ -157,6 +159,7 @@ function ActionCard({ action }: { action: Action }) {
             {action.company_name && action.company_id && (
               <Link
                 to={`/companies/${action.company_id}`}
+                state={{ breadcrumbs: [{ label: 'Actions', path: '/actions' }] }}
                 className="text-slate-400 hover:text-slate-600 hover:underline"
                 onClick={(e) => e.stopPropagation()}
               >

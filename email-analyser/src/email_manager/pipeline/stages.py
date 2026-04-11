@@ -17,7 +17,7 @@ def _make_progress(console: Console) -> Progress:
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
+        TextColumn("{task.completed}/{task.total} {task.fields[unit]}"),
         console=console,
     )
 
@@ -56,14 +56,16 @@ def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: C
     labels_config = load_label_config(getattr(config, "company_labels_path", None))
 
     with _make_progress(console) as progress:
-        task = progress.add_task("label_companies", total=None)
+        task = progress.add_task("label_companies", total=None, unit="companies")
 
         def on_progress(done: int, total: int, name: str = "") -> None:
             desc = f"label_companies ({name})" if name and done < total else "label_companies"
             progress.update(task, completed=done, total=total or 0, description=desc)
             logger.info("label_companies: %d/%d — %s", done, total, name)
 
-        return label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company)
+        count = label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company)
+    console.print(f"  [green]label_companies: labelled {count} companies[/green]")
+    return count
 
 
 def run_contact_memory(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
@@ -132,38 +134,45 @@ def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Co
             pass  # fall back to default backend
 
     with _make_progress(console) as progress:
-        task = progress.add_task("extract_events", total=None)
+        task = progress.add_task("extract_events", total=None, unit="threads")
 
         def on_progress(done: int, total: int) -> None:
             progress.update(task, completed=done, total=total or 0)
             logger.info("extract_events: %d/%d threads", done, total)
 
-        return extract_events(
+        count = extract_events(
             conn, stage_backend, categories_config=categories_config,
             limit=limit, force=force, clean=clean,
             company_domain=company, company_label=label,
             on_progress=on_progress,
         )
+    console.print(f"  [green]extract_events: generated {count} events[/green]")
+    return count
 
 
 def run_discover_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None, label: str | None = None) -> int:
     from email_manager.analysis.discover_discussions import discover_discussions
+    from email_manager.analysis.events import load_category_config
 
     console = console or Console()
+    categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
 
     with _make_progress(console) as progress:
-        task = progress.add_task("discover_discussions", total=None)
+        task = progress.add_task("discover_discussions", total=None, unit="companies")
 
         def on_progress(done: int, total: int, name: str = "") -> None:
             desc = f"discover_discussions ({name})" if name and done < total else "discover_discussions"
             progress.update(task, completed=done, total=total or 0, description=desc)
             logger.info("discover_discussions: %d/%d — %s", done, total, name)
 
-        return discover_discussions(
+        count = discover_discussions(
             conn, backend, limit=limit, force=force, clean=clean,
             company_domain=company, company_label=label,
             on_progress=on_progress,
+            categories_config=categories_config,
         )
+    console.print(f"  [green]discover_discussions: created/updated {count} discussions[/green]")
+    return count
 
 
 def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None, label: str | None = None) -> int:
@@ -173,18 +182,20 @@ def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, confi
     categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
 
     with _make_progress(console) as progress:
-        task = progress.add_task("analyse_discussions", total=None)
+        task = progress.add_task("analyse_discussions", total=None, unit="discussions")
 
         def on_progress(done: int, total: int, name: str = "") -> None:
             desc = f"analyse_discussions ({name})" if name and done < total else "analyse_discussions"
             progress.update(task, completed=done, total=total or 0, description=desc)
             logger.info("analyse_discussions: %d/%d — %s", done, total, name)
 
-        return analyse_discussions(
+        count = analyse_discussions(
             conn, backend, categories_config=categories_config,
             limit=limit, force=force, clean=clean, company_domain=company,
             company_label=label, on_progress=on_progress,
         )
+    console.print(f"  [green]analyse_discussions: analysed {count} discussions[/green]")
+    return count
 
 
 def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, clean: bool = False, company: str | None = None, label: str | None = None) -> int:
@@ -194,23 +205,24 @@ def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: C
     categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
 
     with _make_progress(console) as progress:
-        task = progress.add_task("propose_actions", total=None)
+        task = progress.add_task("propose_actions", total=None, unit="discussions")
 
         def on_progress(done: int, total: int, name: str = "") -> None:
             desc = f"propose_actions ({name})" if name and done < total else "propose_actions"
             progress.update(task, completed=done, total=total or 0, description=desc)
             logger.info("propose_actions: %d/%d — %s", done, total, name)
 
-        return propose_actions(
+        count = propose_actions(
             conn, backend, categories_config=categories_config,
             limit=limit, force=force, clean=clean, company_domain=company,
             company_label=label, on_progress=on_progress,
         )
+    console.print(f"  [green]propose_actions: proposed actions for {count} discussions[/green]")
+    return count
 
 
 ALL_STAGES = {
-    # Phase 1: Ingestion & base extraction
-    "sync_calendar": run_sync_calendar,
+    # Phase 1: Base extraction
     "extract_base": run_extract_base,
     "fetch_homepages": run_fetch_homepages,
     "label_companies": run_label_companies,

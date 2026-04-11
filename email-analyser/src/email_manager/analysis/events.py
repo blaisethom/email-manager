@@ -24,7 +24,7 @@ from email_manager.db import fetchall, fetchone
 
 logger = logging.getLogger("email_manager.analysis.events")
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 
 # ── Category config ─────────────────────────────────────────────────────────
@@ -252,12 +252,26 @@ def _get_threads_to_process(
                  {company_filter}
                  ORDER BY e.date DESC"""
     else:
+        # Threads that either:
+        # 1. Have no events yet, OR
+        # 2. Have new emails since the last extraction
         sql = f"""SELECT DISTINCT e.thread_id
                  FROM emails e
                  WHERE e.thread_id IS NOT NULL
-                   AND e.thread_id NOT IN (
-                       SELECT DISTINCT el.thread_id FROM event_ledger el
-                       WHERE el.thread_id IS NOT NULL
+                   AND (
+                       e.thread_id NOT IN (
+                           SELECT DISTINCT el.thread_id FROM event_ledger el
+                           WHERE el.thread_id IS NOT NULL
+                       )
+                       OR e.thread_id IN (
+                           SELECT el2.thread_id FROM event_ledger el2
+                           WHERE el2.thread_id IS NOT NULL
+                           GROUP BY el2.thread_id
+                           HAVING MAX(el2.created_at) < (
+                               SELECT MAX(e2.date) FROM emails e2
+                               WHERE e2.thread_id = el2.thread_id
+                           )
+                       )
                    )
                  {company_filter}
                  ORDER BY e.date DESC"""
@@ -269,7 +283,7 @@ def _get_threads_to_process(
     return [r["thread_id"] for r in rows]
 
 
-MAX_EMAILS_PER_CHUNK = 12  # Split threads larger than this into chunks
+MAX_EMAILS_PER_CHUNK = 25  # Split threads larger than this into chunks
 
 
 def _chunk_emails(emails: list[dict], max_per_chunk: int = MAX_EMAILS_PER_CHUNK) -> list[list[dict]]:
@@ -286,9 +300,9 @@ def _chunk_emails(emails: list[dict], max_per_chunk: int = MAX_EMAILS_PER_CHUNK)
     while start < len(emails):
         end = min(start + max_per_chunk, len(emails))
         chunks.append(emails[start:end])
-        start = end - 1  # 1 email overlap
-        if start <= 0:
+        if end >= len(emails):
             break
+        start = end - 1  # 1 email overlap
     return chunks
 
 
@@ -406,8 +420,8 @@ def _process_thread(
                 "source_calendar_event_id": source_calendar_id,
                 "domain": domain,
                 "type": event_type,
-                "actor": ev.get("actor"),
-                "target": ev.get("target"),
+                "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
+                "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
                 "event_date": ev.get("event_date"),
                 "detail": ev.get("detail"),
                 "confidence": ev.get("confidence", 0.5),
@@ -435,8 +449,10 @@ def _dedup_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: dict[str, dict[str, Any]] = {}
     for ev in events:
         # Build a dedup key: domain + type + date + actor (normalized)
-        actor = (ev.get("actor") or "").lower().strip()
-        target = (ev.get("target") or "").lower().strip()
+        raw_actor = ev.get("actor") or ""
+        raw_target = ev.get("target") or ""
+        actor = (raw_actor if isinstance(raw_actor, str) else ", ".join(raw_actor)).lower().strip()
+        target = (raw_target if isinstance(raw_target, str) else ", ".join(raw_target)).lower().strip()
         date = ev.get("event_date") or ""
         key = f"{ev['domain']}|{ev['type']}|{date}|{actor}|{target}"
 

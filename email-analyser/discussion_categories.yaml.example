@@ -27,6 +27,7 @@ categories:
 
   - name: scheduling
     description: "Scheduling a meeting, call, or event"
+    sub_discussion: true
     states:
       - proposed
       - confirmed

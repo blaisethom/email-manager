@@ -289,33 +289,36 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--stage", "-s", type=click.Choice(["sync_calendar", "extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "propose_actions", "contact_memory"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--stage", "-s", type=click.Choice(["extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "propose_actions", "contact_memory"]), multiple=True, help="Run specific stage(s) only")
 @click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
 @click.option("--force", "-f", is_flag=True, help="Force regeneration even if already processed")
 @click.option("--clean", is_flag=True, help="Delete previous output for the scoped stages before reprocessing")
 @click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")
 @click.option("--label", "-l", default=None, help="Scope to all companies with this label (e.g. customer, vendor)")
 @click.option("--exclude", "-x", multiple=True, help="Exclude company by domain or name (repeatable)")
+@click.option("--exclude-file", default=None, type=click.Path(exists=True), help="File with company domains/names to exclude (one per line)")
+@click.option("--company-file", default=None, type=click.Path(exists=True), help="File with company domains/names to process (one per line)")
 @click.option("--contact", default=None, help="Scope to a specific contact's company (email address)")
-@click.option("--per-company", is_flag=True, help="Run all stages per company before moving to the next (requires --label)")
+@click.option("--per-company", is_flag=True, help="Run all stages per company before moving to the next (requires a multi-company filter like --label, --company-file, --last-seen-*, etc.)")
 @click.option("--stale-before", default=None, help="Only process companies whose last analysis is before this date (YYYY-MM-DD)")
+@click.option("--last-seen-after", default=None, help="Only process companies with email activity after this date (YYYY-MM-DD)")
+@click.option("--last-seen-before", default=None, help="Only process companies with last email activity before this date (YYYY-MM-DD)")
 @click.option("--dry-run", is_flag=True, help="Show which companies would be processed without running anything")
 @click.pass_context
-def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], contact: str | None, per_company: bool, stale_before: str | None, dry_run: bool) -> None:
+def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], exclude_file: str | None, company_file: str | None, contact: str | None, per_company: bool, stale_before: str | None, last_seen_after: str | None, last_seen_before: str | None, dry_run: bool) -> None:
     """Run AI analysis pipeline on synced emails.
 
     Pipeline stages (in order):
 
     \b
-      1. sync_calendar        Sync Google Calendar events
-      2. extract_base         Extract contacts, companies, domains (no AI)
-      3. fetch_homepages      Download company homepages (no AI)
-      4. label_companies      Classify company relationships (AI)
-      5. extract_events       Extract business events from threads (AI)
-      6. discover_discussions  Cluster events into discussions (AI)
-      7. analyse_discussions   Evaluate milestones, state & summary (AI)
-      8. propose_actions      Suggest next steps for active discussions (AI)
-      9. contact_memory       Generate contact relationship profiles (AI)
+      1. extract_base         Extract contacts, companies, domains (no AI)
+      2. fetch_homepages      Download company homepages (no AI)
+      3. label_companies      Classify company relationships (AI)
+      4. extract_events       Extract business events from threads (AI)
+      5. discover_discussions  Cluster events into discussions (AI)
+      6. analyse_discussions   Evaluate milestones, state & summary (AI)
+      7. propose_actions      Suggest next steps for active discussions (AI)
+      8. contact_memory       Generate contact relationship profiles (AI)
 
     Use --stage/-s to run specific stages. Use --company/-c to scope to one
     company. Use --clean to delete previous output before reprocessing.
@@ -324,12 +327,278 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
       email-analyser analyse -s extract_events -s discover_discussions \\
         -s analyse_discussions --company acme.com --clean
     """
+    from pathlib import Path
     from email_manager.pipeline.runner import run_pipeline
+
+    def _read_company_file(path: str) -> list[str]:
+        entries = []
+        for line in Path(path).read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            entries.append(line.split()[0])
+        return entries
 
     config: Config = ctx.obj["config"]
     console = Console()
     stages = list(stage) if stage else None
-    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, label=label, exclude=list(exclude) if exclude else None, contact=contact, per_company=per_company, stale_before=stale_before, dry_run=dry_run)
+
+    # Merge file-based company lists with CLI options
+    exclude_list = list(exclude) if exclude else []
+    if exclude_file:
+        exclude_list.extend(_read_company_file(exclude_file))
+
+    companies_from_file = _read_company_file(company_file) if company_file else []
+
+    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, company_list=companies_from_file or None, label=label, exclude=exclude_list or None, contact=contact, per_company=per_company, stale_before=stale_before, last_seen_after=last_seen_after, last_seen_before=last_seen_before, dry_run=dry_run)
+
+
+@cli.command()
+@click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")
+@click.option("--label", "-l", default=None, help="Scope to all companies with this label")
+@click.option("--company-file", default=None, type=click.Path(exists=True), help="File with company domains/names to process (one per line)")
+@click.pass_context
+def update(ctx: click.Context, company: str | None, label: str | None, company_file: str | None) -> None:
+    """Fast incremental update: process new emails in a single LLM call per company.
+
+    Much faster than the full pipeline for a few new emails. Extracts events,
+    assigns to discussions, updates state/summary/milestones, and proposes
+    next actions — all in one LLM call.
+
+    Requires at least one company scope (--company, --label, or --company-file).
+
+    \b
+    Example:
+      email-analyser update --company acme.com
+      email-analyser update --company-file companies.txt
+    """
+    from pathlib import Path
+    from email_manager.analysis.quick_update import quick_update
+    from email_manager.analysis.events import load_category_config
+    from email_manager.ai.factory import get_backend
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
+    backend = get_backend(config)
+    console.print(f"Using AI backend: [bold]{backend.model_name}[/bold]")
+
+    def _read_company_file(path: str) -> list[str]:
+        entries = []
+        for line in Path(path).read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            entries.append(line.split()[0])
+        return entries
+
+    # Resolve company domains
+    domains: list[str] = []
+    if company:
+        row = fetchone(conn, "SELECT domain FROM companies WHERE domain = ? COLLATE NOCASE OR name = ? COLLATE NOCASE", (company, company))
+        if not row:
+            console.print(f"[red]Company not found: {company}[/red]")
+            conn.close()
+            return
+        domains = [row["domain"]]
+    elif label:
+        rows = fetchall(conn, "SELECT DISTINCT c.domain FROM companies c JOIN company_labels cl ON c.id = cl.company_id WHERE cl.label = ?", (label,))
+        domains = [r["domain"] for r in rows]
+    elif company_file:
+        entries = _read_company_file(company_file)
+        lowered = [v.lower() for v in entries]
+        placeholders = ", ".join("?" for _ in lowered)
+        rows = fetchall(conn, f"SELECT DISTINCT domain FROM companies WHERE LOWER(domain) IN ({placeholders}) OR LOWER(name) IN ({placeholders})", tuple(lowered + lowered))
+        domains = [r["domain"] for r in rows]
+
+    if not domains:
+        console.print("[red]No companies to update. Use --company, --label, or --company-file.[/red]")
+        conn.close()
+        return
+
+    console.print(f"Updating [bold]{len(domains)}[/bold] company{'s' if len(domains) != 1 else ''}")
+
+    total_events = 0
+    total_updates = 0
+    total_actions = 0
+    total_new = 0
+
+    for i, domain in enumerate(domains):
+        console.print(f"\n[bold cyan]{domain}[/bold cyan] ({i+1}/{len(domains)})")
+
+        counts = quick_update(
+            conn, backend, domain,
+            categories_config=categories_config,
+        )
+
+        if counts["events"] == 0:
+            console.print("  [dim]No new emails to process[/dim]")
+        else:
+            console.print(
+                f"  [green]{counts['events']} events, "
+                f"{counts['new_discussions']} new discussions, "
+                f"{counts['updates']} updated, "
+                f"{counts['actions']} actions[/green]"
+            )
+
+        total_events += counts["events"]
+        total_new += counts["new_discussions"]
+        total_updates += counts["updates"]
+        total_actions += counts["actions"]
+
+    console.print(f"\n[bold green]Done.[/bold green] {total_events} events, {total_new} new discussions, {total_updates} updated, {total_actions} actions")
+    conn.close()
+
+
+@cli.command()
+@click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")
+@click.option("--label", "-l", default=None, help="Scope to all companies with this label")
+@click.option("--company-file", default=None, type=click.Path(exists=True), help="File with company domains/names (one per line)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def reset(ctx: click.Context, company: str | None, label: str | None, company_file: str | None, yes: bool) -> None:
+    """Delete all analysis output (events, discussions, actions, etc.) for a scope.
+
+    Removes everything generated by the analysis pipeline while preserving
+    raw email data, contacts, companies, and labels.
+
+    \b
+    Tables cleared:
+      - event_ledger            (extracted events)
+      - discussions             (+ threads, state history, milestones)
+      - actions                 (extracted actions)
+      - proposed_actions        (AI-suggested next steps)
+      - discussion_events       (calendar event links)
+
+    \b
+    Tables preserved:
+      - emails, threads, contacts, companies, company_labels
+      - calendar_events, contact_memories, feedback
+
+    Example: Reset analysis for one company:
+      email-analyser reset --company acme.com
+
+    Example: Reset all companies in a file:
+      email-analyser reset --company-file companies.txt
+    """
+    from pathlib import Path
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    def _read_company_file(path: str) -> list[str]:
+        entries = []
+        for line in Path(path).read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            entries.append(line.split()[0])
+        return entries
+
+    # Resolve company IDs in scope
+    company_ids: list[int] | None = None
+    scope_desc = "ALL companies"
+
+    if company:
+        rows = fetchall(conn, "SELECT id, name, domain FROM companies WHERE domain = ? COLLATE NOCASE OR name = ? COLLATE NOCASE", (company, company))
+        if not rows:
+            console.print(f"[red]Company not found: {company}[/red]")
+            conn.close()
+            return
+        company_ids = [r["id"] for r in rows]
+        scope_desc = f"company: {rows[0]['name']} ({rows[0]['domain']})"
+    elif label:
+        rows = fetchall(conn, "SELECT DISTINCT c.id, c.name, c.domain FROM companies c JOIN company_labels cl ON c.id = cl.company_id WHERE cl.label = ?", (label,))
+        if not rows:
+            console.print(f"[red]No companies found with label: {label}[/red]")
+            conn.close()
+            return
+        company_ids = [r["id"] for r in rows]
+        scope_desc = f"label '{label}' ({len(company_ids)} companies)"
+    elif company_file:
+        entries = _read_company_file(company_file)
+        lowered = [v.lower() for v in entries]
+        placeholders = ", ".join("?" for _ in lowered)
+        rows = fetchall(conn, f"SELECT id, name, domain FROM companies WHERE LOWER(domain) IN ({placeholders}) OR LOWER(name) IN ({placeholders})", tuple(lowered + lowered))
+        if not rows:
+            console.print(f"[red]No matching companies found in {company_file}[/red]")
+            conn.close()
+            return
+        company_ids = [r["id"] for r in rows]
+        scope_desc = f"company file ({len(company_ids)} companies)"
+
+    # Count what will be deleted
+    if company_ids is not None:
+        placeholders = ",".join("?" for _ in company_ids)
+        params = tuple(company_ids)
+        disc_ids = [r[0] for r in fetchall(conn, f"SELECT id FROM discussions WHERE company_id IN ({placeholders})", params)]
+    else:
+        disc_ids = [r[0] for r in fetchall(conn, "SELECT id FROM discussions")]
+
+    disc_ph = ",".join("?" for _ in disc_ids) if disc_ids else "NULL"
+    disc_params = tuple(disc_ids) if disc_ids else ()
+
+    event_count = fetchone(conn, f"SELECT COUNT(*) FROM event_ledger WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM event_ledger", disc_params)[0]
+    # Also count orphan events (not assigned to any discussion but from these companies' threads)
+    if company_ids is not None:
+        like_clauses = []
+        like_params: list[str] = []
+        for cid in company_ids:
+            domain_row = fetchone(conn, "SELECT domain FROM companies WHERE id = ?", (cid,))
+            if domain_row:
+                like = f"%@{domain_row[0]}%"
+                like_clauses.append("(e.from_address LIKE ? OR e.to_addresses LIKE ?)")
+                like_params.extend([like, like])
+        if like_clauses:
+            orphan_count = fetchone(conn, f"""SELECT COUNT(*) FROM event_ledger el
+                JOIN emails e ON el.source_email_id = e.message_id
+                WHERE el.discussion_id IS NULL AND ({' OR '.join(like_clauses)})""", tuple(like_params))[0]
+            event_count += orphan_count
+
+    disc_count = len(disc_ids)
+    action_count = fetchone(conn, f"SELECT COUNT(*) FROM actions WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM actions", disc_params)[0]
+
+    console.print(f"\n[bold]Scope:[/bold] {scope_desc}")
+    console.print(f"  Discussions to delete: [bold]{disc_count}[/bold]")
+    console.print(f"  Events to delete:      [bold]{event_count}[/bold]")
+    console.print(f"  Actions to delete:     [bold]{action_count}[/bold]")
+
+    if disc_count == 0 and event_count == 0:
+        console.print("\n[dim]Nothing to reset.[/dim]")
+        conn.close()
+        return
+
+    if not yes:
+        click.confirm("\nProceed with reset?", abort=True)
+
+    # Delete in dependency order
+    if disc_ids:
+        conn.execute(f"UPDATE discussions SET parent_id = NULL WHERE parent_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM milestones WHERE discussion_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM discussion_state_history WHERE discussion_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM discussion_threads WHERE discussion_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM discussion_events WHERE discussion_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM actions WHERE discussion_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM proposed_actions WHERE discussion_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM event_ledger WHERE discussion_id IN ({disc_ph})", disc_params)
+        conn.execute(f"DELETE FROM discussions WHERE id IN ({disc_ph})", disc_params)
+
+    # Delete orphan events for scoped companies
+    if company_ids is not None and like_clauses:
+        conn.execute(f"""DELETE FROM event_ledger WHERE discussion_id IS NULL
+            AND source_email_id IN (
+                SELECT e.message_id FROM emails e WHERE {' OR '.join(like_clauses)}
+            )""", tuple(like_params))
+    elif company_ids is None:
+        conn.execute("DELETE FROM event_ledger")
+
+    conn.commit()
+    conn.close()
+
+    console.print(f"\n[green]Reset complete.[/green] Deleted {disc_count} discussions, {event_count} events, {action_count} actions.")
 
 
 @cli.command()
@@ -396,8 +665,10 @@ def projects(ctx: click.Context, limit: int) -> None:
 @click.option("--unlabelled", is_flag=True, help="Show only companies without labels")
 @click.option("--updated-after", default=None, help="Only show companies analysed after this date (YYYY-MM-DD)")
 @click.option("--updated-before", default=None, help="Only show companies not analysed since this date, or never analysed (YYYY-MM-DD)")
+@click.option("--last-seen-after", default=None, help="Only show companies with email activity after this date (YYYY-MM-DD)")
+@click.option("--last-seen-before", default=None, help="Only show companies with last email activity before this date (YYYY-MM-DD)")
 @click.pass_context
-def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool, updated_after: str | None, updated_before: str | None) -> None:
+def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool, updated_after: str | None, updated_before: str | None, last_seen_after: str | None, last_seen_before: str | None) -> None:
     """List companies you interact with and their associated email addresses."""
     config: Config = ctx.obj["config"]
     conn = get_db(config)
@@ -434,6 +705,14 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
             )
         )""")
         params.append(updated_before)
+
+    if last_seen_after:
+        conditions.append("c.last_seen >= ?")
+        params.append(last_seen_after)
+
+    if last_seen_before:
+        conditions.append("(c.last_seen < ? OR c.last_seen IS NULL)")
+        params.append(last_seen_before)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
@@ -492,14 +771,58 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
 
     console.print(table)
 
-    # Summary stats (only on unfiltered view)
+    # Summary stats — scoped to active filters (excluding label/unlabelled which already narrow the view)
     if not label and not unlabelled:
-        total = fetchone(conn, "SELECT COUNT(*) as cnt FROM companies")["cnt"]
-        labelled_count = fetchone(conn, "SELECT COUNT(DISTINCT company_id) as cnt FROM company_labels")["cnt"]
+        # Build the same date conditions used for the main query
+        stats_conditions: list[str] = []
+        stats_params: list = []
+
+        if updated_after:
+            stats_conditions.append("""c.id IN (
+                SELECT d.company_id FROM discussions d
+                JOIN milestones m ON m.discussion_id = d.id
+                WHERE m.last_evaluated_at >= ?
+            )""")
+            stats_params.append(updated_after)
+
+        if updated_before:
+            stats_conditions.append("""(
+                c.id NOT IN (
+                    SELECT d.company_id FROM discussions d
+                    JOIN milestones m ON m.discussion_id = d.id
+                    WHERE d.company_id IS NOT NULL
+                )
+                OR c.id IN (
+                    SELECT d.company_id FROM discussions d
+                    LEFT JOIN milestones m ON m.discussion_id = d.id
+                    GROUP BY d.company_id
+                    HAVING MAX(m.last_evaluated_at) < ? OR MAX(m.last_evaluated_at) IS NULL
+                )
+            )""")
+            stats_params.append(updated_before)
+
+        if last_seen_after:
+            stats_conditions.append("c.last_seen >= ?")
+            stats_params.append(last_seen_after)
+
+        if last_seen_before:
+            stats_conditions.append("(c.last_seen < ? OR c.last_seen IS NULL)")
+            stats_params.append(last_seen_before)
+
+        stats_where = (" WHERE " + " AND ".join(stats_conditions)) if stats_conditions else ""
+        stats_tuple = tuple(stats_params)
+
+        total = fetchone(conn, f"SELECT COUNT(*) as cnt FROM companies c{stats_where}", stats_tuple)["cnt"]
+        labelled_count = fetchone(
+            conn,
+            f"SELECT COUNT(DISTINCT cl.company_id) as cnt FROM company_labels cl JOIN companies c ON c.id = cl.company_id{stats_where}",
+            stats_tuple,
+        )["cnt"]
         unlabelled_count = total - labelled_count
         label_counts = fetchall(
             conn,
-            "SELECT label, COUNT(*) as cnt FROM company_labels GROUP BY label ORDER BY cnt DESC",
+            f"SELECT cl.label, COUNT(*) as cnt FROM company_labels cl JOIN companies c ON c.id = cl.company_id{stats_where} GROUP BY cl.label ORDER BY cnt DESC",
+            stats_tuple,
         )
 
         console.print()

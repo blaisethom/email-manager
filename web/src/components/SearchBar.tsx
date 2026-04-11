@@ -37,6 +37,8 @@ export default function SearchBar({ value, onChange, placeholder = 'Search...', 
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         className="filter-input pl-9 w-full"
+        spellCheck={false}
+        autoComplete="off"
       />
     </div>
   );

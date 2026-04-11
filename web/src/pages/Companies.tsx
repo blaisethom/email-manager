@@ -155,7 +155,7 @@ export default function CompaniesPage() {
               {items.map((company) => (
                 <tr
                   key={company.id}
-                  onClick={() => navigate(`/companies/${company.id}`)}
+                  onClick={() => navigate(`/companies/${company.id}`, { state: { breadcrumbs: [{ label: 'Companies', path: '/companies' }] } })}
                   className="table-row-clickable"
                 >
                   <td className="px-6 py-4">

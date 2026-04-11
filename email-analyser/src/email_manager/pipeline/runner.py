@@ -64,7 +64,6 @@ def _run_stage(
             if opt_name in sig.parameters and opt_val:
                 kwargs[opt_name] = opt_val
         count = stage_fn(conn, backend, config, **kwargs)
-        console.print(f"  [green]{stage_name}: processed {count} items[/green]")
         logger.info("Finished stage: %s — processed %d items", stage_name, count)
         return count
     except Exception as e:
@@ -73,8 +72,8 @@ def _run_stage(
         return -1
 
 
-# Stages that don't support --company filtering and should run once globally
-GLOBAL_STAGES = {"sync_calendar", "extract_base"}
+# Stages that should run once globally in per-company mode, not per company
+GLOBAL_STAGES = {"extract_base", "fetch_homepages", "label_companies"}
 
 
 def run_pipeline(
@@ -85,11 +84,14 @@ def run_pipeline(
     force: bool = False,
     clean: bool = False,
     company: str | None = None,
+    company_list: list[str] | None = None,
     label: str | None = None,
     exclude: list[str] | None = None,
     contact: str | None = None,
     per_company: bool = False,
     stale_before: str | None = None,
+    last_seen_after: str | None = None,
+    last_seen_before: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, int]:
     if console is None:
@@ -103,7 +105,7 @@ def run_pipeline(
     results: dict[str, int] = {}
 
     # Only initialise AI backend if we need it
-    NO_AI_STAGES = {"extract_base", "fetch_homepages", "sync_calendar"}
+    NO_AI_STAGES = {"extract_base", "fetch_homepages"}
     needs_ai = any(s not in NO_AI_STAGES for s in stage_names)
     backend = None
     if needs_ai:
@@ -117,10 +119,16 @@ def run_pipeline(
     # Show what's being processed
     if company:
         console.print(f"Scoped to company: [bold]{company}[/bold]")
+    if company_list:
+        console.print(f"Company list: [bold]{len(company_list)} companies from file[/bold]")
     if label:
         console.print(f"Scoped to label: [bold]{label}[/bold]")
     if stale_before:
         console.print(f"Stale before: [bold]{stale_before}[/bold]")
+    if last_seen_after:
+        console.print(f"Last seen after: [bold]{last_seen_after}[/bold]")
+    if last_seen_before:
+        console.print(f"Last seen before: [bold]{last_seen_before}[/bold]")
     if clean:
         console.print("[yellow]Clean mode: previous output will be deleted before reprocessing[/yellow]")
 
@@ -132,6 +140,13 @@ def run_pipeline(
 
         conditions = []
         params: list[str] = []
+
+        if company_list:
+            lowered = [v.lower() for v in company_list]
+            placeholders = ", ".join("?" for _ in lowered)
+            conditions.append(f"(LOWER(c.domain) IN ({placeholders}) OR LOWER(c.name) IN ({placeholders}))")
+            params.extend(lowered)
+            params.extend(lowered)
 
         if label:
             conditions.append("c.id IN (SELECT company_id FROM company_labels WHERE label = ?)")
@@ -155,6 +170,14 @@ def run_pipeline(
             )""")
             params.append(stale_before)
 
+        if last_seen_after:
+            conditions.append("c.last_seen >= ?")
+            params.append(last_seen_after)
+
+        if last_seen_before:
+            conditions.append("(c.last_seen < ? OR c.last_seen IS NULL)")
+            params.append(last_seen_before)
+
         if not conditions:
             return None
 
@@ -169,9 +192,9 @@ def run_pipeline(
             domains = domains[:limit]
         return domains
 
-    # Resolve companies if filtering by label or stale_before
+    # Resolve companies if filtering by label, stale_before, last_seen, or company_list
     target_domains = None
-    if (label or stale_before) and not company:
+    if (label or stale_before or last_seen_after or last_seen_before or company_list) and not company:
         target_domains = _resolve_company_domains()
         if target_domains is not None:
             console.print(f"[bold]Targeting {len(target_domains)} companies[/bold]")

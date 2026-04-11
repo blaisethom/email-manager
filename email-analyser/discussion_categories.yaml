@@ -34,6 +34,10 @@ categories:
       - name: follow_up_scheduled
         description: "Follow-up meeting or check-in scheduled"
 
+    terminal_event_types:
+      - contract_signed
+      - deal_lost
+
     milestones:
       - name: qualified_lead
         description: "Lead qualified with confirmed interest and fit"
@@ -66,9 +70,11 @@ categories:
       - contracting
       - signed
       - lost
+      - stale
     terminal_states:
       - signed
       - lost
+      - stale
 
   - name: investment
     description: "Active fundraising or new investment process — an investor evaluating whether to invest, or a company raising a round. This is NOT for ongoing reporting to existing investors."
@@ -107,6 +113,10 @@ categories:
       - name: follow_up_scheduled
         description: "Follow-up meeting or check-in scheduled"
 
+    terminal_event_types:
+      - passed
+      - docs_signed
+
     milestones:
       - name: intro_complete
         description: "Initial introduction and mutual interest established"
@@ -138,9 +148,11 @@ categories:
       - closing
       - signed
       - passed
+      - stale
     terminal_states:
       - signed
       - passed
+      - stale
 
   - name: investor-relations
     description: "Ongoing communication with existing investors — quarterly reporting, fund admin, capital calls, tax documents, portfolio updates. NOT for new fundraising or investment evaluation."
@@ -197,6 +209,7 @@ categories:
 
   - name: scheduling
     description: "Scheduling a meeting, call, or event"
+    sub_discussion: true
 
     event_types:
       - name: meeting_proposed
@@ -262,6 +275,10 @@ categories:
       - name: negotiation_abandoned
         description: "Negotiation abandoned or deal fell through"
 
+    terminal_event_types:
+      - contract_signed
+      - negotiation_abandoned
+
     milestones:
       - name: first_draft
         description: "Initial draft shared between parties"
@@ -314,6 +331,10 @@ categories:
         description: "Vendor onboarded and active"
       - name: vendor_rejected
         description: "Vendor rejected or removed from consideration"
+
+    terminal_event_types:
+      - onboarded
+      - vendor_rejected
 
     milestones:
       - name: requirements_defined
@@ -443,9 +464,11 @@ categories:
       - offer_extended
       - hired
       - passed
+      - stale
     terminal_states:
       - hired
       - passed
+      - stale
 
   - name: partnership
     description: "Exploring or establishing a strategic partnership"
@@ -474,6 +497,10 @@ categories:
       - name: follow_up_scheduled
         description: "Follow-up meeting scheduled"
 
+    terminal_event_types:
+      - agreement_signed
+      - partnership_abandoned
+
     milestones:
       - name: intro_complete
         description: "Introductions made and initial interest confirmed"
@@ -495,9 +522,11 @@ categories:
       - negotiating
       - agreed
       - abandoned
+      - stale
     terminal_states:
       - agreed
       - abandoned
+      - stale
 
   - name: support-issue
     description: "Technical support or customer service issue"

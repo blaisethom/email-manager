@@ -35,9 +35,14 @@ def _get_gmail_service(config: EmailAccount, *, remote: bool = False):
 
     did_reauth = False
     if not creds or not creds.valid:
+        refresh_ok = False
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refresh_ok = True
+            except Exception:
+                pass  # Token revoked or refresh failed — fall through to re-auth
+        if not refresh_ok:
             if not credentials_path.exists():
                 raise FileNotFoundError(
                     f"Gmail credentials file not found at {credentials_path}. "

@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api';
 import type { CompanyDetail, CompanyLabel, DiscussionSummary } from '../types';
 import Badge from '../components/Badge';
+import Breadcrumbs, { extendBreadcrumbs } from '../components/Breadcrumbs';
 import Markdown from '../components/Markdown';
 import { formatDate } from '../utils';
 
@@ -98,10 +99,11 @@ function LabelRow({ item }: { item: CompanyLabel }) {
   );
 }
 
-function DiscussionCard({ disc }: { disc: DiscussionSummary }) {
+function DiscussionCard({ disc, linkState }: { disc: DiscussionSummary; linkState?: object }) {
   return (
     <Link
       to={`/discussions/${disc.id}`}
+      state={linkState}
       className="block p-4 border border-slate-200 rounded-lg hover:border-slate-300 hover:bg-slate-50 transition-colors"
     >
       <div className="flex items-start justify-between gap-3">
@@ -129,6 +131,7 @@ function DiscussionCard({ disc }: { disc: DiscussionSummary }) {
 export default function CompanyDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [data, setData] = useState<CompanyDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -172,13 +175,10 @@ export default function CompanyDetailPage() {
 
   return (
     <div className="p-4 sm:p-8 max-w-5xl">
-      {/* Back */}
-      <button
-        onClick={() => navigate('/companies')}
-        className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors mb-6"
-      >
-        ← Back to Companies
-      </button>
+      <Breadcrumbs
+        current={data.name}
+        defaultTrail={[{ label: 'Companies', path: '/companies' }]}
+      />
 
       {/* Header */}
       <div className="mb-6">
@@ -244,6 +244,7 @@ export default function CompanyDetailPage() {
               <Link
                 key={ct.email}
                 to={`/contacts/${encodeURIComponent(ct.email)}`}
+                state={extendBreadcrumbs(location.state, { label: data.name, path: `/companies/${data.id}` })}
                 className="flex items-center justify-between py-3 hover:bg-slate-50 -mx-2 px-2 rounded transition-colors"
               >
                 <div>
@@ -280,7 +281,11 @@ export default function CompanyDetailPage() {
           </h2>
           <div className="space-y-2">
             {data.discussions.map((disc) => (
-              <DiscussionCard key={disc.id} disc={disc} />
+              <DiscussionCard
+                key={disc.id}
+                disc={disc}
+                linkState={extendBreadcrumbs(location.state, { label: data.name, path: `/companies/${data.id}` })}
+              />
             ))}
           </div>
         </div>

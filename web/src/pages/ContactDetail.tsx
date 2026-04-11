@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import type { ContactDetail, Thread } from '../types';
 import Badge from '../components/Badge';
+import Breadcrumbs from '../components/Breadcrumbs';
 import { formatDate } from '../utils';
 
 function ThreadRow({ thread }: { thread: Thread }) {
@@ -78,13 +79,10 @@ export default function ContactDetailPage() {
 
   return (
     <div className="p-4 sm:p-8 max-w-4xl">
-      {/* Back */}
-      <button
-        onClick={() => navigate('/contacts')}
-        className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors mb-6"
-      >
-        ← Back to Contacts
-      </button>
+      <Breadcrumbs
+        current={data.name || data.email}
+        defaultTrail={[{ label: 'Contacts', path: '/contacts' }]}
+      />
 
       {/* Header */}
       <div className="mb-6">

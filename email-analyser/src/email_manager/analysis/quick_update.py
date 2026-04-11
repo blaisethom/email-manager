@@ -1,0 +1,592 @@
+"""Quick incremental update: process new emails for a company in a single LLM call.
+
+Given new emails and existing discussion context, produces:
+- New events extracted from the emails
+- Discussion assignments (existing or new)
+- Updated state/summary for affected discussions
+- Proposed next actions
+
+This is much faster than the full pipeline for the common case of a few new
+emails arriving for a company that already has a full analysis history.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from email_manager.ai.base import LLMBackend
+from email_manager.analysis.events import (
+    _build_domains_block,
+    _detect_account_owner,
+    _format_thread_emails,
+    _strip_quoted_text,
+    _dedup_against_previous,
+    load_category_config,
+    PROMPT_VERSION,
+)
+from email_manager.db import fetchall, fetchone
+
+logger = logging.getLogger("email_manager.analysis.quick_update")
+
+
+# ── Prompt ─────────────────────────────────────────────────────────────────
+
+QUICK_UPDATE_SYSTEM = """You are a business email analysis system. You will receive:
+1. New emails that just arrived for a company
+2. The company's existing discussions with their current state, summary, milestones, and recent events
+3. A vocabulary of event types and domains
+
+Your job is to process the new emails and return a single JSON response that:
+
+A. **Extracts events** from the new emails using the domain-specific event vocabulary.
+B. **Assigns events to discussions** — either existing discussions (by ID) or a new discussion you create.
+C. **Updates affected discussions** — provide an updated workflow state, summary, and milestone evaluations for any discussion that received new events.
+D. **Proposes next actions** — for each affected non-terminal discussion, propose 1-3 specific next actions.
+
+Rules for event extraction:
+- Each event must have a type from the provided vocabulary.
+- Use the email date as event_date unless the email references a different date.
+- The "actor" is the person who performed the action (email address).
+- Assign a confidence score (0.0-1.0).
+- Do NOT re-extract events that are already listed in the existing discussion context.
+- Examine every new email for events. Replies often contain critical events (passes, acceptances, etc.).
+
+Rules for discussion assignment:
+- Prefer assigning to existing discussions when the topic matches.
+- Only create a new discussion if the emails clearly don't fit any existing one.
+
+Rules for state/summary updates:
+- The workflow state should reflect where the discussion currently stands after the new events.
+- The summary should be updated to incorporate the new developments (2-4 sentences total).
+- Only mark milestones as achieved if clearly evidenced.
+
+Rules for proposed actions:
+- Be specific and actionable.
+- Priority: "high" (this week), "medium" (soon), "low" (can wait).
+- If the right action is to wait, set wait_until to a date (YYYY-MM-DD).
+- Only use the "stale" state for discussions with NO activity in 3+ months and no explicit terminal outcome.
+
+Respond with JSON only."""
+
+
+def _build_quick_update_prompt(
+    company_name: str,
+    company_domain: str,
+    new_emails_text: str,
+    discussions_context: str,
+    domains_block: str,
+    account_owner: str | None,
+    today: str,
+) -> str:
+    owner_line = f"\nAccount owner (\"me\"): {account_owner}" if account_owner else ""
+
+    return f"""Process these new emails and update the analysis for {company_name} ({company_domain}).
+{owner_line}
+Today's date: {today}
+
+{discussions_context}
+
+Available domains and event vocabularies:
+{domains_block}
+
+New emails:
+{new_emails_text}
+
+Respond with this exact JSON structure:
+{{
+  "events": [
+    {{
+      "type": "event_type_name",
+      "domain": "domain-name",
+      "actor": "email@example.com",
+      "target": "email@example.com or null",
+      "event_date": "YYYY-MM-DD",
+      "detail": "Brief factual description",
+      "confidence": 0.9,
+      "discussion_id": 123,
+      "source_email_index": 0
+    }}
+  ],
+  "new_discussions": [
+    {{
+      "temp_id": "new_1",
+      "title": "Short descriptive title",
+      "category": "domain-name",
+      "participants": ["email@example.com"]
+    }}
+  ],
+  "discussion_updates": [
+    {{
+      "discussion_id": 123,
+      "workflow_state": "state-name",
+      "summary": "Updated 2-4 sentence summary.",
+      "milestones": [
+        {{
+          "name": "milestone_name",
+          "achieved": true,
+          "achieved_date": "YYYY-MM-DD",
+          "confidence": 0.9
+        }}
+      ],
+      "proposed_actions": [
+        {{
+          "action": "Specific action to take",
+          "reasoning": "Why this is the right next step",
+          "priority": "high|medium|low",
+          "wait_until": "YYYY-MM-DD or null",
+          "assignee": "email@example.com or null"
+        }}
+      ]
+    }}
+  ]
+}}
+
+Notes:
+- "discussion_id" in events should be the ID of an existing discussion, or a "temp_id" from new_discussions.
+- Only include discussion_updates for discussions that were affected by the new events.
+- For milestones, include ALL milestones for the discussion's category (achieved and not), not just new ones.
+- If no business events are found in the new emails, return {{"events": [], "new_discussions": [], "discussion_updates": []}}."""
+
+
+# ── Context building ───────────────────────────────────────────────────────
+
+def _get_new_emails_for_company(
+    conn: sqlite3.Connection,
+    company_domain: str,
+    since: str | None = None,
+) -> list[dict[str, Any]]:
+    """Get emails for a company that haven't been processed for events yet.
+
+    Finds emails in threads that either:
+    - Have no events at all, OR
+    - Have new emails since the last event extraction
+    """
+    like = f"%@{company_domain}%"
+
+    # Get threads needing processing (same logic as _get_threads_to_process)
+    thread_rows = fetchall(
+        conn,
+        """SELECT DISTINCT e.thread_id
+           FROM emails e
+           WHERE e.thread_id IS NOT NULL
+             AND (
+                 e.thread_id NOT IN (
+                     SELECT DISTINCT el.thread_id FROM event_ledger el
+                     WHERE el.thread_id IS NOT NULL
+                 )
+                 OR e.thread_id IN (
+                     SELECT el2.thread_id FROM event_ledger el2
+                     WHERE el2.thread_id IS NOT NULL
+                     GROUP BY el2.thread_id
+                     HAVING MAX(el2.created_at) < (
+                         SELECT MAX(e2.date) FROM emails e2
+                         WHERE e2.thread_id = el2.thread_id
+                     )
+                 )
+             )
+             AND e.thread_id IN (
+                 SELECT DISTINCT e2.thread_id FROM emails e2
+                 WHERE e2.from_address LIKE ? OR e2.to_addresses LIKE ? OR e2.cc_addresses LIKE ?
+             )
+           ORDER BY e.date DESC
+           LIMIT 20""",
+        (like, like, like),
+    )
+
+    if not thread_rows:
+        return []
+
+    # Get all emails from these threads
+    thread_ids = [r["thread_id"] for r in thread_rows]
+    placeholders = ",".join("?" for _ in thread_ids)
+    emails = fetchall(
+        conn,
+        f"""SELECT message_id, date, from_address, from_name, to_addresses,
+                   cc_addresses, subject, body_text, thread_id
+            FROM emails
+            WHERE thread_id IN ({placeholders})
+            ORDER BY date ASC""",
+        tuple(thread_ids),
+    )
+    return [dict(e) for e in emails]
+
+
+def _build_discussions_context(
+    conn: sqlite3.Connection,
+    company_id: int,
+    categories_config: list[dict[str, Any]],
+) -> str:
+    """Build a text block describing all existing discussions for a company."""
+    discussions = fetchall(
+        conn,
+        """SELECT d.id, d.title, d.category, d.current_state, d.summary,
+                  d.participants, d.first_seen, d.last_seen, d.parent_id
+           FROM discussions d
+           WHERE d.company_id = ?
+           ORDER BY d.last_seen DESC""",
+        (company_id,),
+    )
+
+    if not discussions:
+        return "No existing discussions for this company."
+
+    # Build category milestone lookup
+    cat_milestones: dict[str, list[str]] = {}
+    cat_states: dict[str, list[str]] = {}
+    cat_terminal: dict[str, set[str]] = {}
+    for cat in categories_config:
+        ms = cat.get("milestones", [])
+        cat_milestones[cat["name"]] = [m["name"] if isinstance(m, dict) else m for m in ms]
+        cat_states[cat["name"]] = cat.get("workflow_states", [])
+        cat_terminal[cat["name"]] = set(cat.get("terminal_states", []))
+
+    blocks = ["Existing discussions:"]
+    for disc in discussions:
+        disc_id = disc["id"]
+        cat = disc["category"] or "other"
+        parent_note = f" (sub-discussion of {disc['parent_id']})" if disc["parent_id"] else ""
+
+        # Get recent events (last 5)
+        events = fetchall(
+            conn,
+            """SELECT event_date, type, domain, detail
+               FROM event_ledger WHERE discussion_id = ?
+               ORDER BY event_date DESC LIMIT 5""",
+            (disc_id,),
+        )
+        events_text = ""
+        if events:
+            events_text = "\n  Recent events:\n"
+            for ev in reversed(events):  # chronological
+                events_text += f"    {ev['event_date']} {ev['domain']}/{ev['type']}: {(ev['detail'] or '')[:80]}\n"
+
+        # Get milestones
+        milestones = fetchall(
+            conn,
+            "SELECT name, achieved, achieved_date FROM milestones WHERE discussion_id = ?",
+            (disc_id,),
+        )
+        achieved = [f"{m['name']} ({m['achieved_date']})" for m in milestones if m["achieved"]]
+        milestones_text = f"\n  Milestones achieved: {', '.join(achieved)}" if achieved else ""
+
+        # Workflow states for this category
+        states = cat_states.get(cat, [])
+        terminal = cat_terminal.get(cat, set())
+        states_text = ""
+        if states:
+            parts = [f"{s}*" if s in terminal else s for s in states]
+            states_text = f"\n  States: {' → '.join(parts)}  (* = terminal)"
+
+        blocks.append(
+            f"\n- ID {disc_id}: \"{disc['title']}\" [{cat}]{parent_note}"
+            f"\n  State: {disc['current_state'] or '?'} | "
+            f"{disc['first_seen'][:10] if disc['first_seen'] else '?'} to "
+            f"{disc['last_seen'][:10] if disc['last_seen'] else '?'}"
+            f"\n  Summary: {disc['summary'] or 'No summary yet.'}"
+            f"{milestones_text}{states_text}{events_text}"
+        )
+
+    return "\n".join(blocks)
+
+
+def _format_new_emails(emails: list[dict[str, Any]], body_limit: int = 800) -> str:
+    """Format new emails for the prompt, grouped by thread."""
+    if not emails:
+        return "No new emails."
+
+    # Group by thread
+    threads: dict[str, list[dict]] = {}
+    for e in emails:
+        tid = e.get("thread_id", "unknown")
+        threads.setdefault(tid, []).append(e)
+
+    parts = []
+    email_idx = 0
+    for tid, thread_emails in threads.items():
+        subject = thread_emails[0].get("subject") or "(no subject)"
+        parts.append(f"\n--- Thread: {subject} ---")
+
+        # Format with quote stripping
+        formatted = _format_thread_emails(thread_emails, body_per_email=body_limit)
+        for i, fmt in enumerate(formatted):
+            # Replace the [Email N] index with global index
+            fmt = fmt.replace(f"[Email {i}]", f"[Email {email_idx}]", 1)
+            parts.append(fmt)
+            email_idx += 1
+
+    return "\n".join(parts)
+
+
+# ── Saving results ─────────────────────────────────────────────────────────
+
+def _save_quick_update_results(
+    conn: sqlite3.Connection,
+    result: dict[str, Any],
+    company_id: int,
+    emails: list[dict[str, Any]],
+    model_name: str,
+    categories_config: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Save all results from a quick update LLM call."""
+    now = datetime.now(timezone.utc).isoformat()
+    counts = {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
+
+    # Build type-to-domain lookup for validation
+    all_type_to_domain: dict[str, str] = {}
+    for cat in categories_config:
+        for et in cat.get("event_types", []):
+            type_name = et["name"] if isinstance(et, dict) else et
+            all_type_to_domain[type_name] = cat["name"]
+
+    # 1. Create new discussions first (so we can resolve temp_ids)
+    temp_to_real: dict[str, int] = {}
+    for new_disc in result.get("new_discussions", []):
+        temp_id = new_disc.get("temp_id", "")
+        cursor = conn.execute(
+            """INSERT INTO discussions (title, category, current_state, company_id,
+               summary, participants, first_seen, last_seen, model_used, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                new_disc.get("title", "Untitled"),
+                new_disc.get("category", "other"),
+                None,
+                company_id,
+                None,
+                json.dumps(new_disc.get("participants", [])),
+                now, now, model_name, now,
+            ),
+        )
+        temp_to_real[temp_id] = cursor.lastrowid
+        counts["new_discussions"] += 1
+
+    # 2. Save events and link to discussions
+    for ev in result.get("events", []):
+        event_type = ev.get("type", "")
+        domain = ev.get("domain", "")
+
+        # Validate event type
+        if event_type not in all_type_to_domain:
+            logger.warning("Skipping unknown event type '%s'", event_type)
+            continue
+
+        # Resolve discussion_id
+        disc_id = ev.get("discussion_id")
+        if isinstance(disc_id, str) and disc_id in temp_to_real:
+            disc_id = temp_to_real[disc_id]
+        elif not isinstance(disc_id, int):
+            disc_id = None
+
+        # Resolve source email
+        source_email_id = None
+        source_idx = ev.get("source_email_index")
+        if source_idx is not None and 0 <= source_idx < len(emails):
+            source_email_id = emails[source_idx]["message_id"]
+
+        raw_actor = ev.get("actor") or ""
+        raw_target = ev.get("target") or ""
+        actor = ", ".join(raw_actor) if isinstance(raw_actor, list) else raw_actor
+        target = ", ".join(raw_target) if isinstance(raw_target, list) else raw_target
+
+        thread_id = None
+        if source_email_id:
+            row = fetchone(conn, "SELECT thread_id FROM emails WHERE message_id = ?", (source_email_id,))
+            if row:
+                thread_id = row["thread_id"]
+
+        conn.execute(
+            """INSERT OR IGNORE INTO event_ledger
+               (id, thread_id, source_email_id, source_calendar_event_id, discussion_id,
+                domain, type, actor, target, event_date, detail, confidence,
+                model_version, prompt_version, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                f"evt_{uuid.uuid4().hex[:12]}",
+                thread_id,
+                source_email_id,
+                None,
+                disc_id,
+                domain,
+                event_type,
+                actor,
+                target,
+                ev.get("event_date"),
+                ev.get("detail"),
+                ev.get("confidence", 0.5),
+                model_name,
+                PROMPT_VERSION,
+                now,
+            ),
+        )
+        counts["events"] += 1
+
+        # Link thread to discussion
+        if disc_id and thread_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO discussion_threads (discussion_id, thread_id) VALUES (?, ?)",
+                (disc_id, thread_id),
+            )
+
+    # 3. Apply discussion updates
+    for update in result.get("discussion_updates", []):
+        disc_id = update.get("discussion_id")
+        if isinstance(disc_id, str) and disc_id in temp_to_real:
+            disc_id = temp_to_real[disc_id]
+        if not isinstance(disc_id, int):
+            continue
+
+        # Update state and summary
+        new_state = update.get("workflow_state")
+        summary = update.get("summary")
+
+        old = fetchone(conn, "SELECT current_state FROM discussions WHERE id = ?", (disc_id,))
+        old_state = old["current_state"] if old else None
+
+        conn.execute(
+            """UPDATE discussions SET
+               current_state = COALESCE(?, current_state),
+               summary = COALESCE(?, summary),
+               model_used = ?,
+               updated_at = ?
+               WHERE id = ?""",
+            (new_state, summary, model_name, now, disc_id),
+        )
+
+        # Update date range
+        conn.execute(
+            """UPDATE discussions SET
+               first_seen = MIN(first_seen, (SELECT MIN(event_date) FROM event_ledger WHERE discussion_id = ?)),
+               last_seen = MAX(last_seen, (SELECT MAX(event_date) FROM event_ledger WHERE discussion_id = ?))
+               WHERE id = ?""",
+            (disc_id, disc_id, disc_id),
+        )
+
+        # Record state transition
+        if new_state and new_state != old_state:
+            conn.execute(
+                """INSERT INTO discussion_state_history
+                   (discussion_id, state, entered_at, reasoning, model_used, detected_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (disc_id, new_state, now, "Quick update from new emails", model_name, now),
+            )
+
+        # Save milestones
+        for m in update.get("milestones", []):
+            conn.execute(
+                """INSERT INTO milestones (discussion_id, name, achieved, achieved_date,
+                   evidence_event_ids, confidence, last_evaluated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(discussion_id, name) DO UPDATE SET
+                   achieved = excluded.achieved,
+                   achieved_date = excluded.achieved_date,
+                   confidence = excluded.confidence,
+                   last_evaluated_at = excluded.last_evaluated_at""",
+                (
+                    disc_id,
+                    m.get("name", ""),
+                    1 if m.get("achieved") else 0,
+                    m.get("achieved_date"),
+                    json.dumps([]),
+                    m.get("confidence", 0.0),
+                    now,
+                ),
+            )
+
+        # Save proposed actions (replace existing)
+        actions = update.get("proposed_actions", [])
+        if actions:
+            conn.execute("DELETE FROM proposed_actions WHERE discussion_id = ?", (disc_id,))
+            for action in actions:
+                conn.execute(
+                    """INSERT INTO proposed_actions
+                       (discussion_id, action, reasoning, priority, wait_until, assignee, model_used, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        disc_id,
+                        action.get("action", ""),
+                        action.get("reasoning"),
+                        action.get("priority", "medium"),
+                        action.get("wait_until"),
+                        action.get("assignee"),
+                        model_name,
+                        now,
+                    ),
+                )
+                counts["actions"] += 1
+
+        counts["updates"] += 1
+
+    conn.commit()
+    return counts
+
+
+# ── Public entry point ─────────────────────────────────────────────────────
+
+def quick_update(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    company_domain: str,
+    categories_config: list[dict[str, Any]] | None = None,
+    config_path: Path | None = None,
+) -> dict[str, int]:
+    """Process new emails for a company in a single LLM call.
+
+    Returns dict with counts: events, new_discussions, updates, actions.
+    """
+    if categories_config is None:
+        categories_config = load_category_config(config_path)
+
+    # Resolve company
+    company = fetchone(
+        conn,
+        "SELECT id, name, domain FROM companies WHERE domain = ? COLLATE NOCASE",
+        (company_domain,),
+    )
+    if not company:
+        logger.warning("Company not found: %s", company_domain)
+        return {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
+
+    # Get new emails
+    emails = _get_new_emails_for_company(conn, company["domain"])
+    if not emails:
+        logger.info("No new emails for %s", company_domain)
+        return {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
+
+    logger.info("Quick update for %s: %d new emails", company_domain, len(emails))
+
+    # Build context
+    account_owner = _detect_account_owner(conn)
+    domains_block = _build_domains_block(categories_config)
+    discussions_context = _build_discussions_context(conn, company["id"], categories_config)
+    new_emails_text = _format_new_emails(emails)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    user_prompt = _build_quick_update_prompt(
+        company["name"], company["domain"],
+        new_emails_text, discussions_context, domains_block,
+        account_owner, today,
+    )
+
+    try:
+        result = backend.complete_json(QUICK_UPDATE_SYSTEM, user_prompt)
+    except Exception as e:
+        logger.error("LLM call failed for quick update %s: %s", company_domain, e)
+        return {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
+
+    # Save results
+    counts = _save_quick_update_results(
+        conn, result, company["id"], emails, backend.model_name, categories_config,
+    )
+
+    logger.info(
+        "Quick update %s: %d events, %d new discussions, %d updates, %d actions",
+        company_domain, counts["events"], counts["new_discussions"],
+        counts["updates"], counts["actions"],
+    )
+
+    return counts

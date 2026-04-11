@@ -7,7 +7,7 @@ import anthropic
 
 class ClaudeBackend:
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-6") -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
         self._model = model
 
     @property

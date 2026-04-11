@@ -69,6 +69,7 @@ Rules:
 3. The workflow state should reflect where the discussion currently stands, not where it's been.
 4. The summary should be 2-4 sentences covering the arc from first contact to current status.
 5. If a discussion seems stalled (no recent activity), mention that in the summary.
+6. Only use the "stale" state (where available) for discussions with NO activity in the last 3+ months AND no explicit terminal outcome (passed, signed, etc.). A few weeks of inactivity is normal — not stale.
 
 Respond with JSON only."""
 
@@ -78,6 +79,7 @@ def _build_analyse_prompt(
     events: list[dict[str, Any]],
     category_config: dict[str, Any],
     feedback: list[dict[str, Any]] | None = None,
+    children: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the user prompt for analysing a single discussion."""
 
@@ -124,6 +126,15 @@ def _build_analyse_prompt(
         for fb in feedback:
             feedback_text += f"  - {fb['action']}: {fb.get('new_value', fb.get('reason', ''))}\n"
 
+    # Format child discussion summaries
+    children_text = ""
+    if children:
+        children_text = "\nSub-discussions:\n"
+        for child in children:
+            state = child.get("current_state") or "?"
+            summary = child.get("summary") or "No summary yet"
+            children_text += f'  - "{child["title"]}" [{child.get("category", "?")}] state={state}: {summary}\n'
+
     return f"""Analyse this discussion and determine milestones, current state, and summary.
 
 Discussion: "{discussion['title']}" [{discussion['category']}]
@@ -131,7 +142,7 @@ Company: {discussion.get('company_name', 'unknown')}
 Participants: {discussion.get('participants', '[]')}
 First seen: {discussion.get('first_seen', '?')}
 Last seen: {discussion.get('last_seen', '?')}
-{milestones_text}{states_text}{feedback_text}
+{milestones_text}{states_text}{feedback_text}{children_text}
 Event history (chronological):
 {events_text}
 
@@ -311,6 +322,21 @@ def _save_state_and_summary(
              f"Derived from milestone analysis", model_used, now),
         )
 
+    # Propagate last_seen up to parent discussion
+    parent_row = fetchone(
+        conn, "SELECT parent_id FROM discussions WHERE id = ?", (discussion_id,),
+    )
+    if parent_row and parent_row["parent_id"]:
+        conn.execute(
+            """UPDATE discussions SET
+               last_seen = MAX(last_seen, (
+                   SELECT MAX(last_seen) FROM discussions WHERE parent_id = ?
+               )),
+               updated_at = ?
+               WHERE id = ?""",
+            (parent_row["parent_id"], now, parent_row["parent_id"]),
+        )
+
 
 # ── Public entry point ──────────────────────────────────────────────────────
 
@@ -400,7 +426,17 @@ def analyse_discussions(
 
         feedback = _get_feedback_for_discussion(conn, disc["id"])
 
-        user_prompt = _build_analyse_prompt(disc, events, category_config, feedback or None)
+        # Fetch child discussion summaries for context
+        children = fetchall(
+            conn,
+            """SELECT id, title, category, current_state, summary, last_seen
+               FROM discussions WHERE parent_id = ?
+               ORDER BY last_seen DESC""",
+            (disc["id"],),
+        )
+        children = [dict(c) for c in children] if children else None
+
+        user_prompt = _build_analyse_prompt(disc, events, category_config, feedback or None, children=children)
 
         try:
             result = backend.complete_json(ANALYSE_SYSTEM, user_prompt)

@@ -58,6 +58,7 @@ function EventCard({ event }: { event: CalendarEvent }) {
             {event.discussion_title && event.discussion_id && (
               <Link
                 to={`/discussions/${event.discussion_id}`}
+                state={{ breadcrumbs: [{ label: 'Calendar', path: '/calendar' }] }}
                 className="text-blue-600 hover:text-blue-700 hover:underline truncate max-w-xs"
                 onClick={(e) => e.stopPropagation()}
               >
