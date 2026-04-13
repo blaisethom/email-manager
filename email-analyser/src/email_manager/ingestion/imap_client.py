@@ -9,6 +9,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from email_manager.config import EmailAccount
 from email_manager.db import fetchone
+from email_manager.change_journal import record_change
 from email_manager.ingestion.parser import parse_raw_email, email_to_db_row
 from email_manager.ingestion.threading import insert_email_references
 
@@ -360,6 +361,10 @@ def _db_insert_email(conn: sqlite3.Connection, row: dict) -> None:
     if inserted:
         raw_headers = json.loads(row["raw_headers"]) if isinstance(row["raw_headers"], str) else row["raw_headers"]
         insert_email_references(conn, inserted[0], raw_headers)
+
+    # Record in change journal
+    if row.get("thread_id"):
+        record_change(conn, "thread", row["thread_id"], "new_email", "sync")
 
 
 def _db_execute_with_retry(conn: sqlite3.Connection, sql: str, params=None, retries: int = 5) -> None:

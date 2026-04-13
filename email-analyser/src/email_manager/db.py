@@ -6,7 +6,7 @@ from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 19
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS discussions (
     current_state   TEXT,
     company_id      INTEGER REFERENCES companies(id),
     parent_id       INTEGER REFERENCES discussions(id),
+    run_id          INTEGER REFERENCES processing_runs(id),
     summary         TEXT,
     participants    TEXT,
     first_seen      TEXT,
@@ -253,6 +254,9 @@ CREATE TABLE IF NOT EXISTS event_ledger (
     thread_id       TEXT,
     source_email_id TEXT,
     source_calendar_event_id TEXT,
+    source_type     TEXT NOT NULL DEFAULT 'email',
+    source_id       TEXT,
+    run_id          INTEGER REFERENCES processing_runs(id),
     discussion_id   INTEGER REFERENCES discussions(id),
     domain          TEXT NOT NULL,
     type            TEXT NOT NULL,
@@ -275,6 +279,7 @@ CREATE INDEX IF NOT EXISTS idx_event_ledger_date ON event_ledger(event_date);
 CREATE TABLE IF NOT EXISTS milestones (
     id              INTEGER PRIMARY KEY,
     discussion_id   INTEGER REFERENCES discussions(id),
+    run_id          INTEGER REFERENCES processing_runs(id),
     name            TEXT NOT NULL,
     achieved        INTEGER DEFAULT 0,
     achieved_date   TEXT,
@@ -326,6 +331,7 @@ CREATE TABLE IF NOT EXISTS learned_rules (
 CREATE TABLE IF NOT EXISTS proposed_actions (
     id              INTEGER PRIMARY KEY,
     discussion_id   INTEGER REFERENCES discussions(id),
+    run_id          INTEGER REFERENCES processing_runs(id),
     action          TEXT NOT NULL,
     reasoning       TEXT,
     priority        TEXT,
@@ -336,6 +342,35 @@ CREATE TABLE IF NOT EXISTS proposed_actions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_proposed_actions_discussion ON proposed_actions(discussion_id);
+
+CREATE TABLE IF NOT EXISTS processing_runs (
+    id              INTEGER PRIMARY KEY,
+    company_domain  TEXT NOT NULL,
+    mode            TEXT NOT NULL,
+    model           TEXT,
+    started_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    events_created  INTEGER DEFAULT 0,
+    discussions_created INTEGER DEFAULT 0,
+    discussions_updated INTEGER DEFAULT 0,
+    actions_proposed INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_processing_runs_company ON processing_runs(company_domain);
+CREATE INDEX IF NOT EXISTS idx_processing_runs_mode ON processing_runs(mode);
+
+CREATE TABLE IF NOT EXISTS change_journal (
+    id              INTEGER PRIMARY KEY,
+    entity_type     TEXT NOT NULL,
+    entity_id       TEXT NOT NULL,
+    change_type     TEXT NOT NULL,
+    source_stage    TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    processed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_change_journal_entity ON change_journal(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_change_journal_unprocessed ON change_journal(processed_at) WHERE processed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -403,6 +438,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v14(conn)
     if current_version < 15:
         _migrate_to_v15(conn)
+    if current_version < 16:
+        _migrate_to_v16(conn)
+    if current_version < 17:
+        _migrate_to_v17(conn)
+    if current_version < 18:
+        _migrate_to_v18(conn)
+    if current_version < 19:
+        _migrate_to_v19(conn)
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
@@ -859,6 +902,87 @@ def _migrate_to_v15(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     print("  [migration v15] parent_id column added to discussions")
+
+
+def _migrate_to_v19(conn: sqlite3.Connection) -> None:
+    """Migration v18 -> v19: add run_id to discussions, milestones, proposed_actions."""
+    for table in ("discussions", "milestones", "proposed_actions"):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if "run_id" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN run_id INTEGER REFERENCES processing_runs(id)")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v19] run_id column added to discussions, milestones, proposed_actions")
+
+
+def _migrate_to_v18(conn: sqlite3.Connection) -> None:
+    """Migration v17 -> v18: add processing_runs table and run_id to event_ledger."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS processing_runs (
+        id              INTEGER PRIMARY KEY,
+        company_domain  TEXT NOT NULL,
+        mode            TEXT NOT NULL,
+        model           TEXT,
+        started_at      TEXT NOT NULL,
+        completed_at    TEXT,
+        events_created  INTEGER DEFAULT 0,
+        discussions_created INTEGER DEFAULT 0,
+        discussions_updated INTEGER DEFAULT 0,
+        actions_proposed INTEGER DEFAULT 0
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_processing_runs_company ON processing_runs(company_domain)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_processing_runs_mode ON processing_runs(mode)")
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(event_ledger)").fetchall()}
+    if "run_id" not in cols:
+        conn.execute("ALTER TABLE event_ledger ADD COLUMN run_id INTEGER REFERENCES processing_runs(id)")
+
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v18] processing_runs table and run_id column added")
+
+
+def _migrate_to_v17(conn: sqlite3.Connection) -> None:
+    """Migration v16 -> v17: add source_type and source_id to event_ledger."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(event_ledger)").fetchall()}
+    if "source_type" not in cols:
+        conn.execute("ALTER TABLE event_ledger ADD COLUMN source_type TEXT NOT NULL DEFAULT 'email'")
+    if "source_id" not in cols:
+        conn.execute("ALTER TABLE event_ledger ADD COLUMN source_id TEXT")
+
+    # Backfill source_id from existing columns
+    conn.execute("""UPDATE event_ledger SET source_id = source_email_id
+                    WHERE source_email_id IS NOT NULL AND source_id IS NULL""")
+    conn.execute("""UPDATE event_ledger SET source_type = 'calendar', source_id = source_calendar_event_id
+                    WHERE source_calendar_event_id IS NOT NULL AND source_email_id IS NULL AND source_id IS NULL""")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v17] source_type and source_id columns added to event_ledger")
+
+
+def _migrate_to_v16(conn: sqlite3.Connection) -> None:
+    """Migration v15 -> v16: add change_journal table."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS change_journal (
+        id              INTEGER PRIMARY KEY,
+        entity_type     TEXT NOT NULL,
+        entity_id       TEXT NOT NULL,
+        change_type     TEXT NOT NULL,
+        source_stage    TEXT,
+        created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        processed_at    TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_change_journal_entity ON change_journal(entity_type, entity_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_change_journal_unprocessed ON change_journal(processed_at) WHERE processed_at IS NULL")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    print("  [migration v16] change_journal table added")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:

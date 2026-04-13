@@ -353,29 +353,48 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
     run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, company_list=companies_from_file or None, label=label, exclude=exclude_list or None, contact=contact, per_company=per_company, stale_before=stale_before, last_seen_after=last_seen_after, last_seen_before=last_seen_before, dry_run=dry_run)
 
 
+QUICK_UPDATE_THRESHOLD = 10  # Max new threads before switching to staged pipeline
+
+
 @cli.command()
 @click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")
 @click.option("--label", "-l", default=None, help="Scope to all companies with this label")
 @click.option("--company-file", default=None, type=click.Path(exists=True), help="File with company domains/names to process (one per line)")
+@click.option("--threshold", type=int, default=QUICK_UPDATE_THRESHOLD, show_default=True, help="Max new threads for single-call mode; above this uses staged pipeline")
+@click.option("--agent", is_flag=True, help="Use agent mode: Claude processes each company in an autonomous session with database tools")
 @click.pass_context
-def update(ctx: click.Context, company: str | None, label: str | None, company_file: str | None) -> None:
-    """Fast incremental update: process new emails in a single LLM call per company.
+def update(ctx: click.Context, company: str | None, label: str | None, company_file: str | None, threshold: int, agent: bool) -> None:
+    """Incremental update: process new emails for companies that need it.
 
-    Much faster than the full pipeline for a few new emails. Extracts events,
-    assigns to discussions, updates state/summary/milestones, and proposes
-    next actions — all in one LLM call.
+    Adapts strategy per company based on volume of changes:
+    - Few new threads (<=threshold): single merged LLM call (fast)
+    - Many new threads (>threshold): staged pipeline (thorough)
 
-    Requires at least one company scope (--company, --label, or --company-file).
+    With --agent, uses an autonomous agent session per company. The agent has
+    tools to read emails, check discussions, save events, and update state.
+    This is more thorough but uses more tokens.
+
+    With no scoping options, automatically detects companies with new/changed
+    emails via the change journal.
 
     \b
     Example:
+      email-analyser update
       email-analyser update --company acme.com
-      email-analyser update --company-file companies.txt
+      email-analyser update --agent --company acme.com
+      email-analyser update --threshold 5
     """
     from pathlib import Path
-    from email_manager.analysis.quick_update import quick_update
+    from email_manager.analysis.quick_update import quick_update, count_new_threads_for_company
     from email_manager.analysis.events import load_category_config
     from email_manager.ai.factory import get_backend
+    from email_manager.change_journal import get_dirty_company_domains, mark_processed
+    from email_manager.pipeline.stages import (
+        run_extract_events,
+        run_discover_discussions,
+        run_analyse_discussions,
+        run_propose_actions,
+    )
 
     config: Config = ctx.obj["config"]
     conn = get_db(config)
@@ -395,6 +414,7 @@ def update(ctx: click.Context, company: str | None, label: str | None, company_f
         return entries
 
     # Resolve company domains
+    auto_scoped = False
     domains: list[str] = []
     if company:
         row = fetchone(conn, "SELECT domain FROM companies WHERE domain = ? COLLATE NOCASE OR name = ? COLLATE NOCASE", (company, company))
@@ -412,43 +432,586 @@ def update(ctx: click.Context, company: str | None, label: str | None, company_f
         placeholders = ", ".join("?" for _ in lowered)
         rows = fetchall(conn, f"SELECT DISTINCT domain FROM companies WHERE LOWER(domain) IN ({placeholders}) OR LOWER(name) IN ({placeholders})", tuple(lowered + lowered))
         domains = [r["domain"] for r in rows]
+    else:
+        # Auto-scope: find companies with unprocessed changes
+        domains = get_dirty_company_domains(conn)
+        auto_scoped = True
 
     if not domains:
-        console.print("[red]No companies to update. Use --company, --label, or --company-file.[/red]")
+        if auto_scoped:
+            console.print("[dim]No companies with pending changes. Nothing to update.[/dim]")
+        else:
+            console.print("[red]No companies to update. Use --company, --label, or --company-file.[/red]")
         conn.close()
         return
 
-    console.print(f"Updating [bold]{len(domains)}[/bold] company{'s' if len(domains) != 1 else ''}")
+    scope_label = "auto-detected" if auto_scoped else "scoped"
+    console.print(f"Updating [bold]{len(domains)}[/bold] {scope_label} company{'s' if len(domains) != 1 else ''}")
 
     total_events = 0
     total_updates = 0
     total_actions = 0
     total_new = 0
+    staged_count = 0
+    agent_count = 0
 
     for i, domain in enumerate(domains):
-        console.print(f"\n[bold cyan]{domain}[/bold cyan] ({i+1}/{len(domains)})")
+        if agent:
+            # Agent mode: propose changes, review, then apply
+            from email_manager.ai.agent_backend import apply_changes, ProposedChanges
+            from email_manager.analysis.quick_update import quick_update_propose
 
-        counts = quick_update(
-            conn, backend, domain,
-            categories_config=categories_config,
-        )
+            console.print(f"\n[bold cyan]{domain}[/bold cyan] ({i+1}/{len(domains)}) [agent]")
+            agent_count += 1
 
-        if counts["events"] == 0:
-            console.print("  [dim]No new emails to process[/dim]")
-        else:
-            console.print(
-                f"  [green]{counts['events']} events, "
-                f"{counts['new_discussions']} new discussions, "
-                f"{counts['updates']} updated, "
-                f"{counts['actions']} actions[/green]"
+            proposed_dict, company_info = quick_update_propose(
+                conn, backend, domain, categories_config=categories_config,
             )
 
-        total_events += counts["events"]
-        total_new += counts["new_discussions"]
-        total_updates += counts["updates"]
-        total_actions += counts["actions"]
+            if not proposed_dict or not company_info:
+                console.print("  [dim]No new emails to process[/dim]")
+                continue
 
-    console.print(f"\n[bold green]Done.[/bold green] {total_events} events, {total_new} new discussions, {total_updates} updated, {total_actions} actions")
+            proposed = ProposedChanges(proposed_dict)
+            if proposed.is_empty:
+                console.print("  [dim]No changes proposed[/dim]")
+                continue
+
+            console.print(f"\n  [bold]Proposed changes:[/bold]")
+            for line in proposed.summary_lines():
+                console.print(line)
+
+            # Single company: ask for confirmation. Batch: auto-apply.
+            should_apply = True
+            if len(domains) == 1:
+                should_apply = click.confirm("\n  Apply these changes?", default=True)
+
+            if should_apply:
+                counts = apply_changes(
+                    conn, proposed, company_info["id"], company_info["domain"],
+                    mode="agent", model=backend.model_name,
+                )
+                total_events += counts["events"]
+                total_new += counts["new_discussions"]
+                total_updates += counts["updates"]
+                total_actions += counts["actions"]
+                console.print(f"  [green]Applied: {counts['events']} events, {counts['new_discussions']} new discussions, {counts['updates']} updated[/green]")
+            else:
+                console.print("  [yellow]Skipped[/yellow]")
+        else:
+            new_threads = count_new_threads_for_company(conn, domain)
+            use_staged = new_threads > threshold
+
+            mode = f"staged ({new_threads} threads)" if use_staged else f"quick ({new_threads} threads)"
+            console.print(f"\n[bold cyan]{domain}[/bold cyan] ({i+1}/{len(domains)}) [{mode}]")
+
+            if new_threads == 0:
+                console.print("  [dim]No new emails to process[/dim]")
+                continue
+
+            if use_staged:
+                # Staged pipeline: extract → discover → analyse → propose
+                staged_count += 1
+                ev_count = run_extract_events(conn, backend, config, console=console, company=domain)
+                disc_count = run_discover_discussions(conn, backend, config, console=console, company=domain)
+                ana_count = run_analyse_discussions(conn, backend, config, console=console, company=domain)
+                act_count = run_propose_actions(conn, backend, config, console=console, company=domain)
+                total_events += max(ev_count, 0)
+                total_new += max(disc_count, 0)
+                total_updates += max(ana_count, 0)
+                total_actions += max(act_count, 0)
+            else:
+                # Single merged LLM call
+                counts = quick_update(
+                    conn, backend, domain,
+                    categories_config=categories_config,
+                )
+
+                if counts["events"] == 0:
+                    console.print("  [dim]No new emails to process[/dim]")
+                else:
+                    console.print(
+                        f"  [green]{counts['events']} events, "
+                        f"{counts['new_discussions']} new discussions, "
+                        f"{counts['updates']} updated, "
+                        f"{counts['actions']} actions[/green]"
+                    )
+
+                total_events += counts["events"]
+                total_new += counts["new_discussions"]
+                total_updates += counts["updates"]
+                total_actions += counts["actions"]
+
+    # Mark journal entries as processed for the companies we just updated
+    mark_processed(conn, entity_type="company", entity_ids=domains)
+    # Mark thread-level entries for threads belonging to these companies
+    like_clauses = " OR ".join(
+        "(e.from_address LIKE ? OR e.to_addresses LIKE ? OR e.cc_addresses LIKE ?)"
+        for _ in domains
+    )
+    like_params: list[str] = []
+    for d in domains:
+        like = f"%@{d}%"
+        like_params.extend([like, like, like])
+    if like_clauses:
+        conn.execute(
+            f"""UPDATE change_journal SET processed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE entity_type = 'thread' AND processed_at IS NULL
+                AND entity_id IN (
+                    SELECT DISTINCT e.thread_id FROM emails e WHERE {like_clauses}
+                )""",
+            like_params,
+        )
+    conn.commit()
+
+    mode_summary = ""
+    if agent_count > 0:
+        mode_summary = f" ({agent_count} agent)"
+    elif staged_count > 0:
+        quick_count = len(domains) - staged_count
+        mode_summary = f" ({quick_count} quick, {staged_count} staged)"
+
+    console.print(f"\n[bold green]Done.{mode_summary}[/bold green] {total_events} events, {total_new} new discussions, {total_updates} updated, {total_actions} actions")
+    conn.close()
+
+
+@cli.command(name="add-event")
+@click.option("--company", "-c", required=True, help="Company domain or name")
+@click.option("--type", "event_type", required=True, help="Event type from vocabulary (e.g. meeting_held)")
+@click.option("--domain", "event_domain", required=True, help="Business domain (e.g. fundraising, pharma-deal)")
+@click.option("--detail", required=True, help="Description of what happened")
+@click.option("--date", "event_date", default=None, help="When it happened (YYYY-MM-DD, default: today)")
+@click.option("--actor", default=None, help="Who performed the action (email address)")
+@click.option("--target", default=None, help="Who the action was directed at (email address)")
+@click.option("--discussion", "-d", "discussion_id", type=int, default=None, help="Assign to this discussion ID")
+@click.option("--confidence", type=float, default=1.0, help="Confidence score (default: 1.0)")
+@click.pass_context
+def add_event(ctx: click.Context, company: str, event_type: str, event_domain: str, detail: str, event_date: str | None, actor: str | None, target: str | None, discussion_id: int | None, confidence: float) -> None:
+    """Manually add a business event (meeting, call, decision, etc.).
+
+    Writes directly to the event ledger with source_type='manual'.
+    Inserts a change journal entry so the company gets re-analysed on next update.
+
+    \b
+    Example:
+      email-analyser add-event --company acme.com \\
+        --type meeting_held --domain fundraising \\
+        --detail "Met with Sarah, discussed term sheet" \\
+        --date 2026-04-10 --actor me@example.com
+    """
+    import uuid
+    from datetime import datetime, timezone
+    from email_manager.change_journal import record_change
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    # Resolve company
+    row = fetchone(conn, "SELECT id, domain, name FROM companies WHERE domain = ? COLLATE NOCASE OR name = ? COLLATE NOCASE", (company, company))
+    if not row:
+        console.print(f"[red]Company not found: {company}[/red]")
+        conn.close()
+        return
+    company_id = row["id"]
+    company_domain = row["domain"]
+
+    # Validate discussion if provided
+    if discussion_id is not None:
+        disc = fetchone(conn, "SELECT id, title FROM discussions WHERE id = ?", (discussion_id,))
+        if not disc:
+            console.print(f"[red]Discussion {discussion_id} not found[/red]")
+            conn.close()
+            return
+
+    now = datetime.now(timezone.utc)
+    if not event_date:
+        event_date = now.strftime("%Y-%m-%d")
+
+    evt_id = f"evt_{uuid.uuid4().hex[:12]}"
+    conn.execute(
+        """INSERT INTO event_ledger
+           (id, thread_id, source_email_id, source_calendar_event_id,
+            source_type, source_id, discussion_id,
+            domain, type, actor, target, event_date, detail, confidence,
+            model_version, prompt_version, created_at)
+           VALUES (?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            evt_id, "manual", evt_id, discussion_id,
+            event_domain, event_type, actor, target,
+            event_date, detail, confidence,
+            "manual", "manual", now.isoformat(),
+        ),
+    )
+
+    # Record in change journal
+    record_change(conn, "company", company_domain, "manual_event", "add-event")
+    conn.commit()
+
+    console.print(f"[green]Event added:[/green] {event_domain}/{event_type} on {event_date}")
+    console.print(f"  Detail: {detail}")
+    if discussion_id:
+        console.print(f"  Assigned to discussion #{discussion_id}")
+    else:
+        console.print(f"  [dim]No discussion assigned — will be assigned on next update[/dim]")
+    console.print(f"  ID: {evt_id}")
+    conn.close()
+
+
+@cli.command()
+@click.option("--company", "-c", default=None, help="Company domain or name (required if no --discussion)")
+@click.option("--discussion", "-d", "discussion_id", type=int, default=None, help="Discussion to update with debrief")
+@click.argument("text", nargs=-1)
+@click.pass_context
+def debrief(ctx: click.Context, company: str | None, discussion_id: int | None, text: tuple[str, ...]) -> None:
+    """Record an out-of-platform interaction via freeform text.
+
+    Sends your text + discussion context to the LLM, which extracts events,
+    updates discussion state/summary/milestones, and proposes actions.
+
+    Text can be passed as arguments or piped via stdin.
+
+    \b
+    Example:
+      email-analyser debrief --company acme.com "Met with Sarah, they accepted terms"
+      email-analyser debrief --discussion 42 "Call went well, pilot starts Monday"
+      echo "Had a call with Bob" | email-analyser debrief --company acme.com
+    """
+    import sys
+    from email_manager.analysis.quick_update import (
+        _build_discussions_context,
+        _save_quick_update_results,
+        QUICK_UPDATE_SYSTEM,
+    )
+    from email_manager.analysis.events import load_category_config, _build_domains_block
+    from email_manager.ai.factory import get_backend
+    from email_manager.change_journal import record_change
+    from datetime import datetime, timezone
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    # Get debrief text
+    debrief_text = " ".join(text) if text else ""
+    if not debrief_text:
+        if not sys.stdin.isatty():
+            debrief_text = sys.stdin.read().strip()
+        else:
+            console.print("Enter debrief text (Ctrl-D to finish):")
+            lines = []
+            try:
+                while True:
+                    lines.append(input())
+            except EOFError:
+                pass
+            debrief_text = "\n".join(lines).strip()
+
+    if not debrief_text:
+        console.print("[red]No debrief text provided.[/red]")
+        conn.close()
+        return
+
+    # Resolve company
+    if discussion_id and not company:
+        disc = fetchone(conn, """SELECT d.id, c.id as company_id, c.domain, c.name as company_name
+                                  FROM discussions d JOIN companies c ON d.company_id = c.id
+                                  WHERE d.id = ?""", (discussion_id,))
+        if not disc:
+            console.print(f"[red]Discussion {discussion_id} not found[/red]")
+            conn.close()
+            return
+        company_id = disc["company_id"]
+        company_domain = disc["domain"]
+        company_name = disc["company_name"]
+    elif company:
+        row = fetchone(conn, "SELECT id, domain, name FROM companies WHERE domain = ? COLLATE NOCASE OR name = ? COLLATE NOCASE", (company, company))
+        if not row:
+            console.print(f"[red]Company not found: {company}[/red]")
+            conn.close()
+            return
+        company_id = row["id"]
+        company_domain = row["domain"]
+        company_name = row["name"]
+    else:
+        console.print("[red]Provide --company or --discussion.[/red]")
+        conn.close()
+        return
+
+    categories_config = load_category_config(getattr(config, "discussion_categories_path", None))
+    backend = get_backend(config)
+    console.print(f"Using AI backend: [bold]{backend.model_name}[/bold]")
+
+    # Build context
+    domains_block = _build_domains_block(categories_config)
+    discussions_context = _build_discussions_context(conn, company_id, categories_config)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Build prompt — reuses quick_update structure but with debrief text instead of emails
+    from email_manager.analysis.quick_update import _build_quick_update_prompt
+    from email_manager.analysis.events import _detect_account_owner
+
+    account_owner = _detect_account_owner(conn)
+
+    # Replace the "new emails" section with debrief text
+    debrief_emails_text = f"""--- Debrief notes (recorded by user, not from email) ---
+[Debrief 0] [{today}] From: {account_owner or 'user'} <{account_owner or 'user'}>
+Subject: Manual debrief
+{debrief_text}
+--- End debrief ---"""
+
+    user_prompt = _build_quick_update_prompt(
+        company_name, company_domain,
+        debrief_emails_text, discussions_context, domains_block,
+        account_owner, today,
+    )
+
+    console.print(f"Processing debrief for [bold]{company_name}[/bold] ({company_domain})...")
+
+    try:
+        result = backend.complete_json(QUICK_UPDATE_SYSTEM, user_prompt)
+    except Exception as e:
+        console.print(f"[red]LLM call failed: {e}[/red]")
+        conn.close()
+        return
+
+    # Save results — create a fake "emails" list for source resolution
+    fake_emails = [{"message_id": None, "thread_id": None}]
+    counts = _save_quick_update_results(
+        conn, result, company_id, fake_emails, backend.model_name, categories_config,
+    )
+
+    # Update source_type for events we just created to 'debrief'
+    conn.execute(
+        """UPDATE event_ledger SET source_type = 'debrief', source_id = NULL
+           WHERE source_type = 'email' AND source_email_id IS NULL
+           AND model_version = ? AND created_at >= ?""",
+        (backend.model_name, today),
+    )
+
+    # Record in change journal
+    record_change(conn, "company", company_domain, "debrief", "debrief")
+    conn.commit()
+
+    if counts["events"] == 0 and counts["new_discussions"] == 0:
+        console.print("[dim]No events extracted from debrief text.[/dim]")
+    else:
+        console.print(
+            f"[green]{counts['events']} events, "
+            f"{counts['new_discussions']} new discussions, "
+            f"{counts['updates']} updated, "
+            f"{counts['actions']} actions[/green]"
+        )
+
+    conn.close()
+
+
+@cli.command(name="update-discussion")
+@click.argument("discussion_id", type=int)
+@click.option("--state", default=None, help="Set workflow state")
+@click.option("--title", default=None, help="Rename the discussion")
+@click.option("--company", "-c", default=None, help="Reassign to a different company (domain or name)")
+@click.option("--reason", default=None, help="Reason for the change (recorded in feedback)")
+@click.pass_context
+def update_discussion(ctx: click.Context, discussion_id: int, state: str | None, title: str | None, company: str | None, reason: str | None) -> None:
+    """Manually update a discussion's state, title, or company.
+
+    All changes are recorded in the feedback table (for AI learning) and
+    discussion_state_history (for audit), and insert a change journal entry.
+
+    \b
+    Example:
+      email-analyser update-discussion 42 --state signed --reason "Signed at meeting"
+      email-analyser update-discussion 42 --title "Acme Series B"
+      email-analyser update-discussion 42 --company newco.com
+    """
+    from datetime import datetime, timezone
+    from email_manager.change_journal import record_change
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    disc = fetchone(conn, """SELECT d.*, c.domain as company_domain, c.name as company_name
+                              FROM discussions d JOIN companies c ON d.company_id = c.id
+                              WHERE d.id = ?""", (discussion_id,))
+    if not disc:
+        console.print(f"[red]Discussion {discussion_id} not found[/red]")
+        conn.close()
+        return
+
+    if not state and not title and not company:
+        console.print("[red]Provide at least one of --state, --title, or --company.[/red]")
+        conn.close()
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    changes: list[str] = []
+
+    # State change
+    if state:
+        old_state = disc["current_state"]
+        conn.execute("UPDATE discussions SET current_state = ?, updated_at = ? WHERE id = ?", (state, now, discussion_id))
+        conn.execute(
+            """INSERT INTO discussion_state_history
+               (discussion_id, state, entered_at, reasoning, model_used, detected_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (discussion_id, state, now, reason or "Manual state change", "manual", now),
+        )
+        conn.execute(
+            """INSERT INTO feedback (layer, target_type, target_id, action, old_value, new_value, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("discussion", "discussion", str(discussion_id), "state_change", old_state, state, reason, now),
+        )
+        changes.append(f"state: {old_state} → {state}")
+
+    # Title change
+    if title:
+        old_title = disc["title"]
+        conn.execute("UPDATE discussions SET title = ?, updated_at = ? WHERE id = ?", (title, now, discussion_id))
+        conn.execute(
+            """INSERT INTO feedback (layer, target_type, target_id, action, old_value, new_value, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("discussion", "discussion", str(discussion_id), "title_change", old_title, title, reason, now),
+        )
+        changes.append(f"title: \"{old_title}\" → \"{title}\"")
+
+    # Company reassignment
+    if company:
+        new_co = fetchone(conn, "SELECT id, domain, name FROM companies WHERE domain = ? COLLATE NOCASE OR name = ? COLLATE NOCASE", (company, company))
+        if not new_co:
+            console.print(f"[red]Company not found: {company}[/red]")
+            conn.close()
+            return
+        old_company = f"{disc['company_name']} ({disc['company_domain']})"
+        conn.execute("UPDATE discussions SET company_id = ?, updated_at = ? WHERE id = ?", (new_co["id"], now, discussion_id))
+        conn.execute(
+            """INSERT INTO feedback (layer, target_type, target_id, action, old_value, new_value, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("discussion", "discussion", str(discussion_id), "company_change", disc["company_domain"], new_co["domain"], reason, now),
+        )
+        changes.append(f"company: {old_company} → {new_co['name']} ({new_co['domain']})")
+        record_change(conn, "company", new_co["domain"], "discussion_reassigned", "update-discussion")
+
+    # Journal entry for the original company
+    record_change(conn, "company", disc["company_domain"], "discussion_updated", "update-discussion")
+    conn.commit()
+
+    console.print(f"[green]Discussion #{discussion_id} updated:[/green]")
+    for c in changes:
+        console.print(f"  {c}")
+    if reason:
+        console.print(f"  Reason: {reason}")
+    conn.close()
+
+
+@cli.command(name="merge-discussions")
+@click.argument("target_id", type=int)
+@click.argument("source_id", type=int)
+@click.option("--reason", default=None, help="Reason for merging")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.pass_context
+def merge_discussions(ctx: click.Context, target_id: int, source_id: int, reason: str | None, yes: bool) -> None:
+    """Merge two discussions: move all data from SOURCE into TARGET.
+
+    Events, threads, actions, milestones, state history, and proposed actions
+    from the source discussion are moved to the target. The source discussion
+    is then deleted.
+
+    \b
+    Example:
+      email-analyser merge-discussions 42 43
+      email-analyser merge-discussions 42 43 --reason "Same deal, split by mistake"
+    """
+    from datetime import datetime, timezone
+    from email_manager.change_journal import record_change
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    target = fetchone(conn, """SELECT d.*, c.domain as company_domain, c.name as company_name
+                                FROM discussions d JOIN companies c ON d.company_id = c.id
+                                WHERE d.id = ?""", (target_id,))
+    source = fetchone(conn, """SELECT d.*, c.domain as company_domain, c.name as company_name
+                                FROM discussions d JOIN companies c ON d.company_id = c.id
+                                WHERE d.id = ?""", (source_id,))
+
+    if not target:
+        console.print(f"[red]Target discussion {target_id} not found[/red]")
+        conn.close()
+        return
+    if not source:
+        console.print(f"[red]Source discussion {source_id} not found[/red]")
+        conn.close()
+        return
+
+    # Show what will happen
+    console.print(f"\n[bold]Merge discussions:[/bold]")
+    console.print(f"  Target (keep): #{target_id} \"{target['title']}\" [{target['category']}] — {target['company_name']}")
+    console.print(f"  Source (delete): #{source_id} \"{source['title']}\" [{source['category']}] — {source['company_name']}")
+
+    # Count items to move
+    event_count = fetchone(conn, "SELECT COUNT(*) as cnt FROM event_ledger WHERE discussion_id = ?", (source_id,))["cnt"]
+    thread_count = fetchone(conn, "SELECT COUNT(*) as cnt FROM discussion_threads WHERE discussion_id = ?", (source_id,))["cnt"]
+    action_count = fetchone(conn, "SELECT COUNT(*) as cnt FROM actions WHERE discussion_id = ?", (source_id,))["cnt"]
+
+    console.print(f"\n  Will move: {event_count} events, {thread_count} threads, {action_count} actions")
+
+    if not yes:
+        click.confirm("\nProceed with merge?", abort=True)
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Move events
+    conn.execute("UPDATE event_ledger SET discussion_id = ? WHERE discussion_id = ?", (target_id, source_id))
+    # Move threads (ignore conflicts if thread already linked to target)
+    conn.execute("UPDATE OR IGNORE discussion_threads SET discussion_id = ? WHERE discussion_id = ?", (target_id, source_id))
+    conn.execute("DELETE FROM discussion_threads WHERE discussion_id = ?", (source_id,))
+    # Move actions
+    conn.execute("UPDATE actions SET discussion_id = ? WHERE discussion_id = ?", (target_id, source_id))
+    # Move proposed actions
+    conn.execute("UPDATE proposed_actions SET discussion_id = ? WHERE discussion_id = ?", (target_id, source_id))
+    # Move milestones (ignore conflicts on duplicate names)
+    conn.execute("UPDATE OR IGNORE milestones SET discussion_id = ? WHERE discussion_id = ?", (target_id, source_id))
+    conn.execute("DELETE FROM milestones WHERE discussion_id = ?", (source_id,))
+    # Move state history
+    conn.execute("UPDATE discussion_state_history SET discussion_id = ? WHERE discussion_id = ?", (target_id, source_id))
+    # Move calendar event links
+    conn.execute("UPDATE OR IGNORE discussion_events SET discussion_id = ? WHERE discussion_id = ?", (target_id, source_id))
+    conn.execute("DELETE FROM discussion_events WHERE discussion_id = ?", (source_id,))
+    # Reparent sub-discussions
+    conn.execute("UPDATE discussions SET parent_id = ? WHERE parent_id = ?", (target_id, source_id))
+
+    # Update target date range
+    conn.execute(
+        """UPDATE discussions SET
+           first_seen = MIN(first_seen, ?),
+           last_seen = MAX(last_seen, ?),
+           updated_at = ?
+           WHERE id = ?""",
+        (source["first_seen"], source["last_seen"], now, target_id),
+    )
+
+    # Delete source
+    conn.execute("DELETE FROM discussions WHERE id = ?", (source_id,))
+
+    # Record feedback
+    conn.execute(
+        """INSERT INTO feedback (layer, target_type, target_id, action, old_value, new_value, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("discussion", "discussion", str(target_id), "merge",
+         f"#{source_id}: {source['title']}", f"merged into #{target_id}",
+         reason, now),
+    )
+
+    # Journal entry
+    record_change(conn, "company", target["company_domain"], "discussion_merged", "merge-discussions")
+    if source["company_domain"] != target["company_domain"]:
+        record_change(conn, "company", source["company_domain"], "discussion_merged", "merge-discussions")
+    conn.commit()
+
+    console.print(f"\n[green]Merged #{source_id} into #{target_id}.[/green] Moved {event_count} events, {thread_count} threads, {action_count} actions.")
     conn.close()
 
 

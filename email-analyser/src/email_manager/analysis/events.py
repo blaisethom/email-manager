@@ -19,7 +19,13 @@ from typing import Any, Callable
 import yaml
 
 from email_manager.ai.base import LLMBackend
-from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM, EXTRACT_EVENTS_USER
+from email_manager.ai.prompts import (
+    EXTRACT_EVENTS_SYSTEM,
+    EXTRACT_EVENTS_USER,
+    EXTRACT_EVENTS_BATCH_SYSTEM,
+    EXTRACT_EVENTS_BATCH_USER,
+)
+from email_manager.change_journal import record_changes
 from email_manager.db import fetchall, fetchone
 
 logger = logging.getLogger("email_manager.analysis.events")
@@ -413,11 +419,21 @@ def _process_thread(
 
             source_calendar_id = ev.get("calendar_event_id")
 
+            # Determine source type
+            if source_calendar_id:
+                src_type, src_id = "calendar", source_calendar_id
+            elif source_email_id:
+                src_type, src_id = "email", source_email_id
+            else:
+                src_type, src_id = "email", None
+
             all_parsed.append({
                 "id": f"evt_{uuid.uuid4().hex[:12]}",
                 "thread_id": thread_id,
                 "source_email_id": source_email_id,
                 "source_calendar_event_id": source_calendar_id,
+                "source_type": src_type,
+                "source_id": src_id,
                 "domain": domain,
                 "type": event_type,
                 "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
@@ -469,20 +485,226 @@ def _dedup_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
-def _save_events(conn: sqlite3.Connection, events: list[dict[str, Any]]) -> int:
+# ── Thread batching ────────────────────────────────────────────────────────
+
+MAX_EMAILS_FOR_BATCH = 3        # Threads with more emails go through single-thread path
+MAX_BODY_CHARS_FOR_BATCH = 2000 # Per-thread body size threshold
+BATCH_CONTENT_BUDGET = 8000     # Max total chars of email content per batch
+
+
+def _measure_thread(
+    conn: sqlite3.Connection, thread_id: str,
+) -> tuple[int, int, list[dict]]:
+    """Return (email_count, total_body_chars, emails) for a thread."""
+    emails = fetchall(
+        conn,
+        """SELECT message_id, date, from_address, from_name, to_addresses, cc_addresses,
+                  subject, body_text
+           FROM emails WHERE thread_id = ? ORDER BY date ASC""",
+        (thread_id,),
+    )
+    total_chars = sum(len(e["body_text"] or "") for e in emails)
+    return len(emails), total_chars, emails
+
+
+def _group_into_batches(
+    small_threads: list[tuple[str, int, list[dict]]],
+    budget: int = BATCH_CONTENT_BUDGET,
+) -> list[list[tuple[str, list[dict]]]]:
+    """Group small threads into batches that fit a content budget.
+
+    Each entry in small_threads: (thread_id, total_body_chars, emails).
+    Returns list of batches, each batch is [(thread_id, emails), ...].
+    """
+    batches: list[list[tuple[str, list[dict]]]] = []
+    current_batch: list[tuple[str, list[dict]]] = []
+    current_size = 0
+
+    for thread_id, body_chars, emails in small_threads:
+        if current_batch and current_size + body_chars > budget:
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+        current_batch.append((thread_id, emails))
+        current_size += body_chars
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+def _format_batch_threads(
+    batch: list[tuple[str, list[dict]]],
+    body_per_email: int = 800,
+) -> str:
+    """Format multiple threads for a batched prompt."""
+    parts: list[str] = []
+    for thread_id, emails in batch:
+        subject = emails[0]["subject"] or "(no subject)" if emails else "(no subject)"
+        participant_emails: set[str] = set()
+        for e in emails:
+            for field in ("from_address", "to_addresses", "cc_addresses"):
+                val = e[field]
+                if val:
+                    participant_emails.update(a.lower() for a in _EMAIL_RE.findall(val))
+
+        formatted = _format_thread_emails(emails, body_per_email=body_per_email)
+        messages_text = "\n".join(formatted)
+
+        parts.append(
+            f"=== THREAD: {thread_id} ===\n"
+            f"Subject: {subject}\n"
+            f"Participants: {', '.join(sorted(participant_emails))}\n\n"
+            f"{messages_text}\n"
+            f"=== END THREAD: {thread_id} ==="
+        )
+
+    return "\n\n".join(parts)
+
+
+def _process_batch(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    batch: list[tuple[str, list[dict]]],
+    categories: list[dict[str, Any]],
+    domains_block: str,
+    account_owner: str | None,
+) -> list[dict[str, Any]]:
+    """Extract events from a batch of small threads in a single LLM call."""
+    owner_line = f"\nAccount owner (\"me\"): {account_owner}" if account_owner else ""
+    threads_block = _format_batch_threads(batch)
+
+    user_prompt = EXTRACT_EVENTS_BATCH_USER.format(
+        owner_line=owner_line,
+        domains_block=domains_block,
+        threads_block=threads_block,
+    )
+
+    try:
+        result = backend.complete_json(EXTRACT_EVENTS_BATCH_SYSTEM, user_prompt)
+    except Exception as e:
+        thread_ids = [tid for tid, _ in batch]
+        logger.error("LLM call failed for batch of %d threads: %s", len(batch), e)
+        # Fall back to processing individually
+        all_events: list[dict[str, Any]] = []
+        for thread_id, _ in batch:
+            events = _process_thread(conn, backend, thread_id, categories, domains_block, account_owner)
+            all_events.extend(events)
+        return all_events
+
+    # Build type-to-domain lookup
+    all_type_to_domain: dict[str, str] = {}
+    for cat in categories:
+        for et in cat.get("event_types", []):
+            type_name = et["name"] if isinstance(et, dict) else et
+            all_type_to_domain[type_name] = cat["name"]
+
+    # Build lookup of emails by thread_id for source resolution
+    emails_by_thread: dict[str, list[dict]] = {tid: emails for tid, emails in batch}
+
+    now = datetime.now(timezone.utc).isoformat()
+    all_parsed: list[dict[str, Any]] = []
+
+    threads_data = result.get("threads", {})
+    for thread_id, thread_result in threads_data.items():
+        if thread_id not in emails_by_thread:
+            logger.warning("LLM returned unknown thread_id '%s' in batch response", thread_id)
+            continue
+
+        emails = emails_by_thread[thread_id]
+        for ev in thread_result.get("events", []):
+            event_type = ev.get("type", "")
+            domain = ev.get("domain", "")
+
+            # Validate event type
+            valid_types_for_domain: set[str] = set()
+            for cat in categories:
+                if cat["name"] == domain:
+                    for et in cat.get("event_types", []):
+                        valid_types_for_domain.add(et["name"] if isinstance(et, dict) else et)
+                    break
+
+            if event_type not in valid_types_for_domain:
+                if event_type in all_type_to_domain:
+                    domain = all_type_to_domain[event_type]
+                else:
+                    logger.warning(
+                        "Skipping unknown event type '%s' for domain '%s' in thread %s (batch)",
+                        event_type, domain, thread_id,
+                    )
+                    continue
+
+            source_idx = ev.get("source_email_index")
+            source_email_id = None
+            if source_idx is not None and 0 <= source_idx < len(emails):
+                source_email_id = emails[source_idx]["message_id"]
+
+            source_calendar_id = ev.get("calendar_event_id")
+
+            if source_calendar_id:
+                src_type, src_id = "calendar", source_calendar_id
+            elif source_email_id:
+                src_type, src_id = "email", source_email_id
+            else:
+                src_type, src_id = "email", None
+
+            all_parsed.append({
+                "id": f"evt_{uuid.uuid4().hex[:12]}",
+                "thread_id": thread_id,
+                "source_email_id": source_email_id,
+                "source_calendar_event_id": source_calendar_id,
+                "source_type": src_type,
+                "source_id": src_id,
+                "domain": domain,
+                "type": event_type,
+                "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
+                "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
+                "event_date": ev.get("event_date"),
+                "detail": ev.get("detail"),
+                "confidence": ev.get("confidence", 0.5),
+                "model_version": backend.model_name,
+                "prompt_version": PROMPT_VERSION,
+                "created_at": now,
+            })
+
+    return all_parsed
+
+
+def _save_events(conn: sqlite3.Connection, events: list[dict[str, Any]], run_id: int | None = None) -> int:
     """Save events to the event_ledger table."""
     if not events:
         return 0
+
+    # Stamp run_id on all events if provided
+    if run_id is not None:
+        for ev in events:
+            ev["run_id"] = run_id
+    else:
+        for ev in events:
+            ev.setdefault("run_id", None)
+
     conn.executemany(
         """INSERT OR IGNORE INTO event_ledger
-           (id, thread_id, source_email_id, source_calendar_event_id, discussion_id,
+           (id, thread_id, source_email_id, source_calendar_event_id,
+            source_type, source_id, run_id, discussion_id,
             domain, type, actor, target, event_date, detail, confidence,
             model_version, prompt_version, created_at)
-           VALUES (:id, :thread_id, :source_email_id, :source_calendar_event_id, NULL,
+           VALUES (:id, :thread_id, :source_email_id, :source_calendar_event_id,
+                   :source_type, :source_id, :run_id, NULL,
                    :domain, :type, :actor, :target, :event_date, :detail, :confidence,
                    :model_version, :prompt_version, :created_at)""",
         events,
     )
+
+    # Record in change journal — mark affected threads as having new events
+    thread_ids = {e["thread_id"] for e in events if e.get("thread_id")}
+    if thread_ids:
+        record_changes(
+            conn,
+            [("thread", tid, "new_event", "extract_events") for tid in thread_ids],
+        )
+
     conn.commit()
     return len(events)
 
@@ -562,16 +784,70 @@ def extract_events(
         return 0
 
     logger.info("Extracting events from %d threads", len(thread_ids))
-    total_events = 0
 
-    for i, thread_id in enumerate(thread_ids):
+    # Create a processing run for provenance tracking
+    now_ts = datetime.now(timezone.utc).isoformat()
+    run_domain = company_domain or company_label or "all"
+    cursor = conn.execute(
+        """INSERT INTO processing_runs (company_domain, mode, model, started_at)
+           VALUES (?, ?, ?, ?)""",
+        (run_domain, "staged", backend.model_name, now_ts),
+    )
+    run_id = cursor.lastrowid
+
+    # Classify threads as small (batchable) or large
+    small_threads: list[tuple[str, int, list[dict]]] = []
+    large_thread_ids: list[str] = []
+
+    for thread_id in thread_ids:
+        email_count, body_chars, emails = _measure_thread(conn, thread_id)
+        if (
+            email_count <= MAX_EMAILS_FOR_BATCH
+            and body_chars <= MAX_BODY_CHARS_FOR_BATCH
+        ):
+            small_threads.append((thread_id, body_chars, emails))
+        else:
+            large_thread_ids.append(thread_id)
+
+    batches = _group_into_batches(small_threads)
+
+    if batches:
+        logger.info(
+            "Batching: %d small threads in %d batches, %d large threads individual",
+            len(small_threads), len(batches), len(large_thread_ids),
+        )
+
+    total_events = 0
+    progress_idx = 0
+
+    # Process batches of small threads
+    for batch in batches:
         if on_progress:
-            on_progress(i, len(thread_ids))
+            on_progress(progress_idx, len(thread_ids))
+
+        events = _process_batch(
+            conn, backend, batch, categories_config, domains_block, account_owner,
+        )
+        saved = _save_events(conn, events, run_id=run_id)
+        total_events += saved
+
+        if events:
+            logger.info(
+                "Batch of %d threads: extracted %d events",
+                len(batch), len(events),
+            )
+
+        progress_idx += len(batch)
+
+    # Process large threads individually
+    for thread_id in large_thread_ids:
+        if on_progress:
+            on_progress(progress_idx, len(thread_ids))
 
         events = _process_thread(
             conn, backend, thread_id, categories_config, domains_block, account_owner
         )
-        saved = _save_events(conn, events)
+        saved = _save_events(conn, events, run_id=run_id)
         total_events += saved
 
         if events:
@@ -581,7 +857,17 @@ def extract_events(
                 ", ".join(set(e["domain"] for e in events)),
             )
 
+        progress_idx += 1
+
     if on_progress:
         on_progress(len(thread_ids), len(thread_ids))
+
+    # Complete the processing run
+    conn.execute(
+        """UPDATE processing_runs SET completed_at = ?, events_created = ?
+           WHERE id = ?""",
+        (datetime.now(timezone.utc).isoformat(), total_events, run_id),
+    )
+    conn.commit()
 
     return total_events

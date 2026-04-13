@@ -10,6 +10,7 @@ from rich.console import Console
 
 from email_manager.config import EmailAccount
 from email_manager.db import fetchone
+from email_manager.change_journal import record_change
 from email_manager.ingestion.parser import parse_raw_email, email_to_db_row
 from email_manager.ingestion.threading import insert_email_references
 
@@ -272,6 +273,10 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
                     insert_email_references(conn, inserted[0], em.raw_headers)
                 new_count += 1
 
+                # Record in change journal
+                if row.get("thread_id"):
+                    record_change(conn, "thread", row["thread_id"], "new_email", "sync")
+
                 # Track the latest historyId for incremental sync
                 h = msg.get("historyId")
                 if h and (latest_history_id is None or int(h) > int(latest_history_id)):
@@ -379,6 +384,10 @@ def _sync_incremental(
                 if inserted:
                     insert_email_references(conn, inserted[0], em.raw_headers)
                 new_count += 1
+
+                # Record in change journal
+                if row.get("thread_id"):
+                    record_change(conn, "thread", row["thread_id"], "new_email", "sync")
 
                 h = msg.get("historyId")
                 if h and int(h) > int(latest_history_id):

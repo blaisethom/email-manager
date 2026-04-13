@@ -151,6 +151,62 @@ Respond with this exact JSON structure:
 If no business events are found, return {{"domains": [], "events": []}}."""
 
 
+EXTRACT_EVENTS_BATCH_SYSTEM = """You are a business event extraction system. You will be given MULTIPLE short email threads at once. For each thread, your job is to:
+
+1. Classify the business domain(s) present (e.g. investment, pharma-deal, hiring).
+2. Extract discrete, factual business events using the domain-specific event vocabulary.
+
+An "event" is something observable that happened — a deck was sent, an NDA was signed, a meeting took place. Events are facts, not interpretations.
+
+Rules:
+1. Each event must have a type from the provided vocabulary for its domain.
+2. The "actor" is the person who performed the action (use their email address, or "me" for the account owner).
+3. The "target" is the person the action was directed at (optional).
+4. The "detail" should be a brief factual description.
+5. Assign a confidence score (0.0-1.0) based on how clearly the email evidences the event.
+6. Use the email date as the event_date unless the email references a different date.
+7. Do NOT infer events that aren't evidenced.
+8. Do NOT extract events from automated notifications, newsletters, or marketing emails unless they evidence a real business event.
+9. Avoid duplicate events within each thread.
+10. IMPORTANT: Examine EVERY email in each thread for events. Replies often contain critical new events.
+11. Set source_email_index to the index of the email WITHIN THAT THREAD (starting from 0).
+
+Process each thread independently. Do NOT cross-reference events between threads.
+
+Respond with JSON only."""
+
+
+EXTRACT_EVENTS_BATCH_USER = """Extract business events from these email threads.
+{owner_line}
+
+Available domains and their event vocabularies:
+{domains_block}
+
+{threads_block}
+Respond with this exact JSON structure (one entry per thread_id):
+{{
+  "threads": {{
+    "THREAD_ID_1": {{
+      "domains": ["domain-name"],
+      "events": [
+        {{
+          "type": "event_type_name",
+          "domain": "domain-name",
+          "actor": "email@example.com",
+          "target": "email@example.com",
+          "event_date": "YYYY-MM-DD",
+          "detail": "Brief factual description",
+          "confidence": 0.9,
+          "source_email_index": 0
+        }}
+      ]
+    }}
+  }}
+}}
+
+If a thread has no business events, include it with empty domains and events arrays."""
+
+
 def format_email_for_prompt(email_row: dict, index: int) -> str:
     date = email_row.get("date", "")[:10]
     from_addr = email_row.get("from_name") or email_row.get("from_address", "")

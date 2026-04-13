@@ -56,10 +56,17 @@ Rules for event extraction:
 - Assign a confidence score (0.0-1.0).
 - Do NOT re-extract events that are already listed in the existing discussion context.
 - Examine every new email for events. Replies often contain critical events (passes, acceptances, etc.).
+- IMPORTANT: Use the correct domain for each event. Emails about scheduling meetings should use the "scheduling" domain and its event types (meeting_proposed, times_suggested, time_confirmed, etc.), NOT the domain of the thing being discussed. For example, an email saying "Can we meet Tuesday to discuss the deal?" is a scheduling/meeting_proposed event, not an investment event. The actual business events (deal progressed, terms discussed) happen AT the meeting and should only be extracted if the email evidences them.
 
 Rules for discussion assignment:
 - Prefer assigning to existing discussions when the topic matches.
 - Only create a new discussion if the emails clearly don't fit any existing one.
+
+Rules for sub-discussions:
+- Scheduling/logistics emails that support a larger discussion should be tracked as a SUB-DISCUSSION with a parent_id pointing to the main discussion.
+- For example, emails coordinating a meeting time for an investment due diligence call should create a "scheduling" sub-discussion with parent_id set to the investment discussion's ID.
+- The sub-discussion should have category="scheduling" with its own state (proposed/confirmed/completed/cancelled).
+- Set parent_id to an existing discussion ID, or to a temp_id if the parent is also being created.
 
 Rules for state/summary updates:
 - The workflow state should reflect where the discussion currently stands after the new events.
@@ -118,6 +125,7 @@ Respond with this exact JSON structure:
       "temp_id": "new_1",
       "title": "Short descriptive title",
       "category": "domain-name",
+      "parent_id": null,
       "participants": ["email@example.com"]
     }}
   ],
@@ -149,6 +157,7 @@ Respond with this exact JSON structure:
 
 Notes:
 - "discussion_id" in events should be the ID of an existing discussion, or a "temp_id" from new_discussions.
+- "parent_id" in new_discussions can be an existing discussion ID (integer) or a temp_id of another new discussion. Use this for scheduling sub-discussions that support a main discussion. Set to null for top-level discussions.
 - Only include discussion_updates for discussions that were affected by the new events.
 - For milestones, include ALL milestones for the discussion's category (achieved and not), not just new ones.
 - If no business events are found in the new emails, return {{"events": [], "new_discussions": [], "discussion_updates": []}}."""
@@ -215,6 +224,41 @@ def _get_new_emails_for_company(
         tuple(thread_ids),
     )
     return [dict(e) for e in emails]
+
+
+def count_new_threads_for_company(
+    conn: sqlite3.Connection,
+    company_domain: str,
+) -> int:
+    """Count threads with unprocessed emails for a company. Lightweight check."""
+    like = f"%@{company_domain}%"
+    row = fetchone(
+        conn,
+        """SELECT COUNT(DISTINCT e.thread_id) as cnt
+           FROM emails e
+           WHERE e.thread_id IS NOT NULL
+             AND (
+                 e.thread_id NOT IN (
+                     SELECT DISTINCT el.thread_id FROM event_ledger el
+                     WHERE el.thread_id IS NOT NULL
+                 )
+                 OR e.thread_id IN (
+                     SELECT el2.thread_id FROM event_ledger el2
+                     WHERE el2.thread_id IS NOT NULL
+                     GROUP BY el2.thread_id
+                     HAVING MAX(el2.created_at) < (
+                         SELECT MAX(e2.date) FROM emails e2
+                         WHERE e2.thread_id = el2.thread_id
+                     )
+                 )
+             )
+             AND e.thread_id IN (
+                 SELECT DISTINCT e2.thread_id FROM emails e2
+                 WHERE e2.from_address LIKE ? OR e2.to_addresses LIKE ? OR e2.cc_addresses LIKE ?
+             )""",
+        (like, like, like),
+    )
+    return row["cnt"] if row else 0
 
 
 def _build_discussions_context(
@@ -401,15 +445,18 @@ def _save_quick_update_results(
 
         conn.execute(
             """INSERT OR IGNORE INTO event_ledger
-               (id, thread_id, source_email_id, source_calendar_event_id, discussion_id,
+               (id, thread_id, source_email_id, source_calendar_event_id,
+                source_type, source_id, discussion_id,
                 domain, type, actor, target, event_date, detail, confidence,
                 model_version, prompt_version, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 f"evt_{uuid.uuid4().hex[:12]}",
                 thread_id,
                 source_email_id,
                 None,
+                "email",
+                source_email_id,
                 disc_id,
                 domain,
                 event_type,
@@ -525,23 +572,113 @@ def _save_quick_update_results(
     return counts
 
 
-# ── Public entry point ─────────────────────────────────────────────────────
+# ── Public entry points ────────────────────────────────────────────────────
 
-def quick_update(
+def _llm_result_to_proposed(
+    result: dict[str, Any],
+    emails: list[dict[str, Any]],
+    categories_config: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Convert a quick_update LLM response into a ProposedChanges-compatible dict.
+
+    Resolves source_email_index to message_id and thread_id, validates event types.
+    """
+    # Build type-to-domain lookup
+    all_type_to_domain: dict[str, str] = {}
+    for cat in categories_config:
+        for et in cat.get("event_types", []):
+            type_name = et["name"] if isinstance(et, dict) else et
+            all_type_to_domain[type_name] = cat["name"]
+
+    # Build email index → (message_id, thread_id) lookup
+    email_lookup: dict[int, dict] = {}
+    for i, e in enumerate(emails):
+        email_lookup[i] = e
+
+    events = []
+    for ev in result.get("events", []):
+        event_type = ev.get("type", "")
+        if event_type not in all_type_to_domain:
+            continue
+
+        source_idx = ev.get("source_email_index")
+        source_email_id = None
+        thread_id = None
+        if source_idx is not None and source_idx in email_lookup:
+            source_email_id = email_lookup[source_idx].get("message_id")
+            thread_id = email_lookup[source_idx].get("thread_id")
+
+        raw_actor = ev.get("actor") or ""
+        raw_target = ev.get("target") or ""
+        actor = ", ".join(raw_actor) if isinstance(raw_actor, list) else raw_actor
+        target = ", ".join(raw_target) if isinstance(raw_target, list) else raw_target
+
+        events.append({
+            "thread_id": thread_id,
+            "source_email_id": source_email_id,
+            "discussion_id": ev.get("discussion_id"),
+            "domain": ev.get("domain", ""),
+            "type": event_type,
+            "actor": actor,
+            "target": target,
+            "event_date": ev.get("event_date"),
+            "detail": ev.get("detail"),
+            "confidence": ev.get("confidence", 0.5),
+        })
+
+    new_discussions = []
+    for nd in result.get("new_discussions", []):
+        new_discussions.append({
+            "temp_id": nd.get("temp_id", ""),
+            "title": nd.get("title", "Untitled"),
+            "category": nd.get("category", "other"),
+            "parent_id": nd.get("parent_id"),
+            "participants": nd.get("participants", []),
+        })
+
+    discussion_updates = []
+    for upd in result.get("discussion_updates", []):
+        discussion_updates.append({
+            "discussion_id": upd.get("discussion_id"),
+            "state": upd.get("workflow_state"),
+            "summary": upd.get("summary"),
+            "milestones": upd.get("milestones", []),
+            "proposed_actions": upd.get("proposed_actions", []),
+        })
+
+    # Build thread links from events
+    thread_links = []
+    seen_links: set[tuple] = set()
+    for ev in events:
+        disc_id = ev.get("discussion_id")
+        tid = ev.get("thread_id")
+        if disc_id and tid and (disc_id, tid) not in seen_links:
+            thread_links.append({"discussion_id": disc_id, "thread_id": tid})
+            seen_links.add((disc_id, tid))
+
+    return {
+        "events": events,
+        "new_discussions": new_discussions,
+        "discussion_updates": discussion_updates,
+        "thread_links": thread_links,
+    }
+
+
+def quick_update_propose(
     conn: sqlite3.Connection,
     backend: LLMBackend,
     company_domain: str,
     categories_config: list[dict[str, Any]] | None = None,
     config_path: Path | None = None,
-) -> dict[str, int]:
-    """Process new emails for a company in a single LLM call.
+) -> tuple[dict[str, Any] | None, dict]:
+    """Run the LLM and return a ProposedChanges-compatible dict without writing to DB.
 
-    Returns dict with counts: events, new_discussions, updates, actions.
+    Returns (proposed_dict, company_info) or (None, company_info) if no new emails.
+    company_info has keys: id, name, domain.
     """
     if categories_config is None:
         categories_config = load_category_config(config_path)
 
-    # Resolve company
     company = fetchone(
         conn,
         "SELECT id, name, domain FROM companies WHERE domain = ? COLLATE NOCASE",
@@ -549,17 +686,17 @@ def quick_update(
     )
     if not company:
         logger.warning("Company not found: %s", company_domain)
-        return {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
+        return None, {}
 
-    # Get new emails
+    company_info = {"id": company["id"], "name": company["name"], "domain": company["domain"]}
+
     emails = _get_new_emails_for_company(conn, company["domain"])
     if not emails:
         logger.info("No new emails for %s", company_domain)
-        return {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
+        return None, company_info
 
     logger.info("Quick update for %s: %d new emails", company_domain, len(emails))
 
-    # Build context
     account_owner = _detect_account_owner(conn)
     domains_block = _build_domains_block(categories_config)
     discussions_context = _build_discussions_context(conn, company["id"], categories_config)
@@ -576,11 +713,42 @@ def quick_update(
         result = backend.complete_json(QUICK_UPDATE_SYSTEM, user_prompt)
     except Exception as e:
         logger.error("LLM call failed for quick update %s: %s", company_domain, e)
+        return None, company_info
+
+    proposed = _llm_result_to_proposed(result, emails, categories_config)
+    return proposed, company_info
+
+
+def quick_update(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    company_domain: str,
+    categories_config: list[dict[str, Any]] | None = None,
+    config_path: Path | None = None,
+) -> dict[str, int]:
+    """Process new emails for a company in a single LLM call.
+
+    Returns dict with counts: events, new_discussions, updates, actions.
+    Uses the unified propose-then-apply path with provenance tracking.
+    """
+    from email_manager.ai.agent_backend import ProposedChanges, apply_changes
+
+    proposed_dict, company_info = quick_update_propose(
+        conn, backend, company_domain,
+        categories_config=categories_config,
+        config_path=config_path,
+    )
+
+    if not company_info or not proposed_dict:
         return {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
 
-    # Save results
-    counts = _save_quick_update_results(
-        conn, result, company["id"], emails, backend.model_name, categories_config,
+    proposed = ProposedChanges(proposed_dict)
+    if proposed.is_empty:
+        return {"events": 0, "new_discussions": 0, "updates": 0, "actions": 0}
+
+    counts = apply_changes(
+        conn, proposed, company_info["id"], company_info["domain"],
+        mode="quick", model=backend.model_name,
     )
 
     logger.info(
