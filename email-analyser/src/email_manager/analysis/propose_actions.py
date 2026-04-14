@@ -364,6 +364,7 @@ def propose_actions(
     from email_manager.ai.agent_backend import ProposedChanges, apply_changes
     from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block, LAYER_ACTIONS
 
+    _started = datetime.now(timezone.utc).isoformat()
     proposed_dict = propose_actions_propose(
         conn, backend, categories_config=categories_config,
         config_path=config_path, limit=limit, force=force, clean=clean,
@@ -398,7 +399,7 @@ def propose_actions(
         counts = apply_changes(
             conn, proposed, cid, domain,
             mode="staged:propose_actions", model=backend.model_name,
-            prompt_hash=p_hash,
+            prompt_hash=p_hash, started_at=_started,
             token_tracker=getattr(backend, "token_tracker", None),
         )
         total_actions += counts.get("actions", 0)

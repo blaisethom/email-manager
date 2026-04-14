@@ -519,6 +519,7 @@ def analyse_discussions(
     from email_manager.ai.agent_backend import ProposedChanges, apply_changes
     from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block, LAYER_ANALYSIS
 
+    _started = datetime.now(timezone.utc).isoformat()
     proposed_dict, feedback_ids = analyse_discussions_propose(
         conn, backend, categories_config=categories_config,
         config_path=config_path, limit=limit, force=force, clean=clean,
@@ -553,7 +554,7 @@ def analyse_discussions(
         counts = apply_changes(
             conn, proposed, cid, domain,
             mode="staged:analyse_discussions", model=backend.model_name,
-            prompt_hash=p_hash,
+            prompt_hash=p_hash, started_at=_started,
             token_tracker=getattr(backend, "token_tracker", None),
         )
         total_updates += counts.get("updates", 0)

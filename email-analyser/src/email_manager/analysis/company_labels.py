@@ -316,6 +316,7 @@ def label_companies(
             account_owner,
         )
 
+        _started = datetime.now(timezone.utc).isoformat()
         try:
             result = backend.complete_json(system_prompt, user_prompt)
         except Exception:
@@ -347,7 +348,7 @@ def label_companies(
         apply_changes(
             conn, proposed, company["id"], company["domain"],
             mode="staged:label_companies", model=backend.model_name,
-            prompt_hash=p_hash,
+            prompt_hash=p_hash, started_at=_started,
             token_tracker=getattr(backend, "token_tracker", None),
         )
         labelled += 1

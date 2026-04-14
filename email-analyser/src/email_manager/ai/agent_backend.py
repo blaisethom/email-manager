@@ -145,6 +145,7 @@ def apply_changes(
     token_tracker: Any | None = None,
     run_id: int | None = None,
     prompt_hash: str | None = None,
+    started_at: str | None = None,
 ) -> dict[str, int]:
     """Apply a proposed changeset to the database. Returns counts.
 
@@ -189,7 +190,7 @@ def apply_changes(
             """INSERT INTO processing_runs
                (company_domain, mode, model, started_at, parent_run_id, email_cutoff_date, prompt_hash)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (company_domain, mode, model or "unknown", now, parent_run_id, email_cutoff, prompt_hash),
+            (company_domain, mode, model or "unknown", started_at or now, parent_run_id, email_cutoff, prompt_hash),
         )
         run_id = cursor.lastrowid
 
@@ -504,14 +505,15 @@ def apply_changes(
                     (run_id, mode, model or "unknown", usage.input_tokens, usage.output_tokens, now),
                 )
 
-    # Complete the processing run record
+    # Complete the processing run record (fresh timestamp for actual completion time)
+    completed_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """UPDATE processing_runs SET
            completed_at = ?, events_created = ?, discussions_created = ?,
            discussions_updated = ?, actions_proposed = ?,
            input_tokens = ?, output_tokens = ?, llm_calls = ?
            WHERE id = ?""",
-        (now, counts["events"], counts["new_discussions"],
+        (completed_at, counts["events"], counts["new_discussions"],
          counts["updates"], counts["actions"],
          total_input, total_output, total_calls, run_id),
     )

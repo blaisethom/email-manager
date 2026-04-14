@@ -1102,6 +1102,7 @@ def extract_events(
     from email_manager.ai.agent_backend import ProposedChanges, apply_changes
     from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block, LAYER_EVENTS
 
+    _started = datetime.now(timezone.utc).isoformat()
     proposed_dict = extract_events_propose(
         conn, backend, categories_config=categories_config,
         config_path=config_path, limit=limit, force=force, clean=clean,
@@ -1126,7 +1127,7 @@ def extract_events(
             conn, proposed, cid, company_domain,
             mode="staged:extract_events", model=backend.model_name,
             token_tracker=getattr(backend, "token_tracker", None),
-            prompt_hash=p_hash,
+            prompt_hash=p_hash, started_at=_started,
         )
         return counts.get("events", 0)
 
@@ -1159,7 +1160,7 @@ def extract_events(
         counts = apply_changes(
             conn, proposed, cid, domain,
             mode="staged:extract_events", model=backend.model_name,
-            prompt_hash=p_hash,
+            prompt_hash=p_hash, started_at=_started,
             token_tracker=getattr(backend, "token_tracker", None),
         )
         total_events += counts.get("events", 0)
