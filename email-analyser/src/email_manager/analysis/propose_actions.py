@@ -249,9 +249,13 @@ def propose_actions_propose(
             d for d in discussions
             if not fetchone(
                 conn,
-                """SELECT 1 FROM proposed_actions
-                   WHERE discussion_id = ? AND created_at > datetime('now', '-1 day')""",
-                (d["id"],),
+                """SELECT 1 FROM proposed_actions pa
+                   WHERE pa.discussion_id = ?
+                     AND pa.created_at > COALESCE(
+                         (SELECT MAX(m.last_evaluated_at) FROM milestones m WHERE m.discussion_id = ?),
+                         '1970-01-01'
+                     )""",
+                (d["id"], d["id"]),
             )
         ]
 
