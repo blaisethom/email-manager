@@ -115,6 +115,12 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
     # json_group_array(x) → json_agg(x)
     out = re.sub(r'json_group_array\(', 'json_agg(', out, flags=re.IGNORECASE)
 
+    # SQLite MIN(a, b) / MAX(a, b) as scalar two-value functions → LEAST / GREATEST
+    # Only match the two-arg form (not aggregate MIN/MAX which take one arg).
+    # Use [^,)]+ for first arg to avoid matching across separate function calls.
+    out = re.sub(r'\bMIN\(([^,)]+),\s*([^)]+)\)', r'LEAST(\1, \2)', out, flags=re.IGNORECASE)
+    out = re.sub(r'\bMAX\(([^,)]+),\s*([^)]+)\)', r'GREATEST(\1, \2)', out, flags=re.IGNORECASE)
+
     # SQLite ? params → PostgreSQL %s params (skip for DDL)
     if not is_ddl:
         out = _translate_params(out)
