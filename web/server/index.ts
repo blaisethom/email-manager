@@ -632,11 +632,38 @@ app.get('/api/discussions/:id/proposed-actions', async (req: Request, res: Respo
 
 app.get('/api/threads/:threadId/emails', async (req: Request, res: Response) => {
   const threadId = decodeURIComponent(req.params.threadId);
+  const discussionId = req.query.discussion_id ? parseInt(req.query.discussion_id as string, 10) : null;
 
-  const emails = await db.query(
-    `SELECT id, message_id, subject, from_address, from_name, to_addresses, cc_addresses, date, body_text
-     FROM emails WHERE thread_id = ? ORDER BY date ASC`, threadId
-  );
+  let emails: any[];
+  if (discussionId) {
+    // When viewing from a discussion context, filter to emails that are relevant:
+    // either referenced by events in this discussion, or involving the company's domain
+    const disc = await db.queryOne(
+      'SELECT d.company_id, c.domain FROM discussions d LEFT JOIN companies c ON c.id = d.company_id WHERE d.id = ?',
+      discussionId
+    );
+    if (disc && disc.domain) {
+      const like = `%@${disc.domain}%`;
+      emails = await db.query(
+        `SELECT id, message_id, subject, from_address, from_name, to_addresses, cc_addresses, date, body_text
+         FROM emails WHERE thread_id = ? AND (
+           from_address LIKE ? OR to_addresses LIKE ? OR cc_addresses LIKE ?
+           OR message_id IN (SELECT source_email_id FROM event_ledger WHERE discussion_id = ? AND source_email_id IS NOT NULL)
+         ) ORDER BY date ASC`,
+        threadId, like, like, like, discussionId
+      );
+    } else {
+      emails = await db.query(
+        `SELECT id, message_id, subject, from_address, from_name, to_addresses, cc_addresses, date, body_text
+         FROM emails WHERE thread_id = ? ORDER BY date ASC`, threadId
+      );
+    }
+  } else {
+    emails = await db.query(
+      `SELECT id, message_id, subject, from_address, from_name, to_addresses, cc_addresses, date, body_text
+       FROM emails WHERE thread_id = ? ORDER BY date ASC`, threadId
+    );
+  }
 
   const enriched = emails.map((e: any) => ({
     ...e,

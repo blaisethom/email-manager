@@ -129,8 +129,9 @@ export const api = {
     return fetchJson<ProposedAction[]>(`${BASE}/discussions/${discussionId}/proposed-actions`);
   },
 
-  getThreadEmails(threadId: string): Promise<{ emails: ThreadEmail[] }> {
-    return fetchJson(`${BASE}/threads/${encodeURIComponent(threadId)}/emails`);
+  getThreadEmails(threadId: string, discussionId?: number): Promise<{ emails: ThreadEmail[] }> {
+    const qs = discussionId ? `?discussion_id=${discussionId}` : '';
+    return fetchJson(`${BASE}/threads/${encodeURIComponent(threadId)}/emails${qs}`);
   },
 
   getCalendarEvents(params: CalendarEventsParams = {}): Promise<CalendarEventsResponse> {

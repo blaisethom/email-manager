@@ -373,14 +373,14 @@ function EmailBody({ body }: { body: string }) {
   );
 }
 
-function ThreadModal({ thread, onClose, highlightMessageId }: { thread: Thread; onClose: () => void; highlightMessageId?: string | null }) {
+function ThreadModal({ thread, onClose, highlightMessageId, discussionId }: { thread: Thread; onClose: () => void; highlightMessageId?: string | null; discussionId?: number }) {
   const [emails, setEmails] = useState<ThreadEmail[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
-    api.getThreadEmails(thread.thread_id)
+    api.getThreadEmails(thread.thread_id, discussionId)
       .then((data) => {
         setEmails(data.emails);
         // Auto-expand the highlighted email, or the last one
@@ -894,6 +894,7 @@ export default function DiscussionDetailPage() {
         <ThreadModal
           thread={selectedThread}
           highlightMessageId={highlightMessageId}
+          discussionId={id ? parseInt(id, 10) : undefined}
           onClose={() => { setSelectedThread(null); setHighlightMessageId(null); }}
         />
       )}
