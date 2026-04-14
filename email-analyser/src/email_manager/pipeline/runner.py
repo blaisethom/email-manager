@@ -97,6 +97,10 @@ def run_pipeline(
     last_seen_before: str | None = None,
     dry_run: bool = False,
     concurrency: int = 1,
+    only_new_emails: bool = False,
+    only_stale_prompt: bool = False,
+    only_stale_model: bool = False,
+    only_unprocessed: bool = False,
 ) -> dict[str, int]:
     if console is None:
         console = Console()
@@ -199,10 +203,135 @@ def run_pipeline(
             domains = domains[:limit]
         return domains
 
+    def _filter_by_staleness(domains: list[str]) -> list[str]:
+        """Post-filter domains by staleness criteria (new emails, prompt change, model change, unprocessed)."""
+        from email_manager.db import fetchall, fetchone
+        from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
+
+        # Determine which modes to check based on requested stages
+        modes_to_check = []
+        for s in stage_names:
+            if s not in GLOBAL_STAGES:
+                modes_to_check.append(f"staged:{s}")
+
+        # Compute current prompt hashes for comparison
+        current_hashes: dict[str, str] = {}
+        if only_stale_prompt and backend:
+            for s in stage_names:
+                if s == "extract_events":
+                    from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM
+                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
+                        EXTRACT_EVENTS_SYSTEM + format_rules_block(conn, "events"))
+                elif s == "analyse_discussions":
+                    from email_manager.analysis.analyse_discussions import ANALYSE_SYSTEM
+                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
+                        ANALYSE_SYSTEM + format_rules_block(conn, "discussion_updates"))
+                elif s == "propose_actions":
+                    from email_manager.analysis.propose_actions import PROPOSE_SYSTEM
+                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
+                        PROPOSE_SYSTEM + format_rules_block(conn, "actions"))
+                elif s == "label_companies":
+                    from email_manager.analysis.company_labels import _build_system_prompt, load_label_config
+                    labels_config = load_label_config(getattr(config, "company_labels_path", None))
+                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
+                        _build_system_prompt(labels_config) + format_rules_block(conn, "labels"))
+                elif s == "discover_discussions":
+                    from email_manager.analysis.discover_discussions import DISCOVER_SYSTEM
+                    current_hashes[f"staged:{s}"] = compute_prompt_hash(DISCOVER_SYSTEM)
+
+        current_model = backend.model_name if backend else None
+
+        filtered = []
+        for domain in domains:
+            # Get latest run for each relevant mode
+            latest_runs = fetchall(
+                conn,
+                """SELECT mode, model, prompt_hash, email_cutoff_date
+                   FROM processing_runs
+                   WHERE company_domain = ?
+                   ORDER BY id DESC""",
+                (domain,),
+            )
+            # Index by mode (first occurrence = latest)
+            by_mode: dict[str, dict] = {}
+            for r in latest_runs:
+                if r["mode"] not in by_mode:
+                    by_mode[r["mode"]] = dict(r) if hasattr(r, 'keys') else r
+
+            include = False
+
+            if only_unprocessed:
+                # Include if any requested stage has no runs
+                for mode in modes_to_check:
+                    if mode not in by_mode:
+                        include = True
+                        break
+
+            if only_new_emails and not include:
+                # Include if company has emails newer than latest email_cutoff_date
+                latest_cutoff = None
+                for mode in modes_to_check:
+                    run = by_mode.get(mode)
+                    if run and run.get("email_cutoff_date"):
+                        if latest_cutoff is None or run["email_cutoff_date"] > latest_cutoff:
+                            latest_cutoff = run["email_cutoff_date"]
+                if latest_cutoff is None:
+                    include = True  # never processed
+                else:
+                    like = f"%@{domain}%"
+                    newer = fetchone(
+                        conn,
+                        "SELECT 1 FROM emails WHERE (from_address LIKE ? OR to_addresses LIKE ?) AND date > ? LIMIT 1",
+                        (like, like, latest_cutoff),
+                    )
+                    if newer:
+                        include = True
+
+            if only_stale_prompt and not include:
+                # Include if any stage's current prompt hash differs from latest run
+                for mode, cur_hash in current_hashes.items():
+                    run = by_mode.get(mode)
+                    if not run or run.get("prompt_hash") != cur_hash:
+                        include = True
+                        break
+
+            if only_stale_model and not include and current_model:
+                # Include if any stage was last run with a different model
+                for mode in modes_to_check:
+                    run = by_mode.get(mode)
+                    if run and run.get("model") != current_model:
+                        include = True
+                        break
+
+            if include:
+                filtered.append(domain)
+
+        return filtered
+
     # Resolve companies if filtering by label, stale_before, last_seen, or company_list
+    any_staleness_filter = only_new_emails or only_stale_prompt or only_stale_model or only_unprocessed
     target_domains = None
-    if (label or stale_before or last_seen_after or last_seen_before or company_list) and not company:
+    if (label or stale_before or last_seen_after or last_seen_before or company_list or any_staleness_filter) and not company:
         target_domains = _resolve_company_domains()
+        # If no other filters narrowed it, start with all companies for staleness filtering
+        if target_domains is None and any_staleness_filter:
+            from email_manager.db import fetchall as _fa_all
+            target_domains = [r[0] for r in _fa_all(
+                conn, "SELECT domain FROM companies ORDER BY email_count DESC",
+            )]
+        if target_domains is not None and any_staleness_filter:
+            before_count = len(target_domains)
+            target_domains = _filter_by_staleness(target_domains)
+            reasons = []
+            if only_new_emails:
+                reasons.append("new emails")
+            if only_stale_prompt:
+                reasons.append("stale prompt")
+            if only_stale_model:
+                reasons.append("stale model")
+            if only_unprocessed:
+                reasons.append("unprocessed")
+            console.print(f"[bold]Staleness filter ({', '.join(reasons)}): {before_count} → {len(target_domains)} companies[/bold]")
         if target_domains is not None:
             console.print(f"[bold]Targeting {len(target_domains)} companies[/bold]")
 

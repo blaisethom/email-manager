@@ -345,8 +345,12 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 @click.option("--last-seen-before", default=None, help="Only process companies with last email activity before this date (YYYY-MM-DD)")
 @click.option("--dry-run", is_flag=True, help="Show which companies would be processed without running anything")
 @click.option("--concurrency", type=int, default=1, show_default=True, help="Max concurrent LLM calls within stages")
+@click.option("--new-emails", is_flag=True, help="Only process companies with emails newer than their last analysis")
+@click.option("--stale-prompt", is_flag=True, help="Only process companies where the prompt has changed since last run")
+@click.option("--stale-model", is_flag=True, help="Only process companies last analysed with a different model")
+@click.option("--unprocessed", is_flag=True, help="Only process companies with no prior runs for the requested stages")
 @click.pass_context
-def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], exclude_file: str | None, company_file: str | None, contact: str | None, per_company: bool, stale_before: str | None, last_seen_after: str | None, last_seen_before: str | None, dry_run: bool, concurrency: int) -> None:
+def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], exclude_file: str | None, company_file: str | None, contact: str | None, per_company: bool, stale_before: str | None, last_seen_after: str | None, last_seen_before: str | None, dry_run: bool, concurrency: int, new_emails: bool, stale_prompt: bool, stale_model: bool, unprocessed: bool) -> None:
     """Run AI analysis pipeline on synced emails.
 
     Pipeline stages (in order):
@@ -363,6 +367,13 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
 
     Use --stage/-s to run specific stages. Use --company/-c to scope to one
     company. Use --clean to delete previous output before reprocessing.
+
+    \b
+    Staleness filters (combinable, any match includes the company):
+      --new-emails     Companies with emails since their last analysis
+      --stale-prompt   Companies where the prompt changed (e.g. new learned rules)
+      --stale-model    Companies last analysed with a different model
+      --unprocessed    Companies with no prior runs for the requested stages
 
     Example: Rebuild analysis for one company from scratch:
       email-analyser analyse -s extract_events -s discover_discussions \\
@@ -383,7 +394,7 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
 
     companies_from_file = _read_company_file(company_file) if company_file else []
 
-    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, company_list=companies_from_file or None, label=label, exclude=exclude_list or None, contact=contact, per_company=per_company, stale_before=stale_before, last_seen_after=last_seen_after, last_seen_before=last_seen_before, dry_run=dry_run, concurrency=concurrency)
+    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, company_list=companies_from_file or None, label=label, exclude=exclude_list or None, contact=contact, per_company=per_company, stale_before=stale_before, last_seen_after=last_seen_after, last_seen_before=last_seen_before, dry_run=dry_run, concurrency=concurrency, only_new_emails=new_emails, only_stale_prompt=stale_prompt, only_stale_model=stale_model, only_unprocessed=unprocessed)
 
 
 QUICK_UPDATE_THRESHOLD = 10  # Max new threads before switching to staged pipeline

@@ -107,6 +107,13 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
     # strftime('%...', 'now') → CURRENT_TIMESTAMP
     out = _STRFTIME_NOW_RE.sub("CURRENT_TIMESTAMP", out)
 
+    # datetime('now', '-N day/hour/...') → NOW() - INTERVAL 'N day/hour/...'
+    out = re.sub(
+        r"datetime\('now',\s*'(-?\d+)\s+(day|hour|minute|second)s?'\)",
+        r"(NOW() + INTERVAL '\1 \2')",
+        out, flags=re.IGNORECASE,
+    )
+
     # INTEGER PRIMARY KEY → SERIAL PRIMARY KEY (for auto-increment)
     out = _INTEGER_PRIMARY_KEY_RE.sub("SERIAL PRIMARY KEY", out)
     out = _AUTOINCREMENT_RE.sub("", out)
