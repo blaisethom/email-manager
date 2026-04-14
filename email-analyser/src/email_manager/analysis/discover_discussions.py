@@ -829,9 +829,13 @@ def discover_discussions(
             continue
 
         # Process in batches to avoid CLI timeout on large event sets
-        event_batches = [all_events[i:i + DISCOVER_BATCH_SIZE]
-                         for i in range(0, len(all_events), DISCOVER_BATCH_SIZE)]
+        event_batches = [all_events[j:j + DISCOVER_BATCH_SIZE]
+                         for j in range(0, len(all_events), DISCOVER_BATCH_SIZE)]
         discussions: list[dict] = []
+
+        if len(event_batches) > 1 and on_progress:
+            on_progress(i, len(companies),
+                        f"{company['name']} ({len(all_events)} events, {len(event_batches)} batches)")
 
         for batch_idx, batch_events in enumerate(event_batches):
             existing = _get_existing_discussions_for_company(conn, company["id"])
@@ -845,9 +849,15 @@ def discover_discussions(
                 sub_discussion_categories=sub_discussion_categories or None,
             )
 
+            if on_progress:
+                batch_label = (f"{company['name']} batch {batch_idx + 1}/{len(event_batches)}"
+                               if len(event_batches) > 1 else company["name"])
+                on_progress(i, len(companies), batch_label)
+
             if len(event_batches) > 1:
-                logger.info("Company %s: discover batch %d/%d (%d events)",
-                            company["domain"], batch_idx + 1, len(event_batches), len(batch_events))
+                logger.info("Company %s: discover batch %d/%d (%d events, %d existing discussions)",
+                            company["domain"], batch_idx + 1, len(event_batches),
+                            len(batch_events), len(existing))
 
             try:
                 result = backend.complete_json(DISCOVER_SYSTEM, user_prompt)
