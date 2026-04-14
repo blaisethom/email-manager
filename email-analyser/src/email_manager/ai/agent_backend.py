@@ -19,16 +19,21 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ResultMessage,
-    AssistantMessage,
-    TextBlock,
-    ToolUseBlock,
-    create_sdk_mcp_server,
-    query,
-    tool,
-)
+# Lazy import — claude_agent_sdk is only needed for agent mode, not for
+# ProposedChanges/apply_changes which are used by all pipeline stages.
+def _import_agent_sdk():
+    from claude_agent_sdk import (
+        ClaudeAgentOptions,
+        ResultMessage,
+        AssistantMessage,
+        TextBlock,
+        ToolUseBlock,
+        create_sdk_mcp_server,
+        query,
+        tool,
+    )
+    return (ClaudeAgentOptions, ResultMessage, AssistantMessage, TextBlock,
+            ToolUseBlock, create_sdk_mcp_server, query, tool)
 
 from email_manager.ai.base import TokenTracker, TokenUsage
 from email_manager.analysis.events import (
@@ -520,6 +525,7 @@ def apply_changes(
 
 def _build_tools(conn: sqlite3.Connection, company_domain: str, company_id: int):
     """Build MCP tools: read-only DB access + one propose_changes output tool."""
+    (_, _, _, _, _, create_sdk_mcp_server, query, tool) = _import_agent_sdk()
 
     @tool(
         "get_new_emails",
@@ -927,6 +933,9 @@ async def _run_agent_for_company(
     model: str | None = None,
 ) -> tuple[ProposedChanges | None, str]:
     """Run an agent session. Returns (proposed_changes, summary_text)."""
+    (ClaudeAgentOptions, ResultMessage, AssistantMessage, TextBlock,
+     ToolUseBlock, create_sdk_mcp_server, query, _tool) = _import_agent_sdk()
+
     tools, changeset = _build_tools(conn, company_domain, company_id)
 
     server = create_sdk_mcp_server(
