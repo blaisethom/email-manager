@@ -372,8 +372,17 @@ def run_pipeline(
             results[stage_name] = count
 
         for i, domain in enumerate(target_domains):
+            # Show company header with latest email date
+            from email_manager.db import fetchone as _fo
+            like = f"%@{domain}%"
+            latest_email = _fo(
+                conn,
+                "SELECT MAX(date) as d FROM emails WHERE from_address LIKE ? OR to_addresses LIKE ?",
+                (like, like),
+            )
+            latest_str = f"  latest email: {latest_email['d'][:10]}" if latest_email and latest_email["d"] else ""
             console.print(f"\n{'='*60}")
-            console.print(f"  [bold cyan]Company {i+1}/{len(target_domains)}: {domain}[/bold cyan]")
+            console.print(f"  [bold cyan]Company {i+1}/{len(target_domains)}: {domain}[/bold cyan]{latest_str}")
             console.print(f"{'='*60}")
 
             for stage_name in per_co_stages:
