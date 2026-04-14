@@ -79,6 +79,53 @@ def _run_stage(
 GLOBAL_STAGES = {"extract_base"}
 
 
+def _is_stage_stale(
+    conn: Any, domain: str, stage: str, backend: Any,
+    check_model: bool, check_prompt: bool,
+) -> bool:
+    """Check if a specific stage needs forcing for a specific company."""
+    if not check_model and not check_prompt:
+        return False
+
+    from email_manager.db import fetchone
+    mode = f"staged:{stage}"
+    run = fetchone(
+        conn,
+        "SELECT model, prompt_hash FROM processing_runs WHERE company_domain = ? AND mode = ? ORDER BY id DESC LIMIT 1",
+        (domain, mode),
+    )
+    if not run:
+        return True  # never run = stale
+
+    if check_model and backend:
+        if run.get("model") != backend.model_name:
+            return True
+
+    if check_prompt and run.get("prompt_hash"):
+        from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
+        current_hash = None
+        if stage == "extract_events":
+            from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM
+            current_hash = compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + format_rules_block(conn, "events"))
+        elif stage == "analyse_discussions":
+            from email_manager.analysis.analyse_discussions import ANALYSE_SYSTEM
+            current_hash = compute_prompt_hash(ANALYSE_SYSTEM + format_rules_block(conn, "discussion_updates"))
+        elif stage == "propose_actions":
+            from email_manager.analysis.propose_actions import PROPOSE_SYSTEM
+            current_hash = compute_prompt_hash(PROPOSE_SYSTEM + format_rules_block(conn, "actions"))
+        elif stage == "label_companies":
+            from email_manager.analysis.company_labels import _build_system_prompt, load_label_config
+            labels_config = load_label_config()
+            current_hash = compute_prompt_hash(_build_system_prompt(labels_config) + format_rules_block(conn, "labels"))
+        elif stage == "discover_discussions":
+            from email_manager.analysis.discover_discussions import DISCOVER_SYSTEM
+            current_hash = compute_prompt_hash(DISCOVER_SYSTEM)
+        if current_hash and current_hash != run["prompt_hash"]:
+            return True
+
+    return False
+
+
 def run_pipeline(
     config: Config,
     stages: list[str] | None = None,
@@ -385,15 +432,15 @@ def run_pipeline(
             console.print(f"  [bold cyan]Company {i+1}/{len(target_domains)}: {domain}[/bold cyan]{latest_str}")
             console.print(f"{'='*60}")
 
-            # Force per-company stages when staleness filters selected this company
-            stage_force = force or any_staleness_filter
             for stage_name in per_co_stages:
+                # Only force stages that are actually stale for this company
+                sf = force or _is_stage_stale(conn, domain, stage_name, backend,
+                                              only_stale_model, only_stale_prompt)
                 count = _run_stage(stage_name, conn, backend, config, console,
-                                   limit=None, force=stage_force, clean=clean, company=domain, concurrency=concurrency)
+                                   limit=None, force=sf, clean=clean, company=domain, concurrency=concurrency)
                 results[stage_name] = results.get(stage_name, 0) + max(count, 0)
     elif target_domains is not None and not per_company:
         # Stage-first mode with resolved company list
-        stage_force = force or any_staleness_filter
         for stage_name in stage_names:
             if stage_name in GLOBAL_STAGES:
                 count = _run_stage(stage_name, conn, backend, config, console,
@@ -401,8 +448,10 @@ def run_pipeline(
             else:
                 count = 0
                 for domain in target_domains:
+                    sf = force or _is_stage_stale(conn, domain, stage_name, backend,
+                                                  only_stale_model, only_stale_prompt)
                     c = _run_stage(stage_name, conn, backend, config, console,
-                                   limit=None, force=stage_force, clean=clean, company=domain, concurrency=concurrency)
+                                   limit=None, force=sf, clean=clean, company=domain, concurrency=concurrency)
                     count += max(c, 0)
             results[stage_name] = count
     else:
