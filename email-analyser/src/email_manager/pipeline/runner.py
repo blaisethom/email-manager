@@ -310,10 +310,6 @@ def run_pipeline(
 
     # Resolve companies if filtering by label, stale_before, last_seen, or company_list
     any_staleness_filter = only_new_emails or only_stale_prompt or only_stale_model or only_unprocessed
-    # When staleness filters selected a company, force reprocessing — the whole
-    # point is to re-run despite the per-stage skip logic thinking nothing changed.
-    if any_staleness_filter:
-        force = True
     target_domains = None
     if (label or stale_before or last_seen_after or last_seen_before or company_list or any_staleness_filter) and not company:
         target_domains = _resolve_company_domains()
@@ -389,12 +385,15 @@ def run_pipeline(
             console.print(f"  [bold cyan]Company {i+1}/{len(target_domains)}: {domain}[/bold cyan]{latest_str}")
             console.print(f"{'='*60}")
 
+            # Force per-company stages when staleness filters selected this company
+            stage_force = force or any_staleness_filter
             for stage_name in per_co_stages:
                 count = _run_stage(stage_name, conn, backend, config, console,
-                                   limit=None, force=force, clean=clean, company=domain, concurrency=concurrency)
+                                   limit=None, force=stage_force, clean=clean, company=domain, concurrency=concurrency)
                 results[stage_name] = results.get(stage_name, 0) + max(count, 0)
     elif target_domains is not None and not per_company:
         # Stage-first mode with resolved company list
+        stage_force = force or any_staleness_filter
         for stage_name in stage_names:
             if stage_name in GLOBAL_STAGES:
                 count = _run_stage(stage_name, conn, backend, config, console,
@@ -403,7 +402,7 @@ def run_pipeline(
                 count = 0
                 for domain in target_domains:
                     c = _run_stage(stage_name, conn, backend, config, console,
-                                   limit=None, force=force, clean=clean, company=domain, concurrency=concurrency)
+                                   limit=None, force=stage_force, clean=clean, company=domain, concurrency=concurrency)
                     count += max(c, 0)
             results[stage_name] = count
     else:
