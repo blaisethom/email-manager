@@ -107,10 +107,10 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
     # strftime('%...', 'now') → CURRENT_TIMESTAMP
     out = _STRFTIME_NOW_RE.sub("CURRENT_TIMESTAMP", out)
 
-    # datetime('now', '-N day/hour/...') → NOW() - INTERVAL 'N day/hour/...'
+    # datetime('now', '-N day/hour/...') → text-cast timestamp for comparison with TEXT columns
     out = re.sub(
         r"datetime\('now',\s*'(-?\d+)\s+(day|hour|minute|second)s?'\)",
-        r"(NOW() + INTERVAL '\1 \2')",
+        r"CAST((NOW() + INTERVAL '\1 \2') AS TEXT)",
         out, flags=re.IGNORECASE,
     )
 
