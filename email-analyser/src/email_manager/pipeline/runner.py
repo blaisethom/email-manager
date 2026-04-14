@@ -76,7 +76,7 @@ def _run_stage(
 
 
 # Stages that should run once globally in per-company mode, not per company
-GLOBAL_STAGES = {"extract_base", "fetch_homepages", "label_companies"}
+GLOBAL_STAGES = {"extract_base"}
 
 
 def run_pipeline(
@@ -127,6 +127,9 @@ def run_pipeline(
         console.print(f"Company list: [bold]{len(company_list)} companies from file[/bold]")
     if label:
         console.print(f"Scoped to label: [bold]{label}[/bold]")
+        if "label_companies" in stage_names:
+            console.print("[yellow]  Note: --label filter uses existing labels to select companies. "
+                          "label_companies will re-label those companies but won't discover new ones.[/yellow]")
     if stale_before:
         console.print(f"Stale before: [bold]{stale_before}[/bold]")
     if last_seen_after:
