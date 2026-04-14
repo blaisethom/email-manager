@@ -253,15 +253,16 @@ def _get_threads_to_process(
         params = [company_label]
 
     if force:
-        sql = f"""SELECT DISTINCT e.thread_id FROM emails e
+        sql = f"""SELECT e.thread_id FROM emails e
                  WHERE e.thread_id IS NOT NULL
                  {company_filter}
-                 ORDER BY e.date DESC"""
+                 GROUP BY e.thread_id
+                 ORDER BY MAX(e.date) DESC"""
     else:
         # Threads that either:
         # 1. Have no events yet, OR
         # 2. Have new emails since the last extraction
-        sql = f"""SELECT DISTINCT e.thread_id
+        sql = f"""SELECT e.thread_id
                  FROM emails e
                  WHERE e.thread_id IS NOT NULL
                    AND (
@@ -280,7 +281,8 @@ def _get_threads_to_process(
                        )
                    )
                  {company_filter}
-                 ORDER BY e.date DESC"""
+                 GROUP BY e.thread_id
+                 ORDER BY MAX(e.date) DESC"""
 
     if limit:
         sql += f" LIMIT {limit}"

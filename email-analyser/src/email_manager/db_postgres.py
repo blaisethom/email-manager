@@ -173,6 +173,9 @@ class PostgresRow:
     def __contains__(self, key: str) -> bool:
         return key in self._data
 
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
     def keys(self) -> list[str]:
         return list(self._data.keys())
 
