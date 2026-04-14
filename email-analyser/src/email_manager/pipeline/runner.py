@@ -188,7 +188,7 @@ def run_pipeline(
         where = " AND ".join(conditions)
         rows = fetchall(
             conn,
-            f"SELECT DISTINCT c.domain FROM companies c WHERE {where} ORDER BY c.email_count DESC",
+            f"SELECT c.domain FROM companies c WHERE {where} GROUP BY c.domain ORDER BY MAX(c.email_count) DESC",
             tuple(params),
         )
         domains = [r[0] for r in rows]
