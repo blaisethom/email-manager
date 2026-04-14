@@ -170,8 +170,11 @@ def _get_companies_with_unassigned_events(
                  AND el.thread_id IN (
                      SELECT DISTINCT e.thread_id FROM emails e
                      WHERE e.from_address LIKE ? OR e.to_addresses LIKE ?
-                 )""",
-            (*cutoff_params, like, like),
+                 )
+                 AND (el.run_id IS NULL OR el.run_id IN (
+                     SELECT id FROM processing_runs WHERE company_domain = ?
+                 ))""",
+            (*cutoff_params, like, like, company_domain),
         )
         return [{"id": row["id"], "name": row["name"], "domain": row["domain"],
                  "event_count": cnt[0]}] if cnt[0] > 0 else []
@@ -219,7 +222,13 @@ def _get_companies_with_unassigned_events(
 def _get_events_for_company(
     conn: sqlite3.Connection, company_domain: str, max_events: int = 50,
 ) -> list[dict[str, Any]]:
-    """Get unassigned events related to a company domain, limited to avoid huge prompts."""
+    """Get unassigned events related to a company domain, limited to avoid huge prompts.
+
+    Only includes events that were either:
+    - Extracted during this company's own processing run, OR
+    - Extracted from threads where this company's domain appears in from/to/cc
+      AND the extracting run was for this same company (prevents cross-company leakage)
+    """
     like_pattern = f"%@{company_domain}%"
     rows = fetchall(
         conn,
@@ -228,9 +237,12 @@ def _get_events_for_company(
            JOIN emails e ON el.source_email_id = e.message_id
            WHERE el.discussion_id IS NULL
              AND (e.from_address LIKE ? OR e.to_addresses LIKE ? OR e.cc_addresses LIKE ?)
+             AND (el.run_id IS NULL OR el.run_id IN (
+                 SELECT id FROM processing_runs WHERE company_domain = ?
+             ))
            ORDER BY el.event_date DESC
            LIMIT ?""",
-        (like_pattern, like_pattern, like_pattern, max_events),
+        (like_pattern, like_pattern, like_pattern, company_domain, max_events),
     )
     # Return in chronological order
     result = [dict(r) for r in rows]
