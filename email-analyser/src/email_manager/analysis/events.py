@@ -322,6 +322,7 @@ def _process_thread(
     domains_block: str,
     account_owner: str | None,
     system_prompt: str | None = None,
+    company_domain: str | None = None,
 ) -> list[dict[str, Any]]:
     """Extract events from a single thread, chunking large threads."""
     all_emails = fetchall(
@@ -333,6 +334,18 @@ def _process_thread(
     )
     if not all_emails:
         return []
+
+    # When processing for a specific company, filter to emails involving that company.
+    # This prevents multi-party threads (e.g. "Introductions" with 6 domains) from
+    # polluting the extraction with irrelevant emails.
+    if company_domain and len(all_emails) > 3:
+        like = f"@{company_domain}"
+        filtered = [e for e in all_emails
+                    if like in (e["from_address"] or "").lower()
+                    or like in (e["to_addresses"] or "").lower()
+                    or like in (e["cc_addresses"] or "").lower()]
+        if filtered:
+            all_emails = filtered
 
     # Get participant emails for calendar context (from all emails)
     participant_emails: set[str] = set()
@@ -928,6 +941,16 @@ def extract_events_propose(
             if not all_emails:
                 return []
 
+            # Filter to company-relevant emails in multi-party threads
+            if company_domain and len(all_emails) > 3:
+                co_like = f"@{company_domain}"
+                filtered = [e for e in all_emails
+                            if co_like in (e["from_address"] or "").lower()
+                            or co_like in (e["to_addresses"] or "").lower()
+                            or co_like in (e["cc_addresses"] or "").lower()]
+                if filtered:
+                    all_emails = filtered
+
             participant_emails: set[str] = set()
             for e in all_emails:
                 for field in ("from_address", "to_addresses", "cc_addresses"):
@@ -1062,7 +1085,7 @@ def extract_events_propose(
 
             events = _process_thread(
                 conn, backend, thread_id, categories_config, domains_block, account_owner,
-                system_prompt=system_prompt,
+                system_prompt=system_prompt, company_domain=company_domain,
             )
             all_events.extend(events)
 

@@ -636,8 +636,9 @@ app.get('/api/threads/:threadId/emails', async (req: Request, res: Response) => 
 
   let emails: any[];
   if (discussionId) {
-    // When viewing from a discussion context, filter to emails that are relevant:
-    // either referenced by events in this discussion, or involving the company's domain
+    // When viewing from a discussion context, show only emails that are relevant:
+    // either referenced by events in this discussion, or involving the company's domain.
+    // The extraction stage also filters this way, so the display matches what the LLM saw.
     const disc = await db.queryOne(
       'SELECT d.company_id, c.domain FROM discussions d LEFT JOIN companies c ON c.id = d.company_id WHERE d.id = ?',
       discussionId
