@@ -231,9 +231,9 @@ def _extract_companies(
                     """INSERT INTO companies (name, domain, email_count, first_seen, last_seen)
                     VALUES (?, ?, 1, ?, ?)
                     ON CONFLICT(domain) DO UPDATE SET
-                        email_count = email_count + 1,
-                        first_seen = MIN(first_seen, excluded.first_seen),
-                        last_seen = MAX(last_seen, excluded.last_seen)""",
+                        email_count = companies.email_count + 1,
+                        first_seen = MIN(companies.first_seen, excluded.first_seen),
+                        last_seen = MAX(companies.last_seen, excluded.last_seen)""",
                     (company_name, domain, date, date),
                 )
 
