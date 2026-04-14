@@ -93,7 +93,12 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
         if "schema_version" in out.lower() and "ON CONFLICT" not in out.upper():
             out = out.rstrip().rstrip(";") + " ON CONFLICT (version) DO UPDATE SET version = EXCLUDED.version"
         elif "sync_state" in out.lower() and "ON CONFLICT" not in out.upper():
-            out = out.rstrip().rstrip(";") + " ON CONFLICT (folder) DO UPDATE SET uidvalidity = EXCLUDED.uidvalidity, last_uid = EXCLUDED.last_uid, last_sync = EXCLUDED.last_sync"
+            out = out.rstrip().rstrip(";") + " ON CONFLICT (folder) DO UPDATE SET uidvalidity = EXCLUDED.uidvalidity, last_uid = EXCLUDED.last_uid, last_sync = EXCLUDED.last_sync, sync_token = EXCLUDED.sync_token"
+        elif "calendar_events" in out.lower() and "ON CONFLICT" not in out.upper():
+            out = out.rstrip().rstrip(";") + " ON CONFLICT (event_id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, location = EXCLUDED.location, start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time, status = EXCLUDED.status, attendees = EXCLUDED.attendees, updated_at = EXCLUDED.updated_at, fetched_at = EXCLUDED.fetched_at"
+        elif "ON CONFLICT" not in out.upper():
+            # Generic fallback: convert to upsert-or-nothing
+            out = out.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
 
     # UPDATE OR IGNORE → UPDATE (PG just ignores constraint errors with ON CONFLICT)
     if _UPDATE_OR_IGNORE_RE.search(out):
