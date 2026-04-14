@@ -310,6 +310,10 @@ def run_pipeline(
 
     # Resolve companies if filtering by label, stale_before, last_seen, or company_list
     any_staleness_filter = only_new_emails or only_stale_prompt or only_stale_model or only_unprocessed
+    # When staleness filters selected a company, force reprocessing — the whole
+    # point is to re-run despite the per-stage skip logic thinking nothing changed.
+    if any_staleness_filter:
+        force = True
     target_domains = None
     if (label or stale_before or last_seen_after or last_seen_before or company_list or any_staleness_filter) and not company:
         target_domains = _resolve_company_domains()
