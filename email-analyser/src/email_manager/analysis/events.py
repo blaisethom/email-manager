@@ -1012,9 +1012,11 @@ def extract_events_propose(
 
         all_results = asyncio.run(_run_parallel())
 
+        errors = 0
         for i, result in enumerate(all_results):
             if isinstance(result, Exception):
                 logger.error("Parallel extraction task %d failed: %s", i, result)
+                errors += 1
                 continue
             if result:
                 all_events.extend(result)
@@ -1022,8 +1024,11 @@ def extract_events_propose(
             if on_progress:
                 on_progress(min(progress_idx, len(thread_ids)), len(thread_ids))
 
-        logger.info("Parallel extraction: %d events from %d tasks (concurrency=%d)",
-                     len(all_events), len(all_results), concurrency)
+        if errors:
+            import sys
+            print(f"  [!] {errors}/{len(all_results)} extraction tasks failed — check email_manager.log", file=sys.stderr)
+        logger.info("Parallel extraction: %d events from %d tasks (%d errors, concurrency=%d)",
+                     len(all_events), len(all_results), errors, concurrency)
 
     else:
         # ── Sequential extraction (original path) ─────────────────────────

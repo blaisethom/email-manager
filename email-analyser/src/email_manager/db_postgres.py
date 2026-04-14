@@ -114,6 +114,14 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
         out, flags=re.IGNORECASE,
     )
 
+    # date(?, '-N days') / date(?, '+N days') → CAST((CAST(? AS TIMESTAMP) + INTERVAL 'N days') AS TEXT)
+    # SQLite date() with a base value and modifier. Keep ? for _translate_params to handle.
+    out = re.sub(
+        r"date\(\s*(\?)\s*,\s*'([+-]?\d+)\s+(day|hour|minute|second)s?'\s*\)",
+        r"CAST((CAST(\1 AS TIMESTAMP) + INTERVAL '\2 \3') AS TEXT)",
+        out, flags=re.IGNORECASE,
+    )
+
     # INTEGER PRIMARY KEY → SERIAL PRIMARY KEY (for auto-increment)
     out = _INTEGER_PRIMARY_KEY_RE.sub("SERIAL PRIMARY KEY", out)
     out = _AUTOINCREMENT_RE.sub("", out)
