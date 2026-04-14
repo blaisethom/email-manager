@@ -1066,7 +1066,7 @@ def discover_discussions(
 
         logger.info(
             "Company %s: %d created → %d after merges (%d events, %d merges, %d splits)",
-            company["domain"], len(discussions), surviving_count, len(events), merges, cluster_splits,
+            company["domain"], len(discussions), surviving_count, len(all_events), merges, cluster_splits,
         )
         if merges and on_progress:
             # Log merge info for TUI visibility

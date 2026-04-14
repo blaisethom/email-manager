@@ -491,6 +491,7 @@ def apply_changes(
     total_input = 0
     total_output = 0
     total_calls = 0
+    completed_at = datetime.now(timezone.utc).isoformat()
     if token_tracker is not None:
         from email_manager.ai.base import TokenTracker
         if isinstance(token_tracker, TokenTracker):
@@ -505,9 +506,6 @@ def apply_changes(
                     (run_id, mode, model or "unknown", usage.input_tokens, usage.output_tokens,
                      usage.duration_ms, completed_at),
                 )
-
-    # Complete the processing run record (fresh timestamp for actual completion time)
-    completed_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """UPDATE processing_runs SET
            completed_at = ?, events_created = ?, discussions_created = ?,
