@@ -106,6 +106,10 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
     out = _INTEGER_PRIMARY_KEY_RE.sub("SERIAL PRIMARY KEY", out)
     out = _AUTOINCREMENT_RE.sub("", out)
 
+    # json_group_array(DISTINCT x) → json_agg(DISTINCT x)
+    # json_group_array(x) → json_agg(x)
+    out = re.sub(r'json_group_array\(', 'json_agg(', out, flags=re.IGNORECASE)
+
     # SQLite ? params → PostgreSQL %s params (skip for DDL)
     if not is_ddl:
         out = _translate_params(out)

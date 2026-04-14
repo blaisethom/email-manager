@@ -218,7 +218,7 @@ def _find_thread_for_email(
     rows = conn.execute(
         """SELECT DISTINCT e.thread_id
            FROM email_references er
-           JOIN emails e ON er.email_id = e.id
+           JOIN emails e ON er.email_id = CAST(e.id AS TEXT)
            WHERE er.referenced_id = ? AND e.thread_id IS NOT NULL""",
         (message_id,),
     ).fetchall()
@@ -384,7 +384,7 @@ def _build_union_find(
         rows = conn.execute(
             """SELECT e.message_id, er.referenced_id
                FROM email_references er
-               JOIN emails e ON er.email_id = e.id
+               JOIN emails e ON er.email_id = CAST(e.id AS TEXT)
                ORDER BY er.email_id
                LIMIT ? OFFSET ?""",
             (BATCH_SIZE, offset),
