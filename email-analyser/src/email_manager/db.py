@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS sync_state (
     folder          TEXT PRIMARY KEY,
     uidvalidity     INTEGER NOT NULL,
     last_uid        INTEGER NOT NULL DEFAULT 0,
-    last_sync       TEXT NOT NULL
+    last_sync       TEXT NOT NULL,
+    sync_token      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS contacts (
