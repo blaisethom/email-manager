@@ -922,13 +922,19 @@ def discover_discussions(
             disc["_parent_idx"] = parent_idx
             total_discussions += 1
 
-        # Second pass: resolve parent_id references
+        # Second pass: resolve parent_id references (with same-company validation)
         for idx, disc in enumerate(discussions):
             parent_id = disc.get("_parent_id")
             parent_idx = disc.get("_parent_idx")
             resolved_parent = None
             if isinstance(parent_id, int) and parent_id > 0:
-                resolved_parent = parent_id
+                # Validate: parent must belong to same company
+                parent_row = fetchone(conn, "SELECT company_id FROM discussions WHERE id = ?", (parent_id,))
+                if parent_row and parent_row["company_id"] == company["id"]:
+                    resolved_parent = parent_id
+                else:
+                    logger.warning("Ignoring cross-company parent_id %s for discussion %s",
+                                   parent_id, saved_ids[idx])
             elif parent_idx is not None:
                 try:
                     resolved_parent = saved_ids[int(parent_idx)]
@@ -961,11 +967,28 @@ def discover_discussions(
 
         # Post-discovery merge: detect and merge overlapping discussions
         merges = _merge_overlapping_discussions(conn, company["id"])
+        if merges:
+            total_discussions -= merges
+
+        # Count surviving discussions
+        surviving = fetchall(
+            conn,
+            "SELECT COUNT(*) as cnt FROM discussions WHERE company_id = ?",
+            (company["id"],),
+        )
+        surviving_count = surviving[0]["cnt"] if surviving else 0
 
         logger.info(
-            "Company %s: %d discussions (%d events, %d merges, %d cluster splits)",
-            company["domain"], len(discussions), len(events), merges, cluster_splits,
+            "Company %s: %d created → %d after merges (%d events, %d merges, %d splits)",
+            company["domain"], len(discussions), surviving_count, len(events), merges, cluster_splits,
         )
+        if merges and on_progress:
+            # Log merge info for TUI visibility
+            from rich.console import Console as _C
+            _C(stderr=True).print(
+                f"  [dim]discover_discussions: {len(discussions)} created, "
+                f"{merges} merged → {surviving_count} surviving[/dim]"
+            )
 
     if on_progress:
         on_progress(len(companies), len(companies), "")
