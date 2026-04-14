@@ -253,13 +253,16 @@ class PostgresConnection:
         # Try to get lastrowid for INSERT statements
         if pg_sql.strip().upper().startswith("INSERT") and "RETURNING" not in pg_sql.upper():
             try:
-                # Use currval or lastval as fallback
+                # Use savepoint so a failed lastval() doesn't poison the transaction
+                cursor.execute("SAVEPOINT _lastval_check")
                 cursor.execute("SELECT lastval()")
                 result = cursor.fetchone()
                 if result:
                     wrapped._lastrowid = result[0]
+                cursor.execute("RELEASE SAVEPOINT _lastval_check")
             except Exception:
-                pass  # No sequence — OK for ON CONFLICT DO NOTHING
+                cursor.execute("ROLLBACK TO SAVEPOINT _lastval_check")
+                cursor.execute("RELEASE SAVEPOINT _lastval_check")
 
         return wrapped
 
