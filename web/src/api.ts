@@ -1,6 +1,7 @@
 import type {
   CompaniesResponse,
   CompanyDetail,
+  CompanyInsights,
   ContactsResponse,
   ContactDetail,
   DiscussionsResponse,
@@ -102,6 +103,10 @@ export const api = {
 
   getCompanyHomepage(id: number): Promise<{ content: string; domain: string; fetched_at: string }> {
     return fetchJson(`${BASE}/companies/${id}/homepage`);
+  },
+
+  getCompanyInsights(id: number): Promise<CompanyInsights> {
+    return fetchJson<CompanyInsights>(`${BASE}/companies/${id}/insights`);
   },
 
   getContacts(params: ContactsParams = {}): Promise<ContactsResponse> {

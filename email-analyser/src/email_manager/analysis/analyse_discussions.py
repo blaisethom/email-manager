@@ -372,7 +372,7 @@ def _clean_analysis(
     return len(disc_ids)
 
 
-def analyse_discussions(
+def analyse_discussions_propose(
     conn: sqlite3.Connection,
     backend: LLMBackend,
     categories_config: list[dict[str, Any]] | None = None,
@@ -383,10 +383,11 @@ def analyse_discussions(
     company_domain: str | None = None,
     company_label: str | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
-) -> int:
-    """Analyse discussions: evaluate milestones, infer state, generate summary.
+    concurrency: int = 1,
+) -> tuple[dict[str, Any] | None, list[int]]:
+    """Run LLM calls and return a ProposedChanges-compatible dict without writing to DB.
 
-    Returns the number of discussions analysed.
+    Returns (proposed_dict, feedback_ids_to_mark_applied) or (None, []).
     """
     if clean:
         _clean_analysis(conn, company_domain=company_domain)
@@ -400,82 +401,186 @@ def analyse_discussions(
     )
     if not discussions:
         logger.info("No discussions to analyse")
-        return 0
+        return None, []
 
     logger.info("Analysing %d discussions", len(discussions))
-    total = 0
 
-    for i, disc in enumerate(discussions):
-        if on_progress:
-            on_progress(i, len(discussions), disc["title"][:40])
+    # Enrich system prompt with learned rules
+    from email_manager.analysis.feedback import format_rules_block, LAYER_ANALYSIS
+    system_prompt = ANALYSE_SYSTEM + format_rules_block(conn, LAYER_ANALYSIS)
 
+    # Pre-fetch all context (fast DB reads) before LLM calls
+    work_items: list[tuple[dict, str, list | None]] = []  # (disc, prompt, feedback)
+    for disc in discussions:
         events = _get_events_for_discussion(conn, disc["id"])
         if not events:
-            logger.info("Discussion %d (%s) has no events, skipping", disc["id"], disc["title"])
             continue
-
         category_config = _get_category_config(categories_config, disc["category"])
         if not category_config:
-            # Use a generic config
             category_config = {
-                "name": disc["category"],
-                "milestones": [],
+                "name": disc["category"], "milestones": [],
                 "workflow_states": ["active", "resolved", "stalled"],
                 "terminal_states": ["resolved"],
             }
-
         feedback = _get_feedback_for_discussion(conn, disc["id"])
-
-        # Fetch child discussion summaries for context
-        children = fetchall(
-            conn,
-            """SELECT id, title, category, current_state, summary, last_seen
-               FROM discussions WHERE parent_id = ?
-               ORDER BY last_seen DESC""",
-            (disc["id"],),
-        )
+        children = fetchall(conn,
+            "SELECT id, title, category, current_state, summary, last_seen FROM discussions WHERE parent_id = ? ORDER BY last_seen DESC",
+            (disc["id"],))
         children = [dict(c) for c in children] if children else None
+        prompt = _build_analyse_prompt(disc, events, category_config, feedback or None, children=children)
+        work_items.append((disc, prompt, feedback))
 
-        user_prompt = _build_analyse_prompt(disc, events, category_config, feedback or None, children=children)
+    if not work_items:
+        return None, []
 
-        try:
-            result = backend.complete_json(ANALYSE_SYSTEM, user_prompt)
-        except Exception as e:
-            logger.error("LLM call failed for discussion %d (%s): %s", disc["id"], disc["title"], e)
-            continue
+    # Collect LLM results into discussion_updates
+    discussion_updates: list[dict] = []
+    feedback_ids_to_apply: list[int] = []
 
-        # Save milestones
-        milestones = result.get("milestones", [])
-        _save_milestones(conn, disc["id"], milestones)
+    if concurrency > 1:
+        import asyncio
 
-        # Save state and summary
-        _save_state_and_summary(
-            conn, disc["id"],
-            result.get("workflow_state"),
-            result.get("summary"),
-            backend.model_name,
-        )
+        sem = asyncio.Semaphore(concurrency)
 
-        # Mark feedback as applied
-        if feedback:
-            for fb in feedback:
-                conn.execute(
-                    "UPDATE feedback SET applied = 1 WHERE id = ?",
-                    (fb["id"],),
-                )
+        async def _analyse_one(disc: dict, prompt: str) -> dict | None:
+            async with sem:
+                try:
+                    return await backend.acomplete_json(system_prompt, prompt)
+                except Exception as e:
+                    logger.error("Async LLM failed for discussion %d: %s", disc["id"], e)
+                    return None
 
-        conn.commit()
-        total += 1
+        async def _run():
+            tasks = [_analyse_one(d, p) for d, p, _ in work_items]
+            return await asyncio.gather(*tasks)
 
-        achieved = [m["name"] for m in milestones if m.get("achieved")]
-        logger.info(
-            "Discussion %d (%s): state=%s, milestones=%s",
-            disc["id"], disc["title"],
-            result.get("workflow_state"),
-            achieved,
-        )
+        results = asyncio.run(_run())
+
+        for idx, ((disc, _, feedback), result) in enumerate(zip(work_items, results)):
+            if on_progress:
+                on_progress(idx, len(work_items), disc["title"][:40])
+            if result is None:
+                continue
+            discussion_updates.append({
+                "discussion_id": disc["id"],
+                "state": result.get("workflow_state"),
+                "summary": result.get("summary"),
+                "milestones": result.get("milestones", []),
+            })
+            if feedback:
+                feedback_ids_to_apply.extend(fb["id"] for fb in feedback)
+    else:
+        for i, (disc, prompt, feedback) in enumerate(work_items):
+            if on_progress:
+                on_progress(i, len(work_items), disc["title"][:40])
+            try:
+                result = backend.complete_json(system_prompt, prompt)
+            except Exception as e:
+                logger.error("LLM call failed for discussion %d (%s): %s", disc["id"], disc["title"], e)
+                continue
+            discussion_updates.append({
+                "discussion_id": disc["id"],
+                "state": result.get("workflow_state"),
+                "summary": result.get("summary"),
+                "milestones": result.get("milestones", []),
+            })
+            if feedback:
+                feedback_ids_to_apply.extend(fb["id"] for fb in feedback)
 
     if on_progress:
-        on_progress(len(discussions), len(discussions), "")
+        on_progress(len(work_items), len(work_items), "")
 
-    return total
+    if not discussion_updates:
+        return None, []
+
+    return {"discussion_updates": discussion_updates}, feedback_ids_to_apply
+
+
+def analyse_discussions(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    categories_config: list[dict[str, Any]] | None = None,
+    config_path: Path | None = None,
+    limit: int | None = None,
+    force: bool = False,
+    clean: bool = False,
+    company_domain: str | None = None,
+    company_label: str | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    concurrency: int = 1,
+) -> int:
+    """Analyse discussions: evaluate milestones, infer state, generate summary.
+
+    Args:
+        concurrency: Max concurrent LLM calls. >1 enables parallel analysis.
+
+    Returns the number of discussions analysed.
+    """
+    from email_manager.ai.agent_backend import ProposedChanges, apply_changes
+    from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block, LAYER_ANALYSIS
+
+    proposed_dict, feedback_ids = analyse_discussions_propose(
+        conn, backend, categories_config=categories_config,
+        config_path=config_path, limit=limit, force=force, clean=clean,
+        company_domain=company_domain, company_label=company_label,
+        on_progress=on_progress, concurrency=concurrency,
+    )
+    if not proposed_dict:
+        return 0
+
+    p_hash = compute_prompt_hash(ANALYSE_SYSTEM + format_rules_block(conn, LAYER_ANALYSIS))
+
+    # Group discussion_updates by company for per-company processing_runs
+    updates_by_company: dict[str, list[dict]] = {}
+    for update in proposed_dict.get("discussion_updates", []):
+        disc_id = update.get("discussion_id")
+        if not isinstance(disc_id, int):
+            continue
+        row = fetchone(
+            conn,
+            "SELECT c.domain, c.id FROM discussions d JOIN companies c ON d.company_id = c.id WHERE d.id = ?",
+            (disc_id,),
+        )
+        if row:
+            updates_by_company.setdefault(row["domain"], []).append(update)
+
+    total_updates = 0
+    for domain, updates in updates_by_company.items():
+        proposed = ProposedChanges({"discussion_updates": updates})
+        row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (domain,))
+        cid = row["id"] if row else 0
+
+        counts = apply_changes(
+            conn, proposed, cid, domain,
+            mode="staged:analyse_discussions", model=backend.model_name,
+            prompt_hash=p_hash,
+        )
+        total_updates += counts.get("updates", 0)
+
+    # Mark feedback as applied
+    for fb_id in feedback_ids:
+        conn.execute("UPDATE feedback SET applied = 1 WHERE id = ?", (fb_id,))
+    if feedback_ids:
+        conn.commit()
+
+    # Propagate last_seen to parent discussions
+    for update in proposed_dict.get("discussion_updates", []):
+        disc_id = update.get("discussion_id")
+        if isinstance(disc_id, int):
+            parent_row = fetchone(
+                conn, "SELECT parent_id FROM discussions WHERE id = ?", (disc_id,),
+            )
+            if parent_row and parent_row["parent_id"]:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    """UPDATE discussions SET
+                       last_seen = MAX(last_seen, (
+                           SELECT MAX(last_seen) FROM discussions WHERE parent_id = ?
+                       )),
+                       updated_at = ?
+                       WHERE id = ?""",
+                    (parent_row["parent_id"], now, parent_row["parent_id"]),
+                )
+    conn.commit()
+
+    return total_updates

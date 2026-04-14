@@ -45,6 +45,7 @@ def _run_stage(
     label: str | None = None,
     exclude: list[str] | None = None,
     contact: str | None = None,
+    concurrency: int = 1,
 ) -> int:
     """Run a single pipeline stage. Returns item count or -1 on error."""
     if stage_name not in ALL_STAGES:
@@ -63,6 +64,8 @@ def _run_stage(
         for opt_name, opt_val in [("company", company), ("label", label), ("exclude", exclude), ("contact", contact)]:
             if opt_name in sig.parameters and opt_val:
                 kwargs[opt_name] = opt_val
+        if "concurrency" in sig.parameters and concurrency > 1:
+            kwargs["concurrency"] = concurrency
         count = stage_fn(conn, backend, config, **kwargs)
         logger.info("Finished stage: %s — processed %d items", stage_name, count)
         return count
@@ -93,6 +96,7 @@ def run_pipeline(
     last_seen_after: str | None = None,
     last_seen_before: str | None = None,
     dry_run: bool = False,
+    concurrency: int = 1,
 ) -> dict[str, int]:
     if console is None:
         console = Console()
@@ -232,7 +236,7 @@ def run_pipeline(
 
         for stage_name in global_stages:
             count = _run_stage(stage_name, conn, backend, config, console,
-                               limit=limit, force=force, clean=clean)
+                               limit=limit, force=force, clean=clean, concurrency=concurrency)
             results[stage_name] = count
 
         for i, domain in enumerate(target_domains):
@@ -242,7 +246,7 @@ def run_pipeline(
 
             for stage_name in per_co_stages:
                 count = _run_stage(stage_name, conn, backend, config, console,
-                                   limit=None, force=force, clean=clean, company=domain)
+                                   limit=None, force=force, clean=clean, company=domain, concurrency=concurrency)
                 results[stage_name] = results.get(stage_name, 0) + max(count, 0)
     elif target_domains is not None and not per_company:
         # Stage-first mode with resolved company list
@@ -254,7 +258,7 @@ def run_pipeline(
                 count = 0
                 for domain in target_domains:
                     c = _run_stage(stage_name, conn, backend, config, console,
-                                   limit=None, force=force, clean=clean, company=domain)
+                                   limit=None, force=force, clean=clean, company=domain, concurrency=concurrency)
                     count += max(c, 0)
             results[stage_name] = count
     else:
@@ -262,7 +266,8 @@ def run_pipeline(
         for stage_name in stage_names:
             count = _run_stage(stage_name, conn, backend, config, console,
                                limit=limit, force=force, clean=clean,
-                               company=company, label=label, exclude=exclude, contact=contact)
+                               company=company, label=label, exclude=exclude, contact=contact,
+                               concurrency=concurrency)
             results[stage_name] = count
 
     logger.info("Pipeline finished — results: %s", results)

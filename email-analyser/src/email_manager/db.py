@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
 from email_manager.config import Config
 
-SCHEMA_VERSION = 19
+
+def _log(msg: str) -> None:
+    """Print migration/schema messages to stderr so they don't pollute stdout (e.g. --csv)."""
+    print(msg, file=sys.stderr)
+
+SCHEMA_VERSION = 23
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -66,6 +72,14 @@ CREATE TABLE IF NOT EXISTS threads (
     summary         TEXT,
     summary_model   TEXT
 );
+
+CREATE TABLE IF NOT EXISTS email_references (
+    email_id        TEXT NOT NULL,
+    referenced_id   TEXT NOT NULL,
+    UNIQUE(email_id, referenced_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_refs_referenced ON email_references(referenced_id);
 
 CREATE TABLE IF NOT EXISTS projects (
     id              INTEGER PRIMARY KEY,
@@ -155,6 +169,43 @@ CREATE TABLE IF NOT EXISTS company_labels (
 );
 
 CREATE INDEX IF NOT EXISTS idx_company_labels_label ON company_labels(label);
+
+CREATE TABLE IF NOT EXISTS processing_runs (
+    id              INTEGER PRIMARY KEY,
+    company_domain  TEXT NOT NULL,
+    mode            TEXT NOT NULL,
+    model           TEXT,
+    started_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    events_created  INTEGER DEFAULT 0,
+    discussions_created INTEGER DEFAULT 0,
+    discussions_updated INTEGER DEFAULT 0,
+    actions_proposed INTEGER DEFAULT 0,
+    input_tokens    INTEGER DEFAULT 0,
+    output_tokens   INTEGER DEFAULT 0,
+    llm_calls       INTEGER DEFAULT 0,
+    proposed_changes_json TEXT,
+    parent_run_id   INTEGER REFERENCES processing_runs(id),
+    email_cutoff_date TEXT,
+    prompt_hash     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_processing_runs_company ON processing_runs(company_domain);
+CREATE INDEX IF NOT EXISTS idx_processing_runs_mode ON processing_runs(mode);
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id              INTEGER PRIMARY KEY,
+    run_id          INTEGER REFERENCES processing_runs(id),
+    stage           TEXT NOT NULL,
+    model           TEXT,
+    input_tokens    INTEGER DEFAULT 0,
+    output_tokens   INTEGER DEFAULT 0,
+    duration_ms     INTEGER,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls(run_id);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_stage ON llm_calls(stage);
 
 CREATE TABLE IF NOT EXISTS discussions (
     id              INTEGER PRIMARY KEY,
@@ -343,22 +394,6 @@ CREATE TABLE IF NOT EXISTS proposed_actions (
 
 CREATE INDEX IF NOT EXISTS idx_proposed_actions_discussion ON proposed_actions(discussion_id);
 
-CREATE TABLE IF NOT EXISTS processing_runs (
-    id              INTEGER PRIMARY KEY,
-    company_domain  TEXT NOT NULL,
-    mode            TEXT NOT NULL,
-    model           TEXT,
-    started_at      TEXT NOT NULL,
-    completed_at    TEXT,
-    events_created  INTEGER DEFAULT 0,
-    discussions_created INTEGER DEFAULT 0,
-    discussions_updated INTEGER DEFAULT 0,
-    actions_proposed INTEGER DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_processing_runs_company ON processing_runs(company_domain);
-CREATE INDEX IF NOT EXISTS idx_processing_runs_mode ON processing_runs(mode);
-
 CREATE TABLE IF NOT EXISTS change_journal (
     id              INTEGER PRIMARY KEY,
     entity_type     TEXT NOT NULL,
@@ -378,7 +413,41 @@ CREATE TABLE IF NOT EXISTS schema_version (
 """
 
 
+def _get_column_names(conn: Any, table: str) -> set[str]:
+    """Get column names for a table, works with both SQLite and PostgreSQL."""
+    try:
+        # SQLite
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {r[1] for r in rows}
+    except Exception:
+        # PostgreSQL
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
+            (table,),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
 def get_db(config: Config) -> sqlite3.Connection:
+    """Get a database connection based on config.
+
+    Returns either a sqlite3.Connection or a PostgresConnection wrapper
+    (which has the same interface).
+
+    Auto-detects postgres if DB_URL is set to a postgresql:// URL.
+    """
+    pg_url = config.db_url or config.postgres_url
+    use_postgres = config.db_backend == "postgres"
+
+    if use_postgres:
+        if not pg_url:
+            raise ValueError("DB_URL must be set when using postgres")
+        from email_manager.db_postgres import get_postgres_connection
+        conn = get_postgres_connection(pg_url)
+        _init_schema(conn)
+        return conn  # type: ignore[return-value]
+
+    # Default: SQLite
     db_path = config.db_abs_path
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=30)
@@ -404,7 +473,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.commit()
     if current_version < 2:
         # Add gmail_id column if missing (migration v1 -> v2)
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(emails)").fetchall()}
+        cols = _get_column_names(conn, "emails")
         if "gmail_id" not in cols:
             conn.execute("ALTER TABLE emails ADD COLUMN gmail_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_gmail_id ON emails(gmail_id)")
@@ -446,11 +515,57 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v18(conn)
     if current_version < 19:
         _migrate_to_v19(conn)
+    if current_version < 20:
+        _migrate_to_v20(conn)
+    if current_version < 21:
+        _migrate_to_v21(conn)
+    if current_version < 22:
+        _migrate_to_v22(conn)
+    if current_version < 23:
+        _migrate_to_v23(conn)
+
+
+def _migrate_to_v23(conn: sqlite3.Connection) -> None:
+    """Migration v22 -> v23: add prompt_hash to processing_runs for prompt versioning."""
+    cols = _get_column_names(conn, "processing_runs")
+    if "prompt_hash" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN prompt_hash TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v23] prompt_hash column added to processing_runs")
+
+
+def _migrate_to_v22(conn: sqlite3.Connection) -> None:
+    """Migration v21 -> v22: add chain tracking to processing_runs (parent_run_id, email_cutoff_date)."""
+    cols = _get_column_names(conn, "processing_runs")
+    if "parent_run_id" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN parent_run_id INTEGER REFERENCES processing_runs(id)")
+    if "email_cutoff_date" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN email_cutoff_date TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v22] chain tracking added to processing_runs (parent_run_id, email_cutoff_date)")
+
+
+def _migrate_to_v21(conn: sqlite3.Connection) -> None:
+    """Migration v20 -> v21: add proposed_changes_json to processing_runs for evaluation snapshots."""
+    cols = _get_column_names(conn, "processing_runs")
+    if "proposed_changes_json" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN proposed_changes_json TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v21] proposed_changes_json column added to processing_runs")
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     """Migration v3 -> v4: add account_name column to emails."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(emails)").fetchall()}
+    cols = _get_column_names(conn, "emails")
     if "account_name" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN account_name TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_account ON emails(account_name)")
@@ -484,7 +599,7 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v4] account_name column added")
+    _log("  [migration v4] account_name column added")
 
 
 def _migrate_to_v3(conn: sqlite3.Connection) -> None:
@@ -506,7 +621,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
             return []
         return re.findall(r"<([^>]+)>", header_value)
 
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(emails)").fetchall()}
+    cols = _get_column_names(conn, "emails")
     if "normalised_subject" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN normalised_subject TEXT")
 
@@ -536,7 +651,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
         conn.commit()
         processed += len(rows)
         if total > 0:
-            print(f"  [migration v3] normalised_subject: {processed}/{total}")
+            _log(f"  [migration v3] normalised_subject: {processed}/{total}")
 
     # Backfill email_references
     total = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
@@ -569,13 +684,13 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
             conn.commit()
             processed += len(rows)
             offset += BATCH
-            print(f"  [migration v3] email_references: {processed}/{total}")
+            _log(f"  [migration v3] email_references: {processed}/{total}")
 
     conn.execute(
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v3] complete")
+    _log("  [migration v3] complete")
 
 
 def _migrate_to_v5(conn: sqlite3.Connection) -> None:
@@ -601,12 +716,12 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v5] entities table replaced with companies + company_contacts")
+    _log("  [migration v5] entities table replaced with companies + company_contacts")
 
 
 def _migrate_to_v6(conn: sqlite3.Connection) -> None:
     """Migration v5 -> v6: add homepage_fetched_at to companies, add company_labels table."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(companies)").fetchall()}
+    cols = _get_column_names(conn, "companies")
     if "homepage_fetched_at" not in cols:
         conn.execute("ALTER TABLE companies ADD COLUMN homepage_fetched_at TEXT")
 
@@ -625,19 +740,19 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v6] homepage columns and company_labels table added")
+    _log("  [migration v6] homepage columns and company_labels table added")
 
 
 def _migrate_to_v7(conn: sqlite3.Connection) -> None:
     """Migration v6 -> v7: add description column to companies."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(companies)").fetchall()}
+    cols = _get_column_names(conn, "companies")
     if "description" not in cols:
         conn.execute("ALTER TABLE companies ADD COLUMN description TEXT")
     conn.execute(
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v7] description column added to companies")
+    _log("  [migration v7] description column added to companies")
 
 
 def _migrate_to_v8(conn: sqlite3.Connection) -> None:
@@ -682,7 +797,7 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v8] discussions tables added")
+    _log("  [migration v8] discussions tables added")
 
 
 def _migrate_to_v9(conn: sqlite3.Connection) -> None:
@@ -705,26 +820,26 @@ def _migrate_to_v9(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v9] actions table added")
+    _log("  [migration v9] actions table added")
 
 
 def _migrate_to_v10(conn: sqlite3.Connection) -> None:
     """Migration v9 -> v10: add completed_date column to actions."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(actions)").fetchall()}
+    cols = _get_column_names(conn, "actions")
     if "completed_date" not in cols:
         conn.execute("ALTER TABLE actions ADD COLUMN completed_date TEXT")
     conn.execute(
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v10] completed_date column added to actions")
+    _log("  [migration v10] completed_date column added to actions")
 
 
 def _migrate_to_v11(conn: sqlite3.Connection) -> None:
     """Migration v10 -> v11: rename assignee_email to assignee_emails (JSON array)."""
     import json as _json
 
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(actions)").fetchall()}
+    cols = _get_column_names(conn, "actions")
     if "assignee_email" in cols and "assignee_emails" not in cols:
         conn.execute("ALTER TABLE actions ADD COLUMN assignee_emails TEXT")
         # Migrate existing data: wrap single email in a JSON array
@@ -739,7 +854,7 @@ def _migrate_to_v11(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v11] assignee_email migrated to assignee_emails (JSON array)")
+    _log("  [migration v11] assignee_email migrated to assignee_emails (JSON array)")
 
 
 def _migrate_to_v12(conn: sqlite3.Connection) -> None:
@@ -778,7 +893,7 @@ def _migrate_to_v12(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_discussion_events_event ON discussion_events(event_id)")
 
     # Add sync_token column to sync_state for calendar sync tokens (strings)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(sync_state)").fetchall()}
+    cols = _get_column_names(conn, "sync_state")
     if "sync_token" not in cols:
         conn.execute("ALTER TABLE sync_state ADD COLUMN sync_token TEXT")
 
@@ -786,7 +901,7 @@ def _migrate_to_v12(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v12] calendar_events and discussion_events tables added")
+    _log("  [migration v12] calendar_events and discussion_events tables added")
 
 
 def _migrate_to_v13(conn: sqlite3.Connection) -> None:
@@ -867,7 +982,7 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v13] event ledger, milestones, feedback tables added")
+    _log("  [migration v13] event ledger, milestones, feedback tables added")
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:
@@ -888,12 +1003,12 @@ def _migrate_to_v14(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v14] proposed_actions table added")
+    _log("  [migration v14] proposed_actions table added")
 
 
 def _migrate_to_v15(conn: sqlite3.Connection) -> None:
     """Migration v14 -> v15: add parent_id to discussions for sub-discussions."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(discussions)").fetchall()}
+    cols = _get_column_names(conn, "discussions")
     if "parent_id" not in cols:
         conn.execute("ALTER TABLE discussions ADD COLUMN parent_id INTEGER REFERENCES discussions(id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_discussions_parent ON discussions(parent_id)")
@@ -901,20 +1016,49 @@ def _migrate_to_v15(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v15] parent_id column added to discussions")
+    _log("  [migration v15] parent_id column added to discussions")
+
+
+def _migrate_to_v20(conn: sqlite3.Connection) -> None:
+    """Migration v19 -> v20: add token tracking to processing_runs + llm_calls table."""
+    cols = _get_column_names(conn, "processing_runs")
+    if "input_tokens" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN input_tokens INTEGER DEFAULT 0")
+    if "output_tokens" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN output_tokens INTEGER DEFAULT 0")
+    if "llm_calls" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN llm_calls INTEGER DEFAULT 0")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS llm_calls (
+        id              INTEGER PRIMARY KEY,
+        run_id          INTEGER REFERENCES processing_runs(id),
+        stage           TEXT NOT NULL,
+        model           TEXT,
+        input_tokens    INTEGER DEFAULT 0,
+        output_tokens   INTEGER DEFAULT 0,
+        duration_ms     INTEGER,
+        created_at      TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls(run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_stage ON llm_calls(stage)")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v20] token tracking added to processing_runs + llm_calls table")
 
 
 def _migrate_to_v19(conn: sqlite3.Connection) -> None:
     """Migration v18 -> v19: add run_id to discussions, milestones, proposed_actions."""
     for table in ("discussions", "milestones", "proposed_actions"):
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        cols = _get_column_names(conn, table)
         if "run_id" not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN run_id INTEGER REFERENCES processing_runs(id)")
     conn.execute(
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v19] run_id column added to discussions, milestones, proposed_actions")
+    _log("  [migration v19] run_id column added to discussions, milestones, proposed_actions")
 
 
 def _migrate_to_v18(conn: sqlite3.Connection) -> None:
@@ -934,7 +1078,7 @@ def _migrate_to_v18(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_processing_runs_company ON processing_runs(company_domain)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_processing_runs_mode ON processing_runs(mode)")
 
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(event_ledger)").fetchall()}
+    cols = _get_column_names(conn, "event_ledger")
     if "run_id" not in cols:
         conn.execute("ALTER TABLE event_ledger ADD COLUMN run_id INTEGER REFERENCES processing_runs(id)")
 
@@ -942,12 +1086,12 @@ def _migrate_to_v18(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v18] processing_runs table and run_id column added")
+    _log("  [migration v18] processing_runs table and run_id column added")
 
 
 def _migrate_to_v17(conn: sqlite3.Connection) -> None:
     """Migration v16 -> v17: add source_type and source_id to event_ledger."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(event_ledger)").fetchall()}
+    cols = _get_column_names(conn, "event_ledger")
     if "source_type" not in cols:
         conn.execute("ALTER TABLE event_ledger ADD COLUMN source_type TEXT NOT NULL DEFAULT 'email'")
     if "source_id" not in cols:
@@ -962,7 +1106,7 @@ def _migrate_to_v17(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v17] source_type and source_id columns added to event_ledger")
+    _log("  [migration v17] source_type and source_id columns added to event_ledger")
 
 
 def _migrate_to_v16(conn: sqlite3.Connection) -> None:
@@ -982,7 +1126,7 @@ def _migrate_to_v16(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
     )
     conn.commit()
-    print("  [migration v16] change_journal table added")
+    _log("  [migration v16] change_journal table added")
 
 
 def execute(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> sqlite3.Cursor:

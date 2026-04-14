@@ -24,6 +24,10 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+agent = ["claude-agent-sdk>=0.1"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

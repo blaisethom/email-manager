@@ -18,10 +18,20 @@ export interface CompanyLabel {
   assigned_at: string | null;
 }
 
+export interface CompanyThread {
+  thread_id: string;
+  subject: string | null;
+  email_count: number;
+  first_date: string | null;
+  last_date: string | null;
+  summary: string | null;
+}
+
 export interface CompanyDetail extends Omit<Company, 'labels'> {
   labels: CompanyLabel[];
   contacts: ContactSummary[];
   discussions: DiscussionSummary[];
+  threads: CompanyThread[];
 }
 
 export interface ContactSummary {
@@ -195,7 +205,19 @@ export interface ProposedAction {
   created_at: string;
 }
 
+export interface ParentDiscussion {
+  id: number;
+  title: string;
+  category: string | null;
+  current_state: string | null;
+  summary: string | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  company_name: string | null;
+}
+
 export interface DiscussionDetail extends Discussion {
+  parent: ParentDiscussion | null;
   state_history: StateHistoryEntry[];
   threads: Thread[];
   actions: DiscussionAction[];
@@ -204,6 +226,66 @@ export interface DiscussionDetail extends Discussion {
   milestones: Milestone[];
   proposed_actions: ProposedAction[];
   children: Discussion[];
+}
+
+export interface ProcessingRun {
+  id: number;
+  mode: string;
+  model: string | null;
+  started_at: string;
+  completed_at: string | null;
+  events_created: number;
+  discussions_created: number;
+  discussions_updated: number;
+  actions_proposed: number;
+  input_tokens: number;
+  output_tokens: number;
+  llm_calls: number;
+}
+
+export interface LlmCallsByStage {
+  stage: string;
+  call_count: number;
+  total_input: number;
+  total_output: number;
+}
+
+export interface DiscussionInsight {
+  id: number;
+  title: string;
+  category: string | null;
+  current_state: string | null;
+  summary: string | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  updated_at: string | null;
+  parent_id: number | null;
+  run_id: number | null;
+  event_count: number;
+  latest_event_created: string | null;
+  action_count: number;
+  milestones_achieved: number;
+  milestones_total: number;
+  last_run_mode: string | null;
+  last_run_model: string | null;
+}
+
+export interface EventDomainSummary {
+  domain: string;
+  cnt: number;
+  latest_event_date: string | null;
+  latest_created: string | null;
+}
+
+export interface CompanyInsights {
+  company: { id: number; domain: string; name: string };
+  processing_runs: ProcessingRun[];
+  llm_calls_by_stage: LlmCallsByStage[];
+  discussions: DiscussionInsight[];
+  events_by_domain: EventDomainSummary[];
+  unprocessed_threads: number;
+  pending_changes: number;
+  proposed_actions: Array<ProposedAction & { discussion_id: number; discussion_title: string }>;
 }
 
 export interface CompaniesResponse {

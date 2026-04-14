@@ -39,6 +39,7 @@ def thread_chain_bytes(fixtures_dir: Path) -> bytes:
 @pytest.fixture
 def test_config(tmp_path: Path) -> Config:
     return Config(
+        db_backend="sqlite",
         db_path=tmp_path / "test.db",
         imap_host="imap.test.com",
         imap_user="test@test.com",

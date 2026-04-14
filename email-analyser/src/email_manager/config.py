@@ -71,7 +71,10 @@ class Config(BaseSettings):
     discussion_categories_path: Path | None = None  # path to discussion_categories.yaml
 
     # Database
-    db_path: Path = Path("../data/email_manager.db")
+    db_backend: str = "sqlite"  # "sqlite" or "postgres"
+    db_path: Path = Path("../data/email_manager.db")  # SQLite file path
+    db_url: str = ""  # PostgreSQL URL, e.g. "postgresql://user:pass@host:5432/dbname"
+    postgres_url: str = ""  # Alias for db_url (deprecated)
 
     # Accounts config file
     accounts_path: Path = Path("accounts.json")

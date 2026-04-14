@@ -703,6 +703,10 @@ def quick_update_propose(
     new_emails_text = _format_new_emails(emails)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Enrich system prompt with learned rules
+    from email_manager.analysis.feedback import format_rules_block, LAYER_QUICK_UPDATE
+    system_prompt = QUICK_UPDATE_SYSTEM + format_rules_block(conn, LAYER_QUICK_UPDATE)
+
     user_prompt = _build_quick_update_prompt(
         company["name"], company["domain"],
         new_emails_text, discussions_context, domains_block,
@@ -710,7 +714,7 @@ def quick_update_propose(
     )
 
     try:
-        result = backend.complete_json(QUICK_UPDATE_SYSTEM, user_prompt)
+        result = backend.complete_json(system_prompt, user_prompt)
     except Exception as e:
         logger.error("LLM call failed for quick update %s: %s", company_domain, e)
         return None, company_info
@@ -749,6 +753,7 @@ def quick_update(
     counts = apply_changes(
         conn, proposed, company_info["id"], company_info["domain"],
         mode="quick", model=backend.model_name,
+        token_tracker=getattr(backend, 'token_tracker', None),
     )
 
     logger.info(

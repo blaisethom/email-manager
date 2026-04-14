@@ -623,16 +623,30 @@ export default function DiscussionDetailPage() {
         <div className="flex flex-wrap items-center gap-2 mb-3">
           {data.current_state && <Badge label={data.current_state} variant="state" />}
           {data.category && <Badge label={data.category} variant="category" />}
-          {data.parent_id && (
-            <Link
-              to={`/discussions/${data.parent_id}`}
-              state={extendBreadcrumbs(location.state, { label: data.title, path: `/discussions/${data.id}` })}
-              className="text-xs text-slate-500 hover:text-blue-600 transition-colors"
-            >
-              sub-discussion →
-            </Link>
-          )}
         </div>
+
+        {/* Parent discussion card (for sub-discussions) */}
+        {data.parent && (
+          <Link
+            to={`/discussions/${data.parent.id}`}
+            state={extendBreadcrumbs(location.state, { label: data.title, path: `/discussions/${data.id}` })}
+            className="block mb-4 p-3 border border-blue-200 bg-blue-50/50 rounded-lg hover:border-blue-300 hover:bg-blue-50 transition-colors"
+          >
+            <div className="text-xs text-blue-500 font-medium uppercase tracking-wider mb-1">Parent Discussion</div>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <span className="font-medium text-slate-900">{data.parent.title}</span>
+                {data.parent.summary && (
+                  <p className="text-sm text-slate-500 mt-0.5 line-clamp-1">{data.parent.summary}</p>
+                )}
+              </div>
+              <div className="flex gap-1 flex-shrink-0">
+                {data.parent.category && <Badge label={data.parent.category} variant="category" />}
+                {data.parent.current_state && <Badge label={data.parent.current_state} variant="state" />}
+              </div>
+            </div>
+          </Link>
+        )}
 
         {data.company_name && data.company_id && (
           <Link

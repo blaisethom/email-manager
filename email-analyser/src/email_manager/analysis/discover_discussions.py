@@ -790,6 +790,8 @@ def discover_discussions(
 
     Returns the number of discussions created or updated.
     """
+    from email_manager.ai.agent_backend import ProposedChanges, apply_changes as _apply_changes
+
     if clean:
         _clean_discussions(conn, company_domain=company_domain, company_label=company_label)
 
@@ -844,16 +846,77 @@ def discover_discussions(
 
         discussions = result.get("discussions", [])
 
-        # Two-pass save: first create all discussions (without parent_id for new ones),
-        # then resolve parent references (by existing ID or by array index).
+        # Build a ProposedChanges snapshot of the LLM's clustering decision
+        proposed_new: list[dict] = []
+        proposed_assignments: list[dict] = []
+        proposed_links: list[dict] = []
+        for disc in discussions:
+            event_ids = disc.get("event_ids", [])
+            thread_ids_disc = disc.get("thread_ids", [])
+            existing_id = disc.get("existing_id")
+            if existing_id:
+                # Assigning events to existing discussion
+                for eid in event_ids:
+                    proposed_assignments.append({"event_id": eid, "discussion_id": existing_id})
+                for tid in thread_ids_disc:
+                    proposed_links.append({"discussion_id": existing_id, "thread_id": tid})
+            else:
+                temp_id = f"new_{len(proposed_new)}"
+                proposed_new.append({
+                    "temp_id": temp_id,
+                    "title": disc.get("title", "Untitled"),
+                    "category": disc.get("category", "other"),
+                    "parent_id": disc.get("parent_id"),
+                    "participants": disc.get("participants", []),
+                })
+                for eid in event_ids:
+                    proposed_assignments.append({"event_id": eid, "discussion_id": temp_id})
+                for tid in thread_ids_disc:
+                    proposed_links.append({"discussion_id": temp_id, "thread_id": tid})
+
+        proposed = ProposedChanges({
+            "new_discussions": proposed_new,
+            "event_assignments": proposed_assignments,
+            "thread_links": proposed_links,
+        })
+
+        # Snapshot the LLM decision as a processing_run with chain tracking
+        now_ts = datetime.now(timezone.utc).isoformat()
+        run_mode = "staged:discover_discussions"
+        parent_row = fetchone(
+            conn,
+            "SELECT id FROM processing_runs WHERE company_domain = ? AND mode = ? ORDER BY id DESC LIMIT 1",
+            (company["domain"], run_mode),
+        )
+        parent_run_id = parent_row["id"] if parent_row else None
+        like = f"%@{company['domain']}%"
+        cutoff_row = fetchone(
+            conn,
+            "SELECT MAX(date) as cutoff FROM emails WHERE from_address LIKE ? OR to_addresses LIKE ?",
+            (like, like),
+        )
+        email_cutoff = cutoff_row["cutoff"] if cutoff_row and cutoff_row["cutoff"] else None
+        from email_manager.analysis.feedback import compute_prompt_hash
+        p_hash = compute_prompt_hash(DISCOVER_SYSTEM)
+        cursor = conn.execute(
+            """INSERT INTO processing_runs
+               (company_domain, mode, model, started_at, proposed_changes_json,
+                parent_run_id, email_cutoff_date, prompt_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company["domain"], run_mode, backend.model_name,
+             now_ts, json.dumps(proposed.to_dict()),
+             parent_run_id, email_cutoff, p_hash),
+        )
+        snapshot_run_id = cursor.lastrowid
+
+        # Apply using existing save path (handles complex parent resolution, thread ID
+        # prefix matching, etc. that apply_changes doesn't replicate)
         saved_ids: dict[int, int] = {}  # array index -> saved discussion ID
         for idx, disc in enumerate(discussions):
-            # Strip parent info for first pass — we'll set it in the second pass
             parent_id = disc.pop("parent_id", None)
             parent_idx = disc.pop("parent_idx", None)
             disc_id = _save_discussion(conn, disc, company["id"], backend.model_name)
             saved_ids[idx] = disc_id
-            # Stash refs for later passes
             disc["_saved_id"] = disc_id
             disc["_parent_id"] = parent_id
             disc["_parent_idx"] = parent_idx
@@ -865,10 +928,8 @@ def discover_discussions(
             parent_idx = disc.get("_parent_idx")
             resolved_parent = None
             if isinstance(parent_id, int) and parent_id > 0:
-                # References an existing discussion by DB ID
                 resolved_parent = parent_id
             elif parent_idx is not None:
-                # References a new discussion by its array index in this response
                 try:
                     resolved_parent = saved_ids[int(parent_idx)]
                 except (ValueError, KeyError):
@@ -878,6 +939,14 @@ def discover_discussions(
                     "UPDATE discussions SET parent_id = ? WHERE id = ?",
                     (resolved_parent, saved_ids[idx]),
                 )
+
+        # Complete the processing run
+        conn.execute(
+            """UPDATE processing_runs SET completed_at = ?, discussions_created = ?
+               WHERE id = ?""",
+            (datetime.now(timezone.utc).isoformat(), len([d for d in discussions if not d.get("existing_id")]),
+             snapshot_run_id),
+        )
 
         conn.commit()
 

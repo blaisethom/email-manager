@@ -205,7 +205,7 @@ def _get_milestones_for_discussion(conn: sqlite3.Connection, discussion_id: int)
 
 # ── Public entry point ──────────────────────────────────────────────────────
 
-def propose_actions(
+def propose_actions_propose(
     conn: sqlite3.Connection,
     backend: LLMBackend,
     categories_config: list[dict[str, Any]] | None = None,
@@ -216,10 +216,11 @@ def propose_actions(
     company_domain: str | None = None,
     company_label: str | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
-) -> int:
-    """Propose next actions for active discussions.
+    concurrency: int = 1,
+) -> dict[str, Any] | None:
+    """Run LLM calls and return a ProposedChanges-compatible dict without writing to DB.
 
-    Returns the number of discussions with proposed actions.
+    Returns None if there's nothing to do.
     """
     if categories_config is None:
         categories_config = load_category_config(config_path)
@@ -244,7 +245,6 @@ def propose_actions(
     )
 
     if not force and not clean:
-        # Skip discussions that already have recent proposed actions (within 24h)
         discussions = [
             d for d in discussions
             if not fetchone(
@@ -257,66 +257,145 @@ def propose_actions(
 
     if not discussions:
         logger.info("No discussions need action proposals")
-        return 0
+        return None
 
     logger.info("Proposing actions for %d discussions", len(discussions))
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    now = datetime.now(timezone.utc).isoformat()
-    total = 0
 
-    for i, disc in enumerate(discussions):
-        if on_progress:
-            on_progress(i, len(discussions), disc["title"][:40])
+    # Enrich system prompt with learned rules
+    from email_manager.analysis.feedback import format_rules_block, LAYER_ACTIONS
+    system_prompt = PROPOSE_SYSTEM + format_rules_block(conn, LAYER_ACTIONS)
 
+    # Pre-fetch context and build prompts
+    work_items: list[tuple[dict, str]] = []
+    for disc in discussions:
         events = _get_events_for_discussion(conn, disc["id"])
-        milestones = _get_milestones_for_discussion(conn, disc["id"])
-
         if not events:
             continue
-
+        milestones = _get_milestones_for_discussion(conn, disc["id"])
         category_config = _get_category_config(categories_config, disc.get("category", ""))
+        prompt = _build_propose_prompt(disc, events, milestones, category_config, today)
+        work_items.append((disc, prompt))
 
-        user_prompt = _build_propose_prompt(disc, events, milestones, category_config, today)
+    if not work_items:
+        return None
 
-        try:
-            result = backend.complete_json(PROPOSE_SYSTEM, user_prompt)
-        except Exception as e:
-            logger.error("LLM call failed for discussion %d (%s): %s", disc["id"], disc["title"], e)
-            continue
+    # Collect LLM results into discussion_updates
+    discussion_updates: list[dict] = []
 
-        actions = result.get("actions", [])
-        if not actions:
-            continue
+    if concurrency > 1:
+        import asyncio
 
-        # Clear old proposed actions for this discussion
-        conn.execute("DELETE FROM proposed_actions WHERE discussion_id = ?", (disc["id"],))
+        sem = asyncio.Semaphore(concurrency)
 
-        for action in actions:
-            conn.execute(
-                """INSERT INTO proposed_actions
-                   (discussion_id, action, reasoning, priority, wait_until, assignee, model_used, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    disc["id"],
-                    action.get("action", ""),
-                    action.get("reasoning"),
-                    action.get("priority", "medium"),
-                    action.get("wait_until"),
-                    action.get("assignee"),
-                    backend.model_name,
-                    now,
-                ),
-            )
+        async def _propose_one(prompt: str) -> dict | None:
+            async with sem:
+                try:
+                    return await backend.acomplete_json(system_prompt, prompt)
+                except Exception as e:
+                    logger.error("Async LLM failed for propose_actions: %s", e)
+                    return None
 
-        conn.commit()
-        total += 1
+        async def _run():
+            return await asyncio.gather(*[_propose_one(p) for _, p in work_items])
 
-        logger.info(
-            "Discussion %d (%s): %d actions proposed",
-            disc["id"], disc["title"][:40], len(actions),
-        )
+        results = asyncio.run(_run())
+
+        for idx, ((disc, _), result) in enumerate(zip(work_items, results)):
+            if on_progress:
+                on_progress(idx, len(work_items), disc["title"][:40])
+            if result is None:
+                continue
+            actions = result.get("actions", [])
+            if actions:
+                discussion_updates.append({
+                    "discussion_id": disc["id"],
+                    "proposed_actions": actions,
+                })
+    else:
+        for i, (disc, prompt) in enumerate(work_items):
+            if on_progress:
+                on_progress(i, len(work_items), disc["title"][:40])
+            try:
+                result = backend.complete_json(system_prompt, prompt)
+            except Exception as e:
+                logger.error("LLM call failed for discussion %d (%s): %s", disc["id"], disc["title"], e)
+                continue
+            actions = result.get("actions", [])
+            if actions:
+                discussion_updates.append({
+                    "discussion_id": disc["id"],
+                    "proposed_actions": actions,
+                })
 
     if on_progress:
-        on_progress(len(discussions), len(discussions), "")
+        on_progress(len(work_items), len(work_items), "")
 
-    return total
+    if not discussion_updates:
+        return None
+
+    return {"discussion_updates": discussion_updates}
+
+
+def propose_actions(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    categories_config: list[dict[str, Any]] | None = None,
+    config_path: Path | None = None,
+    limit: int | None = None,
+    force: bool = False,
+    clean: bool = False,
+    company_domain: str | None = None,
+    company_label: str | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    concurrency: int = 1,
+) -> int:
+    """Propose next actions for active discussions.
+
+    Args:
+        concurrency: Max concurrent LLM calls. >1 enables parallel proposals.
+
+    Returns the number of discussions with proposed actions.
+    """
+    from email_manager.ai.agent_backend import ProposedChanges, apply_changes
+    from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block, LAYER_ACTIONS
+
+    proposed_dict = propose_actions_propose(
+        conn, backend, categories_config=categories_config,
+        config_path=config_path, limit=limit, force=force, clean=clean,
+        company_domain=company_domain, company_label=company_label,
+        on_progress=on_progress, concurrency=concurrency,
+    )
+    if not proposed_dict:
+        return 0
+
+    p_hash = compute_prompt_hash(PROPOSE_SYSTEM + format_rules_block(conn, LAYER_ACTIONS))
+
+    # Group discussion_updates by company for per-company processing_runs
+    updates_by_company: dict[str, list[dict]] = {}
+    for update in proposed_dict.get("discussion_updates", []):
+        disc_id = update.get("discussion_id")
+        if not isinstance(disc_id, int):
+            continue
+        row = fetchone(
+            conn,
+            "SELECT c.domain, c.id FROM discussions d JOIN companies c ON d.company_id = c.id WHERE d.id = ?",
+            (disc_id,),
+        )
+        if row:
+            updates_by_company.setdefault(row["domain"], []).append(update)
+
+    total_actions = 0
+    for domain, updates in updates_by_company.items():
+        proposed = ProposedChanges({"discussion_updates": updates})
+        row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (domain,))
+        cid = row["id"] if row else 0
+
+        counts = apply_changes(
+            conn, proposed, cid, domain,
+            mode="staged:propose_actions", model=backend.model_name,
+            prompt_hash=p_hash,
+        )
+        total_actions += counts.get("actions", 0)
+
+    return total_actions

@@ -265,9 +265,57 @@ Every piece of derived data can be traced back to its source:
 | Milestone | `run_id` -> processing_runs, `confidence`, `evidence_event_ids`, `last_evaluated_at` |
 | State change | `discussion_state_history.reasoning`, `model_used`, `detected_at` |
 | Action | `run_id` -> processing_runs, `model_used` |
+| Label | `company_labels.model_used`, `assigned_at`, linked via `processing_runs` |
 | Contact memory | `model_used`, `strategy_used`, `version`, `emails_hash` |
 
-The `processing_runs` table records each execution: company_domain, mode (`staged`/`quick`/`agent`), model, timestamps, and counts (events_created, discussions_created, discussions_updated, actions_proposed).
+### Processing runs and the apply history
+
+The `processing_runs` table is the backbone of provenance. Each run represents a single AI stage's output for a single company — a diff applied to the derived state:
+
+| Column | Purpose |
+|--------|---------|
+| `company_domain` | Which company (always per-company, never "all") |
+| `mode` | Which stage produced it (e.g. `staged:extract_events`, `staged:label_companies`, `quick`, `agent`) |
+| `model` | Which LLM model was used |
+| `prompt_hash` | SHA-256 hash of the system prompt (including injected learned rules) — changes when prompt is edited or rules are added |
+| `parent_run_id` | Previous run for the same company+mode, forming a linear chain |
+| `email_cutoff_date` | Latest email date visible when the run was created (input boundary) |
+| `proposed_changes_json` | Full ProposedChanges snapshot — the diff that was applied |
+| `started_at` / `completed_at` | Timestamps |
+| `events_created`, `discussions_created`, etc. | Counts of what was produced |
+
+This forms an event-sourced history per company: you can reconstruct the derived state at any point by replaying ProposedChanges from the first run to run N. You can also roll back to any point by deleting derived data from run N onward.
+
+### ProposedChanges
+
+All AI codepaths (staged pipeline, quick update, agent mode) produce a `ProposedChanges` object before writing to the database. This is the unit of evaluation:
+
+```python
+ProposedChanges:
+    events: list[dict]              # New events to insert
+    new_discussions: list[dict]     # New discussions to create
+    discussion_updates: list[dict]  # State/summary/milestone/action updates
+    event_assignments: list[dict]   # Assign existing events to discussions
+    thread_links: list[dict]        # Link threads to discussions
+    label_updates: list[dict]       # Company label assignments
+```
+
+The `apply_changes()` function applies a ProposedChanges to the database, creating the processing_run record and snapshotting the JSON.
+
+### Feedback and evaluation
+
+The system supports a review → annotate → learn → improve cycle:
+
+1. **Review**: `review <run_id>` displays numbered items from the ProposedChanges snapshot
+2. **Annotate**: `review <run_id> --annotate` marks items as correct/incorrect/missing (stored in `feedback` table)
+3. **Evaluate**: `eval` computes precision metrics from annotations, broken down by layer
+4. **Learn**: `learn add -l events -r "rule text"` distills patterns into `learned_rules`
+5. **Inject**: Learned rules are automatically appended to system prompts as "Learned corrections from past reviews"
+6. **Measure**: Next eval shows whether quality improved
+
+### Prompt versioning
+
+Each processing_run records a `prompt_hash` — a SHA-256 of the full system prompt including any injected learned rules. When the hash changes between runs for the same company+mode, the prompt has changed and the stage may benefit from re-running. This enables detecting stale analysis after prompt edits, model upgrades, or new learned rules.
 
 ## AI Backend Architecture
 
@@ -291,7 +339,7 @@ The factory selects the backend based on `config.ai_backend` and API key availab
 
 ## Database
 
-SQLite with WAL mode, foreign keys enabled, 30-second busy timeout. Schema version 19 with migration support. Key pragmas:
+SQLite with WAL mode, foreign keys enabled, 30-second busy timeout. Schema version 23 with migration support. PostgreSQL also supported via `DB_BACKEND=postgres`. Key pragmas:
 
 ```sql
 PRAGMA journal_mode=WAL;
@@ -341,17 +389,23 @@ All analysis is scoped to companies (identified by email domain). This breaks do
 
 The system needs a company-merging or aliasing mechanism and better handling of freemail domains.
 
-### Feedback Loop Not Wired
+### Feedback Loop Not Wired — RESOLVED
 
-The `feedback`, `few_shot_examples`, and `learned_rules` tables exist in the schema but are not consumed by any prompt construction code. User corrections via `update-discussion` are recorded but never fed back into the LLM. This means the system makes the same mistakes repeatedly and doesn't improve from corrections.
+~~The `feedback`, `few_shot_examples`, and `learned_rules` tables exist in the schema but are not consumed by any prompt construction code.~~
 
-### No Rollback Mechanism
+**Now implemented.** All AI stages query `learned_rules` for their layer and inject active rules into the system prompt as "Learned corrections from past reviews." The `review` CLI allows annotating ProposedChanges snapshots (correct/incorrect/missing), and `learn add` distils patterns into rules. The `eval` CLI computes precision metrics from annotations.
 
-While every analysis result is stamped with a `run_id`, there is no tooling to roll back a specific run's outputs. If a bad model or prompt produces incorrect results, the only recovery paths are `--clean` (nuke and redo) or manual SQL. A `rollback-run <run_id>` command that deletes events, discussion updates, milestones, and actions produced by a specific run would be valuable.
+### No Rollback Mechanism — RESOLVED
 
-### Sequential LLM Calls
+~~While every analysis result is stamped with a `run_id`, there is no tooling to roll back a specific run's outputs.~~
 
-All LLM calls are synchronous and sequential. Companies are independent, threads within a company are independent, discussions are independent, but the system processes them one at a time. The `BetterUpdating.md` plan identifies this and proposes async backends with a concurrency semaphore, but it's not implemented. The impact depends on API rate limits, but even modest parallelism (3-5 concurrent calls) would meaningfully reduce wall-clock time for batch runs.
+**Now implemented.** `rollback <run_id>` deletes all derived data (events, discussions, milestones, actions, state history) produced by that run and all subsequent runs in the same company+mode chain. Processing runs form a linear chain per company via `parent_run_id`, so rollback is precise.
+
+### Sequential LLM Calls — RESOLVED
+
+~~All LLM calls are synchronous and sequential.~~
+
+**Now implemented.** Async LLM backends (`acomplete`/`acomplete_json`), semaphore-gated concurrency within stages, and `--concurrency` CLI flag. Extract_events, analyse_discussions, and propose_actions all support parallel LLM calls.
 
 ### SQLite Scaling Limits
 
@@ -373,41 +427,26 @@ There are no regression tests that verify the quality of LLM outputs against kno
 
 ## Future: Learning and Versioning
 
-### How the System Should Learn
+### What's Implemented
 
-The feedback infrastructure is partially built. Three mechanisms should be completed:
+**Learned rules** are working end-to-end: `learn add` creates rules, they're injected into system prompts via `format_rules_block()`, and each stage queries its layer's rules before calling the LLM.
 
-**1. Few-shot injection**: When a user corrects an event extraction (wrong domain, missed event, hallucinated event), the system should generate a few-shot example from the correction: "given this thread, you said X but the correct answer is Y." These examples should be injected into the extraction prompt for similar threads. The `few_shot_examples` table already exists for this purpose.
+**Prompt versioning** is implemented: each processing_run records a `prompt_hash` (SHA-256 of the full system prompt including injected rules). Prompt changes are detectable by comparing hashes between runs.
 
-**2. Learned rules**: Pattern-level corrections (e.g. "emails from @acme.com about 'trial' are always pharma-deal, not investment") should be distilled into rules and prepended to relevant prompts. The `learned_rules` table exists but isn't read during prompt construction.
+**Run-based rollback** is implemented: `rollback <run_id>` deletes all derived data from that run and subsequent runs in the same company+mode chain. Processing runs form a linear history via `parent_run_id`.
 
-**3. Confidence calibration**: The system tracks confidence scores on events and milestones. Over time, comparing confidence predictions to user corrections would allow calibrating thresholds: "events with confidence < 0.6 from this model are wrong 40% of the time" could trigger automatic review queues.
+**Review and evaluation** are implemented: `review` CLI to inspect/annotate ProposedChanges snapshots, `eval` CLI for precision metrics by layer.
 
-### Versioning Strategy
+### What's Still Missing
 
-The system already tracks `model_version` and `prompt_version` on every event, and `model_used` on discussions, milestones, and actions. This is the foundation for a proper versioning strategy, but several pieces are missing:
+**Few-shot injection**: The `few_shot_examples` table exists and `format_examples_block()` is implemented, but no CLI or workflow for creating examples from annotations. The next step is a `learn add-example` command that takes a run_id + item index and captures the correction as a few-shot example.
 
-**Prompt versioning**: Currently a static string (`PROMPT_VERSION = "v2"`). This should be computed from a hash of the actual prompt template content, so that any prompt edit automatically creates a new version. Alternatively, prompts should live in versioned files rather than Python constants.
+**Confidence calibration**: Confidence scores are tracked on events and milestones. Comparing predictions to annotations would enable auto-calibration: "events with confidence < 0.6 from this model are wrong 40% of the time." Not yet implemented.
 
-**Category config versioning**: The `discussion_categories.yaml` file defines the domain model. Changing event types, milestones, or workflow states changes what the system can detect. But the YAML file has no version tracking. Adding or removing event types from a domain should be a versioned change, and re-analysis should be triggered for affected companies when the vocabulary changes.
+**Category config versioning**: The `discussion_categories.yaml` file defines the domain model but has no version tracking. Changes to event types or milestones should be detectable (e.g. by hashing the YAML content and comparing to the latest run's config hash).
 
-**Model version management**: When upgrading models (e.g. Claude Sonnet 4 -> Claude Sonnet 4.6), all existing analysis was produced by the old model. The system should be able to:
+**Auto-detect stale stages**: The `prompt_hash` is recorded but not yet used to auto-detect which companies need re-running. A future `analyse --stale-prompts` flag could compare the current prompt hash to each company's latest run and only re-process where the hash differs.
 
-1. Identify which companies/discussions were last analysed by which model version.
-2. Prioritise re-analysis for entities where the model change is most likely to matter (e.g. low-confidence events, discussions in ambiguous states).
-3. Compare outputs between model versions to detect regressions before committing to the new model.
+**Model comparison**: When upgrading models, comparing outputs between versions on the same input data would catch regressions. The ProposedChanges snapshots make this possible (re-run with new model, diff against old snapshot) but the tooling doesn't exist yet.
 
-**Run-based rollback**: Each `processing_runs` entry should support rollback: delete all events, discussion updates, milestones, and actions created by that run, restoring the previous state. This turns model upgrades into safe, reversible operations.
-
-**Schema versioning**: The database uses `SCHEMA_VERSION = 19` with sequential migrations. This works but doesn't capture the relationship between schema changes and analysis compatibility. A schema migration that adds a column is fine, but one that changes how events are stored may invalidate existing analysis. The migration system should distinguish structural changes from semantic changes.
-
-### Evaluation and Quality Gates
-
-Before deploying a prompt change or model upgrade:
-
-1. Run the new configuration against a held-out set of representative threads.
-2. Compare extracted events against a gold-standard annotation set.
-3. Measure precision/recall per domain and event type.
-4. Only promote the new configuration if metrics are at or above the previous version.
-
-This evaluation pipeline doesn't exist yet but is essential for safe iteration. Without it, every change to prompts, models, or category vocabularies is a leap of faith.
+**Evaluation quality gates**: A held-out set of representative threads with gold-standard annotations, used to test prompt/model changes before deploying to production data. The `eval` infrastructure provides the metrics; what's missing is the gold-standard dataset and CI integration.

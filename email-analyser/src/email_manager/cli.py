@@ -19,6 +19,46 @@ def _gmail_token_email(acct: EmailAccount) -> str:
         return "[not authenticated]"
 
 
+def _read_company_file(path: str) -> list[str]:
+    """Read company domains/names from a file (one per line, or CSV with 'domain' column).
+
+    Handles CSV files with headers (even if there are leading non-CSV lines like
+    migration output). Also handles plain text files with one domain per line.
+    """
+    from pathlib import Path as _Path
+    text = _Path(path).read_text()
+    lines = text.splitlines()
+    if not lines:
+        return []
+
+    # Detect CSV: scan first 10 lines for a header containing "domain"
+    for i, line in enumerate(lines[:10]):
+        stripped = line.strip()
+        if "," in stripped and "domain" in stripped.lower():
+            import csv
+            import io
+            # Re-parse from the header line onward
+            csv_text = "\n".join(lines[i:])
+            reader = csv.DictReader(io.StringIO(csv_text))
+            domain_col = None
+            for col in (reader.fieldnames or []):
+                if col.strip().lower() == "domain":
+                    domain_col = col
+                    break
+            if domain_col:
+                return [row[domain_col].strip() for row in reader
+                        if row.get(domain_col, "").strip()]
+
+    # Plain text: one entry per line, first whitespace-delimited token
+    entries = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("["):
+            continue
+        entries.append(line.split()[0])
+    return entries
+
+
 @click.group()
 @click.pass_context
 def cli(ctx: click.Context) -> None:
@@ -304,8 +344,9 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 @click.option("--last-seen-after", default=None, help="Only process companies with email activity after this date (YYYY-MM-DD)")
 @click.option("--last-seen-before", default=None, help="Only process companies with last email activity before this date (YYYY-MM-DD)")
 @click.option("--dry-run", is_flag=True, help="Show which companies would be processed without running anything")
+@click.option("--concurrency", type=int, default=1, show_default=True, help="Max concurrent LLM calls within stages")
 @click.pass_context
-def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], exclude_file: str | None, company_file: str | None, contact: str | None, per_company: bool, stale_before: str | None, last_seen_after: str | None, last_seen_before: str | None, dry_run: bool) -> None:
+def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], exclude_file: str | None, company_file: str | None, contact: str | None, per_company: bool, stale_before: str | None, last_seen_after: str | None, last_seen_before: str | None, dry_run: bool, concurrency: int) -> None:
     """Run AI analysis pipeline on synced emails.
 
     Pipeline stages (in order):
@@ -330,14 +371,6 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
     from pathlib import Path
     from email_manager.pipeline.runner import run_pipeline
 
-    def _read_company_file(path: str) -> list[str]:
-        entries = []
-        for line in Path(path).read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            entries.append(line.split()[0])
-        return entries
 
     config: Config = ctx.obj["config"]
     console = Console()
@@ -350,7 +383,7 @@ def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force
 
     companies_from_file = _read_company_file(company_file) if company_file else []
 
-    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, company_list=companies_from_file or None, label=label, exclude=exclude_list or None, contact=contact, per_company=per_company, stale_before=stale_before, last_seen_after=last_seen_after, last_seen_before=last_seen_before, dry_run=dry_run)
+    run_pipeline(config, stages=stages, console=console, limit=limit, force=force, clean=clean, company=company, company_list=companies_from_file or None, label=label, exclude=exclude_list or None, contact=contact, per_company=per_company, stale_before=stale_before, last_seen_after=last_seen_after, last_seen_before=last_seen_before, dry_run=dry_run, concurrency=concurrency)
 
 
 QUICK_UPDATE_THRESHOLD = 10  # Max new threads before switching to staged pipeline
@@ -362,8 +395,9 @@ QUICK_UPDATE_THRESHOLD = 10  # Max new threads before switching to staged pipeli
 @click.option("--company-file", default=None, type=click.Path(exists=True), help="File with company domains/names to process (one per line)")
 @click.option("--threshold", type=int, default=QUICK_UPDATE_THRESHOLD, show_default=True, help="Max new threads for single-call mode; above this uses staged pipeline")
 @click.option("--agent", is_flag=True, help="Use agent mode: Claude processes each company in an autonomous session with database tools")
+@click.option("--concurrency", type=int, default=1, show_default=True, help="Max concurrent LLM calls for staged pipeline")
 @click.pass_context
-def update(ctx: click.Context, company: str | None, label: str | None, company_file: str | None, threshold: int, agent: bool) -> None:
+def update(ctx: click.Context, company: str | None, label: str | None, company_file: str | None, threshold: int, agent: bool, concurrency: int) -> None:
     """Incremental update: process new emails for companies that need it.
 
     Adapts strategy per company based on volume of changes:
@@ -404,14 +438,6 @@ def update(ctx: click.Context, company: str | None, label: str | None, company_f
     backend = get_backend(config)
     console.print(f"Using AI backend: [bold]{backend.model_name}[/bold]")
 
-    def _read_company_file(path: str) -> list[str]:
-        entries = []
-        for line in Path(path).read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            entries.append(line.split()[0])
-        return entries
 
     # Resolve company domains
     auto_scoped = False
@@ -457,23 +483,33 @@ def update(ctx: click.Context, company: str | None, label: str | None, company_f
 
     for i, domain in enumerate(domains):
         if agent:
-            # Agent mode: propose changes, review, then apply
-            from email_manager.ai.agent_backend import apply_changes, ProposedChanges
-            from email_manager.analysis.quick_update import quick_update_propose
+            # Agent mode: autonomous session, propose changes, review, apply
+            from email_manager.ai.agent_backend import agent_update_company, apply_changes
 
             console.print(f"\n[bold cyan]{domain}[/bold cyan] ({i+1}/{len(domains)}) [agent]")
             agent_count += 1
 
-            proposed_dict, company_info = quick_update_propose(
-                conn, backend, domain, categories_config=categories_config,
+            result = agent_update_company(
+                conn, domain, model=backend.model_name,
+                auto_apply=False, console=console,
             )
 
-            if not proposed_dict or not company_info:
-                console.print("  [dim]No new emails to process[/dim]")
-                continue
+            proposed = result.get("proposed")
+            agent_tracker = result.get("token_tracker")
 
-            proposed = ProposedChanges(proposed_dict)
-            if proposed.is_empty:
+            if agent_tracker and agent_tracker.call_count > 0:
+                console.print(
+                    f"  [dim]{agent_tracker.total_input}+{agent_tracker.total_output}"
+                    f"={agent_tracker.total} tokens, {agent_tracker.call_count} iterations[/dim]"
+                )
+
+            if result.get("summary"):
+                summary_text = result["summary"][:300]
+                if len(result["summary"]) > 300:
+                    summary_text += "..."
+                console.print(f"  [dim]{summary_text}[/dim]")
+
+            if not proposed or proposed.is_empty:
                 console.print("  [dim]No changes proposed[/dim]")
                 continue
 
@@ -487,9 +523,11 @@ def update(ctx: click.Context, company: str | None, label: str | None, company_f
                 should_apply = click.confirm("\n  Apply these changes?", default=True)
 
             if should_apply:
+                company_row = fetchone(conn, "SELECT id, domain FROM companies WHERE domain = ?", (domain,))
                 counts = apply_changes(
-                    conn, proposed, company_info["id"], company_info["domain"],
+                    conn, proposed, company_row["id"], company_row["domain"],
                     mode="agent", model=backend.model_name,
+                    token_tracker=agent_tracker,
                 )
                 total_events += counts["events"]
                 total_new += counts["new_discussions"]
@@ -512,10 +550,10 @@ def update(ctx: click.Context, company: str | None, label: str | None, company_f
             if use_staged:
                 # Staged pipeline: extract → discover → analyse → propose
                 staged_count += 1
-                ev_count = run_extract_events(conn, backend, config, console=console, company=domain)
+                ev_count = run_extract_events(conn, backend, config, console=console, company=domain, concurrency=concurrency)
                 disc_count = run_discover_discussions(conn, backend, config, console=console, company=domain)
-                ana_count = run_analyse_discussions(conn, backend, config, console=console, company=domain)
-                act_count = run_propose_actions(conn, backend, config, console=console, company=domain)
+                ana_count = run_analyse_discussions(conn, backend, config, console=console, company=domain, concurrency=concurrency)
+                act_count = run_propose_actions(conn, backend, config, console=console, company=domain, concurrency=concurrency)
                 total_events += max(ev_count, 0)
                 total_new += max(disc_count, 0)
                 total_updates += max(ana_count, 0)
@@ -1019,32 +1057,39 @@ def merge_discussions(ctx: click.Context, target_id: int, source_id: int, reason
 @click.option("--company", "-c", default=None, help="Scope to a specific company (domain or name)")
 @click.option("--label", "-l", default=None, help="Scope to all companies with this label")
 @click.option("--company-file", default=None, type=click.Path(exists=True), help="File with company domains/names (one per line)")
+@click.option("--from-stage", "from_stage", default=None,
+              type=click.Choice(["extract_events", "discover_discussions", "analyse_discussions", "propose_actions"]),
+              help="Delete outputs from this stage onwards, keeping earlier stages intact")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
-def reset(ctx: click.Context, company: str | None, label: str | None, company_file: str | None, yes: bool) -> None:
-    """Delete all analysis output (events, discussions, actions, etc.) for a scope.
+def reset(ctx: click.Context, company: str | None, label: str | None, company_file: str | None, from_stage: str | None, yes: bool) -> None:
+    """Delete analysis output for a scope, optionally from a specific stage onwards.
 
-    Removes everything generated by the analysis pipeline while preserving
-    raw email data, contacts, companies, and labels.
-
-    \b
-    Tables cleared:
-      - event_ledger            (extracted events)
-      - discussions             (+ threads, state history, milestones)
-      - actions                 (extracted actions)
-      - proposed_actions        (AI-suggested next steps)
-      - discussion_events       (calendar event links)
+    Without --from-stage, removes everything generated by the analysis pipeline.
+    With --from-stage, only removes outputs from that stage and later stages,
+    keeping earlier work intact.
 
     \b
-    Tables preserved:
+    Stage order and what each produces:
+      1. extract_events       → event_ledger
+      2. discover_discussions → discussions, discussion_threads
+      3. analyse_discussions  → discussion state/summary, milestones, state_history
+      4. propose_actions      → proposed_actions
+
+    \b
+    Tables always preserved:
       - emails, threads, contacts, companies, company_labels
       - calendar_events, contact_memories, feedback
 
-    Example: Reset analysis for one company:
+    \b
+    Example: Reset everything for one company:
       email-analyser reset --company acme.com
 
-    Example: Reset all companies in a file:
-      email-analyser reset --company-file companies.txt
+    Example: Keep events but redo discussions onwards:
+      email-analyser reset --company acme.com --from-stage discover_discussions
+
+    Example: Just redo proposed actions:
+      email-analyser reset --company acme.com --from-stage propose_actions
     """
     from pathlib import Path
 
@@ -1052,14 +1097,6 @@ def reset(ctx: click.Context, company: str | None, label: str | None, company_fi
     conn = get_db(config)
     console = Console()
 
-    def _read_company_file(path: str) -> list[str]:
-        entries = []
-        for line in Path(path).read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            entries.append(line.split()[0])
-        return entries
 
     # Resolve company IDs in scope
     company_ids: list[int] | None = None
@@ -1104,32 +1141,61 @@ def reset(ctx: click.Context, company: str | None, label: str | None, company_fi
     disc_ph = ",".join("?" for _ in disc_ids) if disc_ids else "NULL"
     disc_params = tuple(disc_ids) if disc_ids else ()
 
-    event_count = fetchone(conn, f"SELECT COUNT(*) FROM event_ledger WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM event_ledger", disc_params)[0]
-    # Also count orphan events (not assigned to any discussion but from these companies' threads)
+    # Determine what to delete based on --from-stage
+    # Stage order: extract_events → discover_discussions → analyse_discussions → propose_actions
+    STAGE_ORDER = ["extract_events", "discover_discussions", "analyse_discussions", "propose_actions"]
+    if from_stage:
+        stage_idx = STAGE_ORDER.index(from_stage)
+        stages_to_clear = set(STAGE_ORDER[stage_idx:])
+    else:
+        stages_to_clear = set(STAGE_ORDER)
+
+    delete_events = "extract_events" in stages_to_clear
+    delete_discussions = "discover_discussions" in stages_to_clear
+    delete_analysis = "analyse_discussions" in stages_to_clear
+    delete_actions = "propose_actions" in stages_to_clear
+
+    # Build company LIKE clauses for orphan event cleanup
+    like_clauses: list[str] = []
+    like_params: list[str] = []
     if company_ids is not None:
-        like_clauses = []
-        like_params: list[str] = []
         for cid in company_ids:
             domain_row = fetchone(conn, "SELECT domain FROM companies WHERE id = ?", (cid,))
             if domain_row:
                 like = f"%@{domain_row[0]}%"
                 like_clauses.append("(e.from_address LIKE ? OR e.to_addresses LIKE ?)")
                 like_params.extend([like, like])
+
+    # Count what will be deleted
+    counts: dict[str, int] = {}
+
+    if delete_events:
+        event_count = fetchone(conn, f"SELECT COUNT(*) FROM event_ledger WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM event_ledger", disc_params)[0]
         if like_clauses:
             orphan_count = fetchone(conn, f"""SELECT COUNT(*) FROM event_ledger el
                 JOIN emails e ON el.source_email_id = e.message_id
                 WHERE el.discussion_id IS NULL AND ({' OR '.join(like_clauses)})""", tuple(like_params))[0]
             event_count += orphan_count
+        counts["events"] = event_count
 
-    disc_count = len(disc_ids)
-    action_count = fetchone(conn, f"SELECT COUNT(*) FROM actions WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM actions", disc_params)[0]
+    if delete_discussions:
+        counts["discussions"] = len(disc_ids)
 
-    console.print(f"\n[bold]Scope:[/bold] {scope_desc}")
-    console.print(f"  Discussions to delete: [bold]{disc_count}[/bold]")
-    console.print(f"  Events to delete:      [bold]{event_count}[/bold]")
-    console.print(f"  Actions to delete:     [bold]{action_count}[/bold]")
+    if delete_analysis:
+        counts["milestones"] = fetchone(conn, f"SELECT COUNT(*) FROM milestones WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM milestones", disc_params)[0]
+        counts["state_history"] = fetchone(conn, f"SELECT COUNT(*) FROM discussion_state_history WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM discussion_state_history", disc_params)[0]
 
-    if disc_count == 0 and event_count == 0:
+    if delete_actions:
+        counts["proposed_actions"] = fetchone(conn, f"SELECT COUNT(*) FROM proposed_actions WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM proposed_actions", disc_params)[0]
+        counts["actions"] = fetchone(conn, f"SELECT COUNT(*) FROM actions WHERE discussion_id IN ({disc_ph})" if disc_ids else "SELECT COUNT(*) FROM actions", disc_params)[0]
+
+    # Display
+    stage_label = f" from {from_stage} onwards" if from_stage else ""
+    console.print(f"\n[bold]Scope:[/bold] {scope_desc}{stage_label}")
+    for name, count in counts.items():
+        console.print(f"  {name}: [bold]{count}[/bold]")
+
+    if all(v == 0 for v in counts.values()):
         console.print("\n[dim]Nothing to reset.[/dim]")
         conn.close()
         return
@@ -1137,31 +1203,224 @@ def reset(ctx: click.Context, company: str | None, label: str | None, company_fi
     if not yes:
         click.confirm("\nProceed with reset?", abort=True)
 
-    # Delete in dependency order
+    # Delete in dependency order, respecting --from-stage
     if disc_ids:
-        conn.execute(f"UPDATE discussions SET parent_id = NULL WHERE parent_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM milestones WHERE discussion_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM discussion_state_history WHERE discussion_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM discussion_threads WHERE discussion_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM discussion_events WHERE discussion_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM actions WHERE discussion_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM proposed_actions WHERE discussion_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM event_ledger WHERE discussion_id IN ({disc_ph})", disc_params)
-        conn.execute(f"DELETE FROM discussions WHERE id IN ({disc_ph})", disc_params)
+        if delete_actions:
+            conn.execute(f"DELETE FROM proposed_actions WHERE discussion_id IN ({disc_ph})", disc_params)
+            conn.execute(f"DELETE FROM actions WHERE discussion_id IN ({disc_ph})", disc_params)
 
-    # Delete orphan events for scoped companies
-    if company_ids is not None and like_clauses:
-        conn.execute(f"""DELETE FROM event_ledger WHERE discussion_id IS NULL
-            AND source_email_id IN (
-                SELECT e.message_id FROM emails e WHERE {' OR '.join(like_clauses)}
-            )""", tuple(like_params))
-    elif company_ids is None:
-        conn.execute("DELETE FROM event_ledger")
+        if delete_analysis:
+            conn.execute(f"DELETE FROM milestones WHERE discussion_id IN ({disc_ph})", disc_params)
+            conn.execute(f"DELETE FROM discussion_state_history WHERE discussion_id IN ({disc_ph})", disc_params)
+            # Reset discussion state/summary but keep the discussion itself
+            if not delete_discussions:
+                conn.execute(f"UPDATE discussions SET current_state = NULL, summary = NULL, updated_at = NULL WHERE id IN ({disc_ph})", disc_params)
+
+        if delete_discussions:
+            conn.execute(f"UPDATE discussions SET parent_id = NULL WHERE parent_id IN ({disc_ph})", disc_params)
+            conn.execute(f"DELETE FROM discussion_threads WHERE discussion_id IN ({disc_ph})", disc_params)
+            conn.execute(f"DELETE FROM discussion_events WHERE discussion_id IN ({disc_ph})", disc_params)
+            # Unlink events from discussions (but don't delete events unless extract_events is also being cleared)
+            if not delete_events:
+                conn.execute(f"UPDATE event_ledger SET discussion_id = NULL WHERE discussion_id IN ({disc_ph})", disc_params)
+            else:
+                conn.execute(f"DELETE FROM event_ledger WHERE discussion_id IN ({disc_ph})", disc_params)
+            conn.execute(f"DELETE FROM discussions WHERE id IN ({disc_ph})", disc_params)
+
+    if delete_events:
+        # Delete orphan events for scoped companies
+        if company_ids is not None and like_clauses:
+            conn.execute(f"""DELETE FROM event_ledger WHERE discussion_id IS NULL
+                AND source_email_id IN (
+                    SELECT e.message_id FROM emails e WHERE {' OR '.join(like_clauses)}
+                )""", tuple(like_params))
+        elif company_ids is None:
+            conn.execute("DELETE FROM event_ledger")
 
     conn.commit()
     conn.close()
 
-    console.print(f"\n[green]Reset complete.[/green] Deleted {disc_count} discussions, {event_count} events, {action_count} actions.")
+    parts = [f"{v} {k}" for k, v in counts.items() if v > 0]
+    console.print(f"\n[green]Reset complete.{stage_label}[/green] Deleted: {', '.join(parts) or 'nothing'}.")
+
+
+@cli.command(name="migrate-db")
+@click.option("--target-url", required=True, help="PostgreSQL URL to migrate to")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.pass_context
+def migrate_db(ctx: click.Context, target_url: str, yes: bool) -> None:
+    """Migrate data from SQLite to PostgreSQL.
+
+    Copies all tables from the current SQLite database to a PostgreSQL server.
+    The target database schema is created automatically.
+
+    \b
+    Example:
+      email-analyser migrate-db --target-url postgresql://user:pass@host:5432/email_manager
+    """
+    import sqlite3 as _sqlite3
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    config: Config = ctx.obj["config"]
+    console = Console()
+
+    # Source: SQLite
+    src_path = config.db_abs_path
+    if not src_path.exists():
+        console.print(f"[red]SQLite database not found: {src_path}[/red]")
+        return
+
+    console.print(f"[bold]Source:[/bold] {src_path}")
+    console.print(f"[bold]Target:[/bold] {target_url.split('@')[0].split('//')[0]}//***@{target_url.split('@')[-1] if '@' in target_url else target_url}")
+
+    src = _sqlite3.connect(str(src_path))
+    src.row_factory = _sqlite3.Row
+
+    # Count rows in each table
+    tables = [r[0] for r in src.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ).fetchall()]
+
+    table_counts: dict[str, int] = {}
+    for table in tables:
+        count = src.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        table_counts[table] = count
+
+    total_rows = sum(table_counts.values())
+    console.print(f"\n[bold]Tables to migrate:[/bold] {len(tables)} ({total_rows} rows total)")
+    for table, count in sorted(table_counts.items()):
+        if count > 0:
+            console.print(f"  {table}: {count:,}")
+
+    if not yes:
+        click.confirm("\nProceed with migration?", abort=True)
+
+    # Target: PostgreSQL
+    from email_manager.db_postgres import get_postgres_connection
+    from email_manager.db import _init_schema
+    dst = get_postgres_connection(target_url)
+
+    # Initialize schema on target
+    console.print("\n[bold]Creating schema...[/bold]")
+    _init_schema(dst)
+    console.print("[green]Schema created[/green]")
+
+    # Tables in dependency order (FKs)
+    ordered_tables = [
+        "schema_version",
+        "emails", "sync_state", "contacts", "threads",
+        "projects", "email_projects", "email_references",
+        "companies", "company_contacts", "company_labels",
+        "co_email_stats", "contact_memories",
+        "pipeline_runs", "calendar_events",
+        "processing_runs",
+        "discussions", "discussion_threads", "discussion_state_history",
+        "discussion_events",
+        "event_ledger", "milestones",
+        "actions", "proposed_actions",
+        "feedback", "few_shot_examples", "learned_rules",
+        "change_journal",
+    ]
+
+    # Only migrate tables that exist in source
+    tables_to_migrate = [t for t in ordered_tables if t in table_counts]
+    # Add any tables we missed
+    for t in tables:
+        if t not in tables_to_migrate:
+            tables_to_migrate.append(t)
+
+    BATCH = 1000
+    migrated = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Migrating", total=total_rows)
+
+        for table in tables_to_migrate:
+            count = table_counts.get(table, 0)
+            if count == 0:
+                continue
+
+            # Get column names from source and target, use intersection
+            src_cols = [r[1] for r in src.execute(f"PRAGMA table_info({table})").fetchall()]
+            pg_cur_tmp = dst._conn.cursor()
+            pg_cur_tmp.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = %s ORDER BY ordinal_position",
+                (table,),
+            )
+            dst_cols = {r[0] for r in pg_cur_tmp.fetchall()}
+            col_names = [c for c in src_cols if c in dst_cols]
+            if not col_names:
+                continue
+            cols_str = ", ".join(col_names)
+            placeholders = ", ".join(["%s"] * len(col_names))
+
+            progress.update(task, description=f"Migrating {table}")
+
+            # Use raw psycopg2 cursor for bulk inserts (bypass translate_sql)
+            pg_cur = dst._conn.cursor()
+
+            # Clear target table first (in case of partial previous migration)
+            try:
+                pg_cur.execute(f"DELETE FROM {table}")
+                dst._conn.commit()
+            except Exception:
+                dst._conn.rollback()
+
+            offset = 0
+            while offset < count:
+                rows = src.execute(
+                    f"SELECT {cols_str} FROM {table} LIMIT {BATCH} OFFSET {offset}"
+                ).fetchall()
+                if not rows:
+                    break
+
+                for row in rows:
+                    values = tuple(row[c] for c in col_names)
+                    try:
+                        pg_cur.execute(
+                            f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders})",
+                            values,
+                        )
+                    except Exception as e:
+                        # Skip constraint violations (e.g. duplicates)
+                        dst._conn.rollback()
+
+                dst._conn.commit()
+                offset += len(rows)
+                migrated += len(rows)
+                progress.advance(task, len(rows))
+
+    # Fix sequences (PostgreSQL SERIAL columns need sequence reset)
+    serial_tables = [
+        "emails", "contacts", "threads", "projects", "companies",
+        "pipeline_runs", "discussions", "discussion_state_history",
+        "actions", "calendar_events", "milestones", "feedback",
+        "few_shot_examples", "learned_rules", "proposed_actions",
+        "processing_runs", "change_journal",
+    ]
+    for table in serial_tables:
+        if table in table_counts and table_counts[table] > 0:
+            try:
+                dst.execute(
+                    f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE(MAX(id), 0) + 1, false) FROM {table}"
+                )
+                dst.commit()
+            except Exception:
+                dst._conn.rollback()
+
+    src.close()
+    dst.close()
+
+    console.print(f"\n[bold green]Migration complete.[/bold green] {migrated:,} rows migrated across {len(tables_to_migrate)} tables.")
+    console.print(f"\nTo switch to PostgreSQL, set in .env:")
+    console.print(f"  DB_BACKEND=postgres")
+    console.print(f"  DB_URL={target_url}")
 
 
 @cli.command()
@@ -1223,15 +1482,16 @@ def projects(ctx: click.Context, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--limit", "-n", default=30)
+@click.option("--limit", "-n", default=30, help="Max companies to show (ignored with --csv)")
 @click.option("--label", "-l", default=None, help="Filter by label (e.g. customer, vendor, partner)")
 @click.option("--unlabelled", is_flag=True, help="Show only companies without labels")
 @click.option("--updated-after", default=None, help="Only show companies analysed after this date (YYYY-MM-DD)")
 @click.option("--updated-before", default=None, help="Only show companies not analysed since this date, or never analysed (YYYY-MM-DD)")
 @click.option("--last-seen-after", default=None, help="Only show companies with email activity after this date (YYYY-MM-DD)")
 @click.option("--last-seen-before", default=None, help="Only show companies with last email activity before this date (YYYY-MM-DD)")
+@click.option("--csv", "csv_output", is_flag=True, help="Output all matching companies as CSV (no limit)")
 @click.pass_context
-def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool, updated_after: str | None, updated_before: str | None, last_seen_after: str | None, last_seen_before: str | None) -> None:
+def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: bool, updated_after: str | None, updated_before: str | None, last_seen_after: str | None, last_seen_before: str | None, csv_output: bool) -> None:
     """List companies you interact with and their associated email addresses."""
     config: Config = ctx.obj["config"]
     conn = get_db(config)
@@ -1278,21 +1538,58 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
         params.append(last_seen_before)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    params.append(limit)
 
-    rows = fetchall(
-        conn,
-        f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
-            FROM companies c
-            {where}
-            ORDER BY c.email_count DESC
-            LIMIT ?""",
-        tuple(params),
-    )
+    if csv_output:
+        # No limit for CSV — output all matching rows
+        rows = fetchall(
+            conn,
+            f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+                FROM companies c
+                {where}
+                ORDER BY c.email_count DESC""",
+            tuple(params),
+        )
+    else:
+        params.append(limit)
+        rows = fetchall(
+            conn,
+            f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+                FROM companies c
+                {where}
+                ORDER BY c.email_count DESC
+                LIMIT ?""",
+            tuple(params),
+        )
 
     console = Console()
     if not rows:
+        if csv_output:
+            conn.close()
+            return
         console.print("[dim]No companies found. Run 'email-manager analyse --stage extract_base' first.[/dim]")
+        conn.close()
+        return
+
+    if csv_output:
+        import csv
+        import sys
+        writer = csv.writer(sys.stdout)
+        writer.writerow(["name", "domain", "email_count", "labels", "first_seen", "last_seen"])
+        for row in rows:
+            labels = fetchall(
+                conn,
+                "SELECT label FROM company_labels WHERE company_id = ? ORDER BY confidence DESC",
+                (row["id"],),
+            )
+            label_str = ";".join(l["label"] for l in labels)
+            writer.writerow([
+                row["name"],
+                row["domain"],
+                row["email_count"],
+                label_str,
+                (row["first_seen"] or "")[:10],
+                (row["last_seen"] or "")[:10],
+            ])
         conn.close()
         return
 
@@ -2597,6 +2894,681 @@ def chat(ctx: click.Context) -> None:
         run_repl(conn, backend, console)
     finally:
         conn.close()
+
+
+# ── Review / Evaluation ──────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("run_id", required=False, type=int)
+@click.option("--limit", "-n", default=20, help="Number of recent runs to show")
+@click.option("--company", "-c", default=None, help="Filter by company domain")
+@click.option("--mode", "-m", default=None, help="Filter by mode (staged:*, quick, agent)")
+@click.option("--annotate", is_flag=True, help="Interactively annotate items in this run")
+@click.pass_context
+def review(ctx: click.Context, run_id: int | None, limit: int, company: str | None,
+           mode: str | None, annotate: bool) -> None:
+    """Review processing runs and their proposed changes.
+
+    Without arguments: list recent runs.
+    With RUN_ID: show the proposed changes for that run.
+    With --annotate: interactively mark items as correct/incorrect/missing.
+    """
+    import json as _json
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    if run_id is None:
+        # List recent runs
+        conditions = ["1=1"]
+        params: list = []
+        if company:
+            conditions.append("company_domain = ?")
+            params.append(company)
+        if mode:
+            conditions.append("mode LIKE ?")
+            params.append(f"%{mode}%")
+        where = " AND ".join(conditions)
+
+        from email_manager.db import fetchall
+        runs = fetchall(
+            conn,
+            f"""SELECT id, company_domain, mode, model, started_at, completed_at,
+                       events_created, discussions_created, discussions_updated,
+                       actions_proposed, input_tokens, output_tokens,
+                       proposed_changes_json IS NOT NULL as has_snapshot
+                FROM processing_runs
+                WHERE {where}
+                ORDER BY id DESC
+                LIMIT ?""",
+            (*params, limit),
+        )
+
+        if not runs:
+            console.print("[dim]No processing runs found.[/dim]")
+            return
+
+        from rich.table import Table
+        table = Table(title="Processing Runs")
+        table.add_column("ID", style="bold")
+        table.add_column("Company")
+        table.add_column("Mode")
+        table.add_column("Model")
+        table.add_column("Started")
+        table.add_column("Events")
+        table.add_column("Disc+")
+        table.add_column("Disc~")
+        table.add_column("Actions")
+        table.add_column("Snapshot")
+
+        for r in runs:
+            started = (r["started_at"] or "")[:16]
+            table.add_row(
+                str(r["id"]),
+                r["company_domain"] or "",
+                r["mode"] or "",
+                (r["model"] or "")[:20],
+                started,
+                str(r["events_created"] or 0),
+                str(r["discussions_created"] or 0),
+                str(r["discussions_updated"] or 0),
+                str(r["actions_proposed"] or 0),
+                "yes" if r["has_snapshot"] else "no",
+            )
+
+        console.print(table)
+        return
+
+    # Show specific run
+    from email_manager.db import fetchone
+    run = fetchone(
+        conn,
+        """SELECT * FROM processing_runs WHERE id = ?""",
+        (run_id,),
+    )
+    if not run:
+        console.print(f"[red]Run #{run_id} not found.[/red]")
+        return
+
+    console.print(f"\n[bold]Run #{run_id}[/bold]")
+    console.print(f"  Company: {run['company_domain']}")
+    console.print(f"  Mode: {run['mode']}")
+    console.print(f"  Model: {run['model']}")
+    console.print(f"  Started: {run['started_at']}")
+    console.print(f"  Completed: {run['completed_at'] or 'in progress'}")
+    if run.get("input_tokens"):
+        console.print(f"  Tokens: {run['input_tokens']} in / {run['output_tokens']} out")
+
+    snapshot_json = run.get("proposed_changes_json")
+    if not snapshot_json:
+        console.print("\n[dim]No ProposedChanges snapshot for this run.[/dim]")
+        return
+
+    snapshot = _json.loads(snapshot_json)
+    from email_manager.ai.agent_backend import ProposedChanges
+    proposed = ProposedChanges(snapshot)
+
+    if proposed.is_empty:
+        console.print("\n[dim]Empty changeset.[/dim]")
+        return
+
+    # Display numbered items
+    item_idx = 0
+
+    if proposed.events:
+        console.print(f"\n[bold]Events ({len(proposed.events)}):[/bold]")
+        for ev in proposed.events:
+            disc = f" → disc #{ev.get('discussion_id', '?')}" if ev.get("discussion_id") else ""
+            console.print(
+                f"  [{item_idx}] {ev.get('event_date', '?')} "
+                f"[cyan]{ev.get('domain', '?')}/{ev.get('type', '?')}[/cyan]: "
+                f"{(ev.get('detail') or '')[:80]}{disc}"
+            )
+            item_idx += 1
+
+    if proposed.new_discussions:
+        console.print(f"\n[bold]New Discussions ({len(proposed.new_discussions)}):[/bold]")
+        for d in proposed.new_discussions:
+            parent = f" (sub of #{d.get('parent_id')})" if d.get("parent_id") else ""
+            console.print(
+                f"  [{item_idx}] [green]\"{d.get('title', '?')}\"[/green] "
+                f"[{d.get('category', '?')}]{parent}"
+            )
+            item_idx += 1
+
+    if proposed.discussion_updates:
+        console.print(f"\n[bold]Discussion Updates ({len(proposed.discussion_updates)}):[/bold]")
+        for u in proposed.discussion_updates:
+            parts = []
+            if u.get("state"):
+                parts.append(f"state → {u['state']}")
+            if u.get("summary"):
+                parts.append(f"summary: {u['summary'][:60]}...")
+            if u.get("milestones"):
+                achieved = [m["name"] for m in u["milestones"] if m.get("achieved")]
+                if achieved:
+                    parts.append(f"milestones: {', '.join(achieved)}")
+            if u.get("proposed_actions"):
+                for a in u["proposed_actions"]:
+                    parts.append(f"action [{a.get('priority', '?')}]: {a.get('action', '')[:60]}")
+            console.print(f"  [{item_idx}] Discussion #{u.get('discussion_id', '?')}:")
+            for p in parts:
+                console.print(f"        {p}")
+            item_idx += 1
+
+    if proposed.event_assignments:
+        console.print(f"\n[bold]Event Assignments ({len(proposed.event_assignments)}):[/bold]")
+        for ea in proposed.event_assignments:
+            console.print(
+                f"  [{item_idx}] {ea.get('event_id', '?')} → discussion #{ea.get('discussion_id', '?')}"
+            )
+            item_idx += 1
+
+    if proposed.label_updates:
+        console.print(f"\n[bold]Label Updates ({len(proposed.label_updates)}):[/bold]")
+        for lu in proposed.label_updates:
+            labels = [f"{l['label']} ({l.get('confidence', '?'):.0%})" for l in lu.get("labels", [])]
+            name_update = f" name → \"{lu['company_name']}\"" if lu.get("company_name") else ""
+            console.print(
+                f"  [{item_idx}] Company #{lu.get('company_id', '?')}:{name_update}"
+                f" labels: [cyan]{', '.join(labels)}[/cyan]"
+            )
+            if lu.get("company_description"):
+                console.print(f"        {lu['company_description'][:80]}")
+            item_idx += 1
+
+    # Load existing annotations for this run
+    from email_manager.db import fetchall as _fetchall
+    existing_fb = _fetchall(
+        conn,
+        "SELECT * FROM feedback WHERE target_type LIKE ? ORDER BY id",
+        (f"run:{run_id}:%",),
+    )
+    if existing_fb:
+        console.print(f"\n[bold]Existing Annotations ({len(existing_fb)}):[/bold]")
+        for fb in existing_fb:
+            parts = fb["target_type"].split(":")
+            idx_str = parts[2] if len(parts) > 2 else "?"
+            action_style = {"correct": "green", "incorrect": "red", "missing": "yellow"}.get(fb["action"], "white")
+            console.print(
+                f"  Item [{idx_str}]: [{action_style}]{fb['action']}[/{action_style}]"
+                + (f" — {fb['reason']}" if fb.get("reason") else "")
+            )
+
+    if not annotate:
+        return
+
+    # Interactive annotation
+    console.print("\n[bold]Annotate items[/bold]")
+    console.print("  Enter: [item_number] [correct|incorrect|missing] [optional reason]")
+    console.print("  Example: 0 incorrect wrong event type, should be meeting_held")
+    console.print("  Type 'done' to finish.\n")
+
+    from datetime import datetime as _dt, timezone as _tz
+    while True:
+        try:
+            line = click.prompt("annotate", default="done", show_default=False)
+        except (EOFError, click.Abort):
+            break
+        line = line.strip()
+        if line.lower() in ("done", "quit", "q", ""):
+            break
+
+        parts = line.split(None, 2)
+        if len(parts) < 2:
+            console.print("[red]Usage: <item_number> <correct|incorrect|missing> [reason][/red]")
+            continue
+
+        try:
+            idx = int(parts[0])
+        except ValueError:
+            console.print(f"[red]'{parts[0]}' is not a valid item number.[/red]")
+            continue
+
+        action = parts[1].lower()
+        if action not in ("correct", "incorrect", "missing"):
+            console.print(f"[red]Action must be correct, incorrect, or missing.[/red]")
+            continue
+
+        reason = parts[2] if len(parts) > 2 else None
+
+        # Determine which layer this item belongs to
+        layer = "unknown"
+        total = 0
+        for section, section_layer in [
+            (proposed.events, "events"),
+            (proposed.new_discussions, "discussions"),
+            (proposed.discussion_updates, "discussion_updates"),
+            (proposed.event_assignments, "event_assignments"),
+        ]:
+            if total <= idx < total + len(section):
+                layer = section_layer
+                break
+            total += len(section)
+
+        now_str = _dt.now(_tz.utc).isoformat()
+        conn.execute(
+            """INSERT INTO feedback (layer, target_type, target_id, action, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (layer, f"run:{run_id}:{idx}", str(run_id), action, reason, now_str),
+        )
+        conn.commit()
+
+        action_style = {"correct": "green", "incorrect": "red", "missing": "yellow"}[action]
+        console.print(f"  [{action_style}]Saved: item [{idx}] = {action}[/{action_style}]")
+
+    console.print("[dim]Annotation complete.[/dim]")
+
+
+@cli.command()
+@click.option("--company", "-c", default=None, help="Filter by company domain")
+@click.option("--mode", "-m", default=None, help="Filter by mode")
+@click.option("--since", default=None, help="Only runs after this date (YYYY-MM-DD)")
+@click.pass_context
+def eval(ctx: click.Context, company: str | None, mode: str | None, since: str | None) -> None:
+    """Show evaluation metrics from review annotations."""
+    import json as _json
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    from email_manager.db import fetchall
+
+    # Get all annotated runs
+    conditions = ["proposed_changes_json IS NOT NULL"]
+    params: list = []
+    if company:
+        conditions.append("company_domain = ?")
+        params.append(company)
+    if mode:
+        conditions.append("mode LIKE ?")
+        params.append(f"%{mode}%")
+    if since:
+        conditions.append("started_at >= ?")
+        params.append(since)
+
+    where = " AND ".join(conditions)
+    runs = fetchall(
+        conn,
+        f"""SELECT id, company_domain, mode, model, started_at
+            FROM processing_runs WHERE {where} ORDER BY id DESC""",
+        tuple(params),
+    )
+
+    if not runs:
+        console.print("[dim]No runs with snapshots found.[/dim]")
+        return
+
+    # Gather annotations
+    all_feedback = fetchall(
+        conn,
+        "SELECT * FROM feedback WHERE target_type LIKE 'run:%' ORDER BY id",
+    )
+
+    # Group by run
+    fb_by_run: dict[int, list] = {}
+    for fb in all_feedback:
+        parts = fb["target_type"].split(":")
+        if len(parts) >= 2:
+            try:
+                rid = int(parts[1])
+                fb_by_run.setdefault(rid, []).append(fb)
+            except ValueError:
+                pass
+
+    annotated_runs = [r for r in runs if r["id"] in fb_by_run]
+    if not annotated_runs:
+        console.print(f"[dim]{len(runs)} runs with snapshots, but none have annotations yet.[/dim]")
+        console.print("[dim]Use 'review <run_id> --annotate' to add annotations.[/dim]")
+        return
+
+    # Compute metrics
+    total_correct = 0
+    total_incorrect = 0
+    total_missing = 0
+    by_layer: dict[str, dict[str, int]] = {}
+
+    for fb in all_feedback:
+        action = fb["action"]
+        layer = fb["layer"]
+        by_layer.setdefault(layer, {"correct": 0, "incorrect": 0, "missing": 0})
+        if action == "correct":
+            total_correct += 1
+            by_layer[layer]["correct"] += 1
+        elif action == "incorrect":
+            total_incorrect += 1
+            by_layer[layer]["incorrect"] += 1
+        elif action == "missing":
+            total_missing += 1
+            by_layer[layer]["missing"] += 1
+
+    total_judged = total_correct + total_incorrect
+    precision = total_correct / total_judged if total_judged > 0 else 0.0
+
+    console.print(f"\n[bold]Evaluation Summary[/bold]")
+    console.print(f"  Annotated runs: {len(annotated_runs)} / {len(runs)}")
+    console.print(f"  Total annotations: {total_correct + total_incorrect + total_missing}")
+    console.print(f"  Correct: [green]{total_correct}[/green]")
+    console.print(f"  Incorrect: [red]{total_incorrect}[/red]")
+    console.print(f"  Missing: [yellow]{total_missing}[/yellow]")
+    console.print(f"  Precision: [bold]{precision:.1%}[/bold] ({total_correct}/{total_judged} judged items)")
+
+    if by_layer:
+        console.print(f"\n[bold]By Layer:[/bold]")
+        from rich.table import Table
+        table = Table()
+        table.add_column("Layer")
+        table.add_column("Correct", style="green")
+        table.add_column("Incorrect", style="red")
+        table.add_column("Missing", style="yellow")
+        table.add_column("Precision")
+
+        for layer, counts in sorted(by_layer.items()):
+            judged = counts["correct"] + counts["incorrect"]
+            prec = counts["correct"] / judged if judged > 0 else 0.0
+            table.add_row(
+                layer,
+                str(counts["correct"]),
+                str(counts["incorrect"]),
+                str(counts["missing"]),
+                f"{prec:.0%}",
+            )
+        console.print(table)
+
+
+@cli.command()
+@click.argument("action", type=click.Choice(["add", "list", "remove"]))
+@click.option("--layer", "-l", default=None,
+              type=click.Choice(["events", "discussions", "discussion_updates", "actions", "labels", "quick_update", "agent"]),
+              help="Which analysis layer this rule applies to")
+@click.option("--category", default=None, help="Optional category (domain) this rule applies to")
+@click.option("--rule", "-r", default=None, help="The rule text (for 'add')")
+@click.option("--rule-id", type=int, default=None, help="Rule ID (for 'remove')")
+@click.pass_context
+def learn(ctx: click.Context, action: str, layer: str | None, category: str | None,
+          rule: str | None, rule_id: int | None) -> None:
+    """Manage learned rules that get injected into LLM prompts.
+
+    \b
+    Examples:
+      learn add -l events -r "Meeting scheduling emails should use the scheduling domain"
+      learn add -l actions --category investment -r "Always suggest a follow-up within 2 weeks"
+      learn list
+      learn remove --rule-id 3
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    if action == "list":
+        from email_manager.db import fetchall
+        conditions = ["1=1"]
+        params: list = []
+        if layer:
+            conditions.append("layer = ?")
+            params.append(layer)
+        rows = fetchall(
+            conn,
+            f"SELECT * FROM learned_rules WHERE {' AND '.join(conditions)} ORDER BY layer, id",
+            tuple(params),
+        )
+        if not rows:
+            console.print("[dim]No learned rules.[/dim]")
+            return
+
+        from rich.table import Table
+        table = Table(title="Learned Rules")
+        table.add_column("ID", style="bold")
+        table.add_column("Layer")
+        table.add_column("Category")
+        table.add_column("Rule")
+        table.add_column("Active")
+
+        for r in rows:
+            table.add_row(
+                str(r["id"]),
+                r["layer"],
+                r["category"] or "",
+                r["rule_text"][:80],
+                "yes" if r["active"] else "no",
+            )
+        console.print(table)
+
+    elif action == "add":
+        if not layer:
+            console.print("[red]--layer is required for 'add'.[/red]")
+            return
+        if not rule:
+            console.print("[red]--rule is required for 'add'.[/red]")
+            return
+
+        now = _dt.now(_tz.utc).isoformat()
+        cursor = conn.execute(
+            """INSERT INTO learned_rules (layer, category, rule_text, active, created_at)
+               VALUES (?, ?, ?, 1, ?)""",
+            (layer, category, rule, now),
+        )
+        conn.commit()
+        console.print(f"[green]Rule #{cursor.lastrowid} added to layer '{layer}'.[/green]")
+
+    elif action == "remove":
+        if not rule_id:
+            console.print("[red]--rule-id is required for 'remove'.[/red]")
+            return
+
+        conn.execute("UPDATE learned_rules SET active = 0 WHERE id = ?", (rule_id,))
+        conn.commit()
+        console.print(f"[yellow]Rule #{rule_id} deactivated.[/yellow]")
+
+
+@cli.command()
+@click.argument("run_id", type=int)
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted without actually deleting")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def rollback(ctx: click.Context, run_id: int, dry_run: bool, yes: bool) -> None:
+    """Roll back a processing run and all subsequent runs for that company+mode.
+
+    Deletes all derived data (events, discussions, milestones, actions,
+    state history) produced by the specified run and any later runs in the
+    same company+mode chain. Raw emails are never touched.
+    """
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    from email_manager.db import fetchone, fetchall
+
+    run = fetchone(conn, "SELECT * FROM processing_runs WHERE id = ?", (run_id,))
+    if not run:
+        console.print(f"[red]Run #{run_id} not found.[/red]")
+        return
+
+    company = run["company_domain"]
+    mode = run["mode"]
+
+    # Find this run and all later runs in the same chain
+    runs_to_rollback = fetchall(
+        conn,
+        """SELECT id, started_at, events_created, discussions_created,
+                  discussions_updated, actions_proposed
+           FROM processing_runs
+           WHERE company_domain = ? AND mode = ? AND id >= ?
+           ORDER BY id ASC""",
+        (company, mode, run_id),
+    )
+
+    if not runs_to_rollback:
+        console.print("[dim]No runs to roll back.[/dim]")
+        return
+
+    run_ids = [r["id"] for r in runs_to_rollback]
+    placeholders = ",".join("?" for _ in run_ids)
+
+    # Count what will be deleted
+    event_count = fetchone(
+        conn,
+        f"SELECT COUNT(*) as cnt FROM event_ledger WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    disc_count = fetchone(
+        conn,
+        f"SELECT COUNT(*) as cnt FROM discussions WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    milestone_count = fetchone(
+        conn,
+        f"SELECT COUNT(*) as cnt FROM milestones WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    action_count = fetchone(
+        conn,
+        f"SELECT COUNT(*) as cnt FROM proposed_actions WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+
+    console.print(f"\n[bold]Rollback plan for {company} ({mode})[/bold]")
+    console.print(f"  Runs to remove: {len(runs_to_rollback)} (#{run_ids[0]} through #{run_ids[-1]})")
+    console.print(f"  Events to delete: {event_count['cnt']}")
+    console.print(f"  Discussions to delete: {disc_count['cnt']}")
+    console.print(f"  Milestones to delete: {milestone_count['cnt']}")
+    console.print(f"  Actions to delete: {action_count['cnt']}")
+
+    if dry_run:
+        console.print("\n[dim]Dry run — nothing deleted.[/dim]")
+        return
+
+    if not yes:
+        click.confirm("Proceed with rollback?", abort=True)
+
+    # Delete in dependency order
+    # 1. Proposed actions
+    conn.execute(
+        f"DELETE FROM proposed_actions WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    # 2. Milestones
+    conn.execute(
+        f"DELETE FROM milestones WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    # 3. State history for discussions created by these runs
+    disc_ids_rows = fetchall(
+        conn,
+        f"SELECT id FROM discussions WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    if disc_ids_rows:
+        disc_ids = [r["id"] for r in disc_ids_rows]
+        disc_ph = ",".join("?" for _ in disc_ids)
+        conn.execute(
+            f"DELETE FROM discussion_state_history WHERE discussion_id IN ({disc_ph})",
+            tuple(disc_ids),
+        )
+        conn.execute(
+            f"DELETE FROM discussion_threads WHERE discussion_id IN ({disc_ph})",
+            tuple(disc_ids),
+        )
+    # 4. Unlink events from discussions being deleted
+    if disc_ids_rows:
+        conn.execute(
+            f"UPDATE event_ledger SET discussion_id = NULL WHERE discussion_id IN ({disc_ph})",
+            tuple(disc_ids),
+        )
+    # 5. Events
+    conn.execute(
+        f"DELETE FROM event_ledger WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    # 6. Discussions
+    conn.execute(
+        f"DELETE FROM discussions WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    # 7. LLM call records
+    conn.execute(
+        f"DELETE FROM llm_calls WHERE run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    # 8. The processing runs themselves
+    conn.execute(
+        f"DELETE FROM processing_runs WHERE id IN ({placeholders})",
+        tuple(run_ids),
+    )
+
+    conn.commit()
+    console.print(f"\n[green]Rolled back {len(runs_to_rollback)} runs for {company} ({mode}).[/green]")
+
+
+@cli.command()
+@click.argument("company_domain")
+@click.option("--mode", "-m", default=None, help="Filter by mode")
+@click.pass_context
+def history(ctx: click.Context, company_domain: str, mode: str | None) -> None:
+    """Show the processing run history (changeset chain) for a company."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    from email_manager.db import fetchall
+
+    conditions = ["company_domain = ?"]
+    params: list = [company_domain]
+    if mode:
+        conditions.append("mode LIKE ?")
+        params.append(f"%{mode}%")
+
+    runs = fetchall(
+        conn,
+        f"""SELECT id, mode, model, started_at, completed_at,
+                   events_created, discussions_created, discussions_updated,
+                   actions_proposed, parent_run_id, email_cutoff_date,
+                   proposed_changes_json IS NOT NULL as has_snapshot,
+                   prompt_hash
+            FROM processing_runs
+            WHERE {" AND ".join(conditions)}
+            ORDER BY id ASC""",
+        tuple(params),
+    )
+
+    if not runs:
+        console.print(f"[dim]No processing runs for {company_domain}.[/dim]")
+        return
+
+    from rich.table import Table
+    table = Table(title=f"History: {company_domain}")
+    table.add_column("ID", style="bold")
+    table.add_column("Parent")
+    table.add_column("Mode")
+    table.add_column("Model")
+    table.add_column("Started")
+    table.add_column("Email Cutoff")
+    table.add_column("Evts")
+    table.add_column("Disc+")
+    table.add_column("Disc~")
+    table.add_column("Acts")
+    table.add_column("Prompt")
+
+    for r in runs:
+        table.add_row(
+            str(r["id"]),
+            str(r["parent_run_id"] or "—"),
+            (r["mode"] or "").replace("staged:", ""),
+            (r["model"] or "")[:20],
+            (r["started_at"] or "")[:16],
+            (r["email_cutoff_date"] or "")[:10],
+            str(r["events_created"] or 0),
+            str(r["discussions_created"] or 0),
+            str(r["discussions_updated"] or 0),
+            str(r["actions_proposed"] or 0),
+            (r["prompt_hash"] or "—")[:8],
+        )
+
+    console.print(table)
 
 
 if __name__ == "__main__":

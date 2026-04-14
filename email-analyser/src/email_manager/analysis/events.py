@@ -319,6 +319,7 @@ def _process_thread(
     categories: list[dict[str, Any]],
     domains_block: str,
     account_owner: str | None,
+    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     """Extract events from a single thread, chunking large threads."""
     all_emails = fetchall(
@@ -370,7 +371,7 @@ def _process_thread(
         ) + chunk_note
 
         try:
-            result = backend.complete_json(EXTRACT_EVENTS_SYSTEM, user_prompt)
+            result = backend.complete_json(system_prompt or EXTRACT_EVENTS_SYSTEM, user_prompt)
         except Exception as e:
             logger.error("LLM call failed for thread %s (chunk %d): %s", thread_id, chunk_idx, e)
             continue
@@ -570,6 +571,7 @@ def _process_batch(
     categories: list[dict[str, Any]],
     domains_block: str,
     account_owner: str | None,
+    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     """Extract events from a batch of small threads in a single LLM call."""
     owner_line = f"\nAccount owner (\"me\"): {account_owner}" if account_owner else ""
@@ -582,7 +584,7 @@ def _process_batch(
     )
 
     try:
-        result = backend.complete_json(EXTRACT_EVENTS_BATCH_SYSTEM, user_prompt)
+        result = backend.complete_json(system_prompt or EXTRACT_EVENTS_BATCH_SYSTEM, user_prompt)
     except Exception as e:
         thread_ids = [tid for tid, _ in batch]
         logger.error("LLM call failed for batch of %d threads: %s", len(batch), e)
@@ -746,7 +748,7 @@ def _clean_events(
     return count
 
 
-def extract_events(
+def extract_events_propose(
     conn: sqlite3.Connection,
     backend: LLMBackend,
     categories_config: list[dict[str, Any]] | None = None,
@@ -757,10 +759,11 @@ def extract_events(
     company_domain: str | None = None,
     company_label: str | None = None,
     on_progress: Callable[[int, int], None] | None = None,
-) -> int:
-    """Extract business events from email threads.
+    concurrency: int = 1,
+) -> dict[str, Any] | None:
+    """Run LLM calls and return a ProposedChanges-compatible dict without writing to DB.
 
-    Returns the number of events extracted.
+    Returns None if there's nothing to do.
     """
     if clean:
         _clean_events(conn, company_domain=company_domain, company_label=company_label)
@@ -770,10 +773,16 @@ def extract_events(
 
     if not categories_config:
         logger.warning("No category config found — cannot extract events")
-        return 0
+        return None
 
     domains_block = _build_domains_block(categories_config)
     account_owner = _detect_account_owner(conn)
+
+    # Enrich system prompts with learned rules
+    from email_manager.analysis.feedback import format_rules_block, LAYER_EVENTS
+    rules_block = format_rules_block(conn, LAYER_EVENTS)
+    system_prompt = EXTRACT_EVENTS_SYSTEM + rules_block
+    batch_system_prompt = EXTRACT_EVENTS_BATCH_SYSTEM + rules_block
 
     thread_ids = _get_threads_to_process(
         conn, limit=limit, force=force or clean,
@@ -781,19 +790,9 @@ def extract_events(
     )
     if not thread_ids:
         logger.info("No threads to process for event extraction")
-        return 0
+        return None
 
     logger.info("Extracting events from %d threads", len(thread_ids))
-
-    # Create a processing run for provenance tracking
-    now_ts = datetime.now(timezone.utc).isoformat()
-    run_domain = company_domain or company_label or "all"
-    cursor = conn.execute(
-        """INSERT INTO processing_runs (company_domain, mode, model, started_at)
-           VALUES (?, ?, ?, ?)""",
-        (run_domain, "staged", backend.model_name, now_ts),
-    )
-    run_id = cursor.lastrowid
 
     # Classify threads as small (batchable) or large
     small_threads: list[tuple[str, int, list[dict]]] = []
@@ -817,57 +816,324 @@ def extract_events(
             len(small_threads), len(batches), len(large_thread_ids),
         )
 
-    total_events = 0
+    all_events: list[dict[str, Any]] = []
     progress_idx = 0
 
-    # Process batches of small threads
-    for batch in batches:
-        if on_progress:
-            on_progress(progress_idx, len(thread_ids))
+    if concurrency > 1:
+        # ── Parallel extraction ───────────────────────────────────────────
+        import asyncio
 
-        events = _process_batch(
-            conn, backend, batch, categories_config, domains_block, account_owner,
-        )
-        saved = _save_events(conn, events, run_id=run_id)
-        total_events += saved
+        sem = asyncio.Semaphore(concurrency)
 
-        if events:
-            logger.info(
-                "Batch of %d threads: extracted %d events",
-                len(batch), len(events),
+        async def _do_batch(batch: list[tuple[str, list[dict]]]) -> list[dict[str, Any]]:
+            """Process a batch of small threads with async LLM call."""
+            owner_line = f"\nAccount owner (\"me\"): {account_owner}" if account_owner else ""
+            threads_block = _format_batch_threads(batch)
+            user_prompt = EXTRACT_EVENTS_BATCH_USER.format(
+                owner_line=owner_line,
+                domains_block=domains_block,
+                threads_block=threads_block,
             )
+            async with sem:
+                try:
+                    result = await backend.acomplete_json(batch_system_prompt, user_prompt)
+                except Exception as e:
+                    logger.error("Async batch LLM call failed: %s", e)
+                    return []
 
-        progress_idx += len(batch)
+            all_type_to_domain: dict[str, str] = {}
+            for cat in categories_config:
+                for et in cat.get("event_types", []):
+                    type_name = et["name"] if isinstance(et, dict) else et
+                    all_type_to_domain[type_name] = cat["name"]
 
-    # Process large threads individually
-    for thread_id in large_thread_ids:
-        if on_progress:
-            on_progress(progress_idx, len(thread_ids))
+            emails_by_thread: dict[str, list[dict]] = {tid: emails for tid, emails in batch}
+            now = datetime.now(timezone.utc).isoformat()
+            parsed: list[dict[str, Any]] = []
 
-        events = _process_thread(
-            conn, backend, thread_id, categories_config, domains_block, account_owner
-        )
-        saved = _save_events(conn, events, run_id=run_id)
-        total_events += saved
+            for thread_id, thread_result in result.get("threads", {}).items():
+                if thread_id not in emails_by_thread:
+                    continue
+                emails = emails_by_thread[thread_id]
+                for ev in thread_result.get("events", []):
+                    event_type = ev.get("type", "")
+                    domain = ev.get("domain", "")
+                    valid = set()
+                    for cat in categories_config:
+                        if cat["name"] == domain:
+                            for et in cat.get("event_types", []):
+                                valid.add(et["name"] if isinstance(et, dict) else et)
+                            break
+                    if event_type not in valid:
+                        if event_type in all_type_to_domain:
+                            domain = all_type_to_domain[event_type]
+                        else:
+                            continue
+                    source_idx = ev.get("source_email_index")
+                    source_email_id = None
+                    if source_idx is not None and 0 <= source_idx < len(emails):
+                        source_email_id = emails[source_idx]["message_id"]
+                    source_calendar_id = ev.get("calendar_event_id")
+                    src_type = "calendar" if source_calendar_id else "email"
+                    src_id = source_calendar_id or source_email_id
+                    parsed.append({
+                        "id": f"evt_{uuid.uuid4().hex[:12]}", "thread_id": thread_id,
+                        "source_email_id": source_email_id, "source_calendar_event_id": source_calendar_id,
+                        "source_type": src_type, "source_id": src_id,
+                        "domain": domain, "type": event_type,
+                        "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
+                        "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
+                        "event_date": ev.get("event_date"), "detail": ev.get("detail"),
+                        "confidence": ev.get("confidence", 0.5),
+                        "model_version": backend.model_name, "prompt_version": PROMPT_VERSION, "created_at": now,
+                    })
+            return parsed
 
-        if events:
-            logger.info(
-                "Thread %s: extracted %d events (domains: %s)",
-                thread_id, len(events),
-                ", ".join(set(e["domain"] for e in events)),
+        async def _do_thread(tid: str) -> list[dict[str, Any]]:
+            """Process a large thread with async LLM calls (chunks sequential)."""
+            all_emails = fetchall(
+                conn,
+                """SELECT message_id, date, from_address, from_name, to_addresses, cc_addresses,
+                          subject, body_text
+                   FROM emails WHERE thread_id = ? ORDER BY date ASC""",
+                (tid,),
             )
+            if not all_emails:
+                return []
 
-        progress_idx += 1
+            participant_emails: set[str] = set()
+            for e in all_emails:
+                for field in ("from_address", "to_addresses", "cc_addresses"):
+                    val = e[field]
+                    if val:
+                        participant_emails.update(a.lower() for a in _EMAIL_RE.findall(val))
+
+            start_date = all_emails[0]["date"][:10] if all_emails[0]["date"] else None
+            end_date = all_emails[-1]["date"][:10] if all_emails[-1]["date"] else None
+            calendar_block = _get_calendar_context(conn, participant_emails, start_date, end_date)
+
+            subject = all_emails[0]["subject"] or "(no subject)"
+            participants = ", ".join(sorted(participant_emails))
+            owner_line = f"\nAccount owner (\"me\"): {account_owner}" if account_owner else ""
+
+            chunks = _chunk_emails(all_emails)
+            all_parsed: list[dict[str, Any]] = []
+            now = datetime.now(timezone.utc).isoformat()
+
+            for chunk_idx, emails in enumerate(chunks):
+                formatted = _format_thread_emails(emails)
+                messages_text = "\n".join(formatted)
+                chunk_note = ""
+                if len(chunks) > 1:
+                    chunk_note = f"\n\nNote: This is part {chunk_idx + 1} of {len(chunks)} of a long thread."
+                user_prompt = EXTRACT_EVENTS_USER.format(
+                    owner_line=owner_line, subject=subject, participants=participants,
+                    domains_block=domains_block, messages=messages_text,
+                    calendar_block=calendar_block if chunk_idx == 0 else "",
+                ) + chunk_note
+
+                async with sem:
+                    try:
+                        result = await backend.acomplete_json(system_prompt, user_prompt)
+                    except Exception as e:
+                        logger.error("Async LLM call failed for thread %s (chunk %d): %s", tid, chunk_idx, e)
+                        continue
+
+                all_type_to_domain: dict[str, str] = {}
+                for cat in categories_config:
+                    for et in cat.get("event_types", []):
+                        type_name = et["name"] if isinstance(et, dict) else et
+                        all_type_to_domain[type_name] = cat["name"]
+
+                for ev in result.get("events", []):
+                    event_type = ev.get("type", "")
+                    domain = ev.get("domain", "")
+                    valid = set()
+                    for cat in categories_config:
+                        if cat["name"] == domain:
+                            for et in cat.get("event_types", []):
+                                valid.add(et["name"] if isinstance(et, dict) else et)
+                            break
+                    if event_type not in valid:
+                        if event_type in all_type_to_domain:
+                            domain = all_type_to_domain[event_type]
+                        else:
+                            continue
+                    source_idx = ev.get("source_email_index")
+                    source_email_id = None
+                    if source_idx is not None and 0 <= source_idx < len(emails):
+                        source_email_id = emails[source_idx]["message_id"]
+                    source_calendar_id = ev.get("calendar_event_id")
+                    src_type = "calendar" if source_calendar_id else "email"
+                    src_id = source_calendar_id or source_email_id
+                    all_parsed.append({
+                        "id": f"evt_{uuid.uuid4().hex[:12]}", "thread_id": tid,
+                        "source_email_id": source_email_id, "source_calendar_event_id": source_calendar_id,
+                        "source_type": src_type, "source_id": src_id,
+                        "domain": domain, "type": event_type,
+                        "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
+                        "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
+                        "event_date": ev.get("event_date"), "detail": ev.get("detail"),
+                        "confidence": ev.get("confidence", 0.5),
+                        "model_version": backend.model_name, "prompt_version": PROMPT_VERSION, "created_at": now,
+                    })
+
+            return _dedup_events(all_parsed)
+
+        async def _run_parallel():
+            tasks: list[asyncio.Task] = []
+            for batch in batches:
+                tasks.append(asyncio.create_task(_do_batch(batch)))
+            for tid in large_thread_ids:
+                tasks.append(asyncio.create_task(_do_thread(tid)))
+            return await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_results = asyncio.run(_run_parallel())
+
+        for i, result in enumerate(all_results):
+            if isinstance(result, Exception):
+                logger.error("Parallel extraction task %d failed: %s", i, result)
+                continue
+            if result:
+                all_events.extend(result)
+            progress_idx += 1
+            if on_progress:
+                on_progress(min(progress_idx, len(thread_ids)), len(thread_ids))
+
+        logger.info("Parallel extraction: %d events from %d tasks (concurrency=%d)",
+                     len(all_events), len(all_results), concurrency)
+
+    else:
+        # ── Sequential extraction (original path) ─────────────────────────
+
+        for batch in batches:
+            if on_progress:
+                on_progress(progress_idx, len(thread_ids))
+
+            events = _process_batch(
+                conn, backend, batch, categories_config, domains_block, account_owner,
+                system_prompt=batch_system_prompt,
+            )
+            all_events.extend(events)
+
+            if events:
+                logger.info(
+                    "Batch of %d threads: extracted %d events",
+                    len(batch), len(events),
+                )
+
+            progress_idx += len(batch)
+
+        for thread_id in large_thread_ids:
+            if on_progress:
+                on_progress(progress_idx, len(thread_ids))
+
+            events = _process_thread(
+                conn, backend, thread_id, categories_config, domains_block, account_owner,
+                system_prompt=system_prompt,
+            )
+            all_events.extend(events)
+
+            if events:
+                logger.info(
+                    "Thread %s: extracted %d events (domains: %s)",
+                    thread_id, len(events),
+                    ", ".join(set(e["domain"] for e in events)),
+                )
+
+            progress_idx += 1
 
     if on_progress:
         on_progress(len(thread_ids), len(thread_ids))
 
-    # Complete the processing run
-    conn.execute(
-        """UPDATE processing_runs SET completed_at = ?, events_created = ?
-           WHERE id = ?""",
-        (datetime.now(timezone.utc).isoformat(), total_events, run_id),
+    if not all_events:
+        return None
+
+    return {"events": all_events}
+
+
+def extract_events(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    categories_config: list[dict[str, Any]] | None = None,
+    config_path: Path | None = None,
+    limit: int | None = None,
+    force: bool = False,
+    clean: bool = False,
+    company_domain: str | None = None,
+    company_label: str | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+    concurrency: int = 1,
+) -> int:
+    """Extract business events from email threads.
+
+    Args:
+        concurrency: Max concurrent LLM calls. >1 enables parallel extraction.
+
+    Returns the number of events extracted.
+    """
+    from email_manager.ai.agent_backend import ProposedChanges, apply_changes
+    from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block, LAYER_EVENTS
+
+    proposed_dict = extract_events_propose(
+        conn, backend, categories_config=categories_config,
+        config_path=config_path, limit=limit, force=force, clean=clean,
+        company_domain=company_domain, company_label=company_label,
+        on_progress=on_progress, concurrency=concurrency,
     )
-    conn.commit()
+    if not proposed_dict:
+        return 0
+
+    # Compute prompt hash for versioning (matches what extract_events_propose used)
+    rules_block = format_rules_block(conn, LAYER_EVENTS)
+    p_hash = compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + rules_block)
+
+    all_events = proposed_dict.get("events", [])
+
+    # If already scoped to one company, apply directly
+    if company_domain:
+        proposed = ProposedChanges(proposed_dict)
+        row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (company_domain,))
+        cid = row["id"] if row else 0
+        counts = apply_changes(
+            conn, proposed, cid, company_domain,
+            mode="staged:extract_events", model=backend.model_name,
+            token_tracker=getattr(backend, "token_tracker", None),
+            prompt_hash=p_hash,
+        )
+        return counts.get("events", 0)
+
+    # Group events by company domain for per-company processing_runs
+    events_by_company: dict[str, list[dict]] = {}
+    thread_company_cache: dict[str, str | None] = {}
+
+    for ev in all_events:
+        tid = ev.get("thread_id")
+        if tid and tid not in thread_company_cache:
+            row = fetchone(
+                conn,
+                """SELECT c.domain FROM emails e
+                   JOIN company_contacts cc ON e.from_address = cc.contact_email
+                   JOIN companies c ON cc.company_id = c.id
+                   WHERE e.thread_id = ? LIMIT 1""",
+                (tid,),
+            )
+            thread_company_cache[tid] = row["domain"] if row else None
+
+        domain = thread_company_cache.get(tid) if tid else None
+        domain = domain or company_label or "unknown"
+        events_by_company.setdefault(domain, []).append(ev)
+
+    total_events = 0
+    for domain, events in events_by_company.items():
+        proposed = ProposedChanges({"events": events})
+        row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (domain,))
+        cid = row["id"] if row else 0
+        counts = apply_changes(
+            conn, proposed, cid, domain,
+            mode="staged:extract_events", model=backend.model_name,
+            prompt_hash=p_hash,
+        )
+        total_events += counts.get("events", 0)
 
     return total_events
