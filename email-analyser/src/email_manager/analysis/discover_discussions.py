@@ -127,6 +127,7 @@ def _detect_account_owner(conn: sqlite3.Connection) -> str | None:
 def _get_companies_with_unassigned_events(
     conn: sqlite3.Connection, limit: int | None = None,
     company_domain: str | None = None, company_label: str | None = None,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     """Find companies that have unassigned events.
 
@@ -142,18 +143,35 @@ def _get_companies_with_unassigned_events(
         )
         if not row:
             return []
-        # Count unassigned events for this company's domain
+
+        # Only count unassigned events that are NEW since the last discover run.
+        # Events that were unassigned after a discover run were intentionally left
+        # unassigned by the LLM — re-running won't help unless force is used.
+        last_discover = fetchone(
+            conn,
+            """SELECT completed_at FROM processing_runs
+               WHERE company_domain = ? AND mode = 'staged:discover_discussions'
+               ORDER BY id DESC LIMIT 1""",
+            (company_domain,),
+        )
+        cutoff_clause = ""
+        cutoff_params: list = []
+        if last_discover and last_discover["completed_at"] and not force:
+            cutoff_clause = "AND el.created_at > ?"
+            cutoff_params = [last_discover["completed_at"]]
+
         like = f"%@{company_domain}%"
         cnt = fetchone(
             conn,
-            """SELECT COUNT(DISTINCT el.id)
+            f"""SELECT COUNT(DISTINCT el.id)
                FROM event_ledger el
                WHERE el.discussion_id IS NULL
+                 {cutoff_clause}
                  AND el.thread_id IN (
                      SELECT DISTINCT e.thread_id FROM emails e
                      WHERE e.from_address LIKE ? OR e.to_addresses LIKE ?
                  )""",
-            (like, like),
+            (*cutoff_params, like, like),
         )
         return [{"id": row["id"], "name": row["name"], "domain": row["domain"],
                  "event_count": cnt[0]}] if cnt[0] > 0 else []
@@ -810,7 +828,7 @@ def discover_discussions(
 
     companies = _get_companies_with_unassigned_events(
         conn, limit=limit, company_domain=company_domain,
-        company_label=company_label,
+        company_label=company_label, force=force,
     )
     if not companies:
         logger.info("No companies with unassigned events")
