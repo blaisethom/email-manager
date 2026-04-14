@@ -770,6 +770,26 @@ def extract_events_propose(
     if clean:
         _clean_events(conn, company_domain=company_domain, company_label=company_label)
 
+    # Fast skip: if this company was already fully processed and no new emails arrived, skip
+    if company_domain and not force and not clean:
+        latest_run = fetchone(
+            conn,
+            """SELECT email_cutoff_date FROM processing_runs
+               WHERE company_domain = ? AND mode = 'staged:extract_events'
+               ORDER BY id DESC LIMIT 1""",
+            (company_domain,),
+        )
+        if latest_run and latest_run["email_cutoff_date"]:
+            like = f"%@{company_domain}%"
+            newer = fetchone(
+                conn,
+                "SELECT 1 FROM emails WHERE (from_address LIKE ? OR to_addresses LIKE ?) AND date > ? LIMIT 1",
+                (like, like, latest_run["email_cutoff_date"]),
+            )
+            if not newer:
+                logger.info("No new emails for %s since last extraction — skipping", company_domain)
+                return None
+
     if categories_config is None:
         categories_config = load_category_config(config_path)
 

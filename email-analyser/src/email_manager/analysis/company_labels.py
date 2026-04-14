@@ -272,6 +272,11 @@ def label_companies(
                 "SELECT id, name, domain FROM companies WHERE name LIKE ? COLLATE NOCASE",
                 (f"%{company_domain}%",),
             )
+        if row and not force:
+            # Skip if already labelled
+            existing = fetchone(conn, "SELECT 1 FROM company_labels WHERE company_id = ?", (row["id"],))
+            if existing:
+                return 0
         companies = [row] if row else []
     elif force:
         sql = "SELECT id, name, domain FROM companies ORDER BY email_count DESC"
