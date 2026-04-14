@@ -554,6 +554,7 @@ def analyse_discussions(
             conn, proposed, cid, domain,
             mode="staged:analyse_discussions", model=backend.model_name,
             prompt_hash=p_hash,
+            token_tracker=getattr(backend, "token_tracker", None),
         )
         total_updates += counts.get("updates", 0)
 

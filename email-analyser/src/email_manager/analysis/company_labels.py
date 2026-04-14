@@ -348,6 +348,7 @@ def label_companies(
             conn, proposed, company["id"], company["domain"],
             mode="staged:label_companies", model=backend.model_name,
             prompt_hash=p_hash,
+            token_tracker=getattr(backend, "token_tracker", None),
         )
         labelled += 1
 

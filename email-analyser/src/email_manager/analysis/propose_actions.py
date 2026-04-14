@@ -399,6 +399,7 @@ def propose_actions(
             conn, proposed, cid, domain,
             mode="staged:propose_actions", model=backend.model_name,
             prompt_hash=p_hash,
+            token_tracker=getattr(backend, "token_tracker", None),
         )
         total_actions += counts.get("actions", 0)
 

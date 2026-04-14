@@ -26,6 +26,18 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+function formatDuration(start: string, end: string | null): string {
+  if (!end) return '…';
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  if (isNaN(ms) || ms < 0) return '—';
+  if (ms < 1000) return '<1s';
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
 function RunRow({ run }: { run: ProcessingRun }) {
   const totalTokens = (Number(run.input_tokens) || 0) + (Number(run.output_tokens) || 0);
   return (
@@ -33,18 +45,19 @@ function RunRow({ run }: { run: ProcessingRun }) {
       <td className="py-2 pr-4 text-sm text-slate-600">{formatDate(run.started_at)}</td>
       <td className="py-2 pr-4">
         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-          run.mode === 'agent' ? 'bg-purple-100 text-purple-700' :
-          run.mode === 'quick' ? 'bg-blue-100 text-blue-700' :
-          run.mode === 'staged' ? 'bg-amber-100 text-amber-700' :
+          run.mode?.includes('agent') ? 'bg-purple-100 text-purple-700' :
+          run.mode?.includes('quick') ? 'bg-blue-100 text-blue-700' :
+          run.mode?.includes('staged') ? 'bg-amber-100 text-amber-700' :
           'bg-slate-100 text-slate-600'
         }`}>
-          {run.mode}
+          {run.mode?.replace('staged:', '') ?? '—'}
         </span>
       </td>
       <td className="py-2 pr-4 text-xs text-slate-500 truncate max-w-[150px]">{run.model ?? '—'}</td>
       <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.events_created}</td>
       <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.llm_calls || '—'}</td>
-      <td className="py-2 text-sm text-slate-600 text-right">{formatTokens(totalTokens)}</td>
+      <td className="py-2 pr-4 text-sm text-slate-600 text-right">{formatTokens(totalTokens)}</td>
+      <td className="py-2 text-sm text-slate-500 text-right">{formatDuration(run.started_at, run.completed_at)}</td>
     </tr>
   );
 }
@@ -315,11 +328,12 @@ export default function CompanyInsightsTab({ companyId }: { companyId: number })
               <thead>
                 <tr className="border-b border-slate-200">
                   <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider">Date</th>
-                  <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider">Mode</th>
+                  <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider">Stage</th>
                   <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider">Model</th>
                   <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider text-right">Events</th>
                   <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider text-right">LLM Calls</th>
                   <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider text-right">Tokens</th>
+                  <th className="pb-2 text-xs font-medium text-slate-500 uppercase tracking-wider text-right">Duration</th>
                 </tr>
               </thead>
               <tbody>

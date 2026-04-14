@@ -1160,6 +1160,7 @@ def extract_events(
             conn, proposed, cid, domain,
             mode="staged:extract_events", model=backend.model_name,
             prompt_hash=p_hash,
+            token_tracker=getattr(backend, "token_tracker", None),
         )
         total_events += counts.get("events", 0)
 
