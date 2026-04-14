@@ -823,28 +823,71 @@ def discover_discussions(
         if on_progress:
             on_progress(i, len(companies), company["name"])
 
-        events = _get_events_for_company(conn, company["domain"])
-        if not events:
+        DISCOVER_BATCH_SIZE = 30
+        all_events = _get_events_for_company(conn, company["domain"], max_events=200)
+        if not all_events:
             continue
 
-        existing = _get_existing_discussions_for_company(conn, company["id"])
-        event_cluster_map = _build_event_cluster_map(events, terminal_event_types) if terminal_event_types else {}
-        events_text = _format_events_for_prompt(events, terminal_event_types or None)
+        # Process in batches to avoid CLI timeout on large event sets
+        event_batches = [all_events[i:i + DISCOVER_BATCH_SIZE]
+                         for i in range(0, len(all_events), DISCOVER_BATCH_SIZE)]
+        discussions: list[dict] = []
 
-        user_prompt = _build_discover_prompt(
-            company["name"], company["domain"], events_text,
-            existing_discussions=existing,
-            account_owner=account_owner,
-            sub_discussion_categories=sub_discussion_categories or None,
-        )
+        for batch_idx, batch_events in enumerate(event_batches):
+            existing = _get_existing_discussions_for_company(conn, company["id"])
+            event_cluster_map = _build_event_cluster_map(batch_events, terminal_event_types) if terminal_event_types else {}
+            events_text = _format_events_for_prompt(batch_events, terminal_event_types or None)
 
-        try:
-            result = backend.complete_json(DISCOVER_SYSTEM, user_prompt)
-        except Exception as e:
-            logger.error("LLM call failed for company %s: %s", company["domain"], e)
-            continue
+            user_prompt = _build_discover_prompt(
+                company["name"], company["domain"], events_text,
+                existing_discussions=existing,
+                account_owner=account_owner,
+                sub_discussion_categories=sub_discussion_categories or None,
+            )
 
-        discussions = result.get("discussions", [])
+            if len(event_batches) > 1:
+                logger.info("Company %s: discover batch %d/%d (%d events)",
+                            company["domain"], batch_idx + 1, len(event_batches), len(batch_events))
+
+            try:
+                result = backend.complete_json(DISCOVER_SYSTEM, user_prompt)
+            except Exception as e:
+                logger.error("LLM call failed for company %s (batch %d): %s",
+                             company["domain"], batch_idx + 1, e)
+                continue
+
+            batch_discussions = result.get("discussions", [])
+            discussions.extend(batch_discussions)
+
+            # Save this batch immediately so subsequent batches see the new discussions
+            if batch_discussions and batch_idx < len(event_batches) - 1:
+                saved_ids_batch: dict[int, int] = {}
+                for idx, disc in enumerate(batch_discussions):
+                    parent_id = disc.pop("parent_id", None)
+                    parent_idx = disc.pop("parent_idx", None)
+                    disc_id = _save_discussion(conn, disc, company["id"], backend.model_name)
+                    saved_ids_batch[idx] = disc_id
+                    disc["_saved_id"] = disc_id
+                    disc["_parent_id"] = parent_id
+                    disc["_parent_idx"] = parent_idx
+                for idx, disc in enumerate(batch_discussions):
+                    parent_id = disc.get("_parent_id")
+                    parent_idx = disc.get("_parent_idx")
+                    resolved_parent = None
+                    if isinstance(parent_id, int) and parent_id > 0:
+                        parent_row = fetchone(conn, "SELECT company_id FROM discussions WHERE id = ?", (parent_id,))
+                        if parent_row and parent_row["company_id"] == company["id"]:
+                            resolved_parent = parent_id
+                    elif parent_idx is not None:
+                        try:
+                            resolved_parent = saved_ids_batch[int(parent_idx)]
+                        except (ValueError, KeyError):
+                            pass
+                    if resolved_parent and resolved_parent != saved_ids_batch[idx]:
+                        conn.execute("UPDATE discussions SET parent_id = ? WHERE id = ?",
+                                     (resolved_parent, saved_ids_batch[idx]))
+                conn.commit()
+                total_discussions += len(batch_discussions)
 
         # Build a ProposedChanges snapshot of the LLM's clustering decision
         proposed_new: list[dict] = []
@@ -909,10 +952,13 @@ def discover_discussions(
         )
         snapshot_run_id = cursor.lastrowid
 
-        # Apply using existing save path (handles complex parent resolution, thread ID
-        # prefix matching, etc. that apply_changes doesn't replicate)
+        # Apply using existing save path — skip discussions already saved by batch processing
         saved_ids: dict[int, int] = {}  # array index -> saved discussion ID
         for idx, disc in enumerate(discussions):
+            if "_saved_id" in disc:
+                # Already saved in a batch pass
+                saved_ids[idx] = disc["_saved_id"]
+                continue
             parent_id = disc.pop("parent_id", None)
             parent_idx = disc.pop("parent_idx", None)
             disc_id = _save_discussion(conn, disc, company["id"], backend.model_name)

@@ -14,7 +14,7 @@ logger = logging.getLogger("email_manager.ai.claude_cli")
 # Hard ceiling — kill no matter what after this
 MAX_TOTAL_TIMEOUT = 1200  # 20 minutes
 # If no new stdout output for this long, assume stuck and kill
-ACTIVITY_TIMEOUT = 300    # 5 minutes
+ACTIVITY_TIMEOUT = 600    # 10 minutes
 
 # Rough estimate: ~4 chars per token for English text
 CHARS_PER_TOKEN = 4
