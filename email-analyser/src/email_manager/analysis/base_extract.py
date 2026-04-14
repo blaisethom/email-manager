@@ -74,7 +74,7 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
         INSERT OR IGNORE INTO contacts (email, name, first_seen, last_seen, email_count)
         SELECT
             from_address,
-            from_name,
+            MAX(from_name),
             MIN(date),
             MAX(date),
             COUNT(*)
