@@ -68,8 +68,11 @@ def extract_base(conn: sqlite3.Connection, console: Console = None, limit: int |
 
 def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
     """Build/update contacts table from all email addresses in headers."""
+    if console is None:
+        console = Console()
 
     # Upsert contacts from the 'from' field
+    console.print("  [dim]Upserting contacts from sender addresses...[/dim]")
     conn.execute("""
         INSERT OR IGNORE INTO contacts (email, name, first_seen, last_seen, email_count)
         SELECT
@@ -83,7 +86,9 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
     """)
 
     # Extract contacts from to_addresses and cc_addresses (stored as JSON arrays)
+    console.print("  [dim]Extracting contacts from to/cc addresses...[/dim]")
     rows = fetchall(conn, "SELECT id, to_addresses, cc_addresses, date FROM emails")
+    batch_rows = []
     for row in rows:
         for field in ("to_addresses", "cc_addresses"):
             raw = row[field]
@@ -97,13 +102,18 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
                 addr = addr.strip().lower()
                 if not addr or "@" not in addr:
                     continue
-                conn.execute(
-                    """INSERT OR IGNORE INTO contacts (email, first_seen, last_seen, email_count)
-                    VALUES (?, ?, ?, 0)""",
-                    (addr, row["date"], row["date"]),
-                )
+                batch_rows.append((addr, row["date"], row["date"]))
+
+    if batch_rows:
+        conn.executemany(
+            """INSERT OR IGNORE INTO contacts (email, first_seen, last_seen, email_count)
+            VALUES (?, ?, ?, 0)""",
+            batch_rows,
+        )
+    console.print(f"  [dim]Extracted {len(batch_rows):,} to/cc contact refs[/dim]")
 
     # Update best-known names and received count (dates are set in the single-pass below)
+    console.print("  [dim]Updating contact names and received counts...[/dim]")
     conn.execute("""
         UPDATE contacts SET
             name = COALESCE(
@@ -184,7 +194,10 @@ def _extract_companies(
     conn: sqlite3.Connection, console: Console = None, limit: int | None = None
 ) -> int:
     """Extract companies and their associated email addresses from email headers."""
+    if console is None:
+        console = Console()
 
+    console.print("  [dim]Finding unprocessed emails...[/dim]")
     sql = """SELECT e.id, e.from_address, e.to_addresses, e.cc_addresses, e.date
              FROM emails e
              LEFT JOIN pipeline_runs pr ON e.id = pr.email_id AND pr.stage = 'extract_base'
