@@ -840,6 +840,11 @@ def extract_events_propose(
 
     all_events: list[dict[str, Any]] = []
     progress_idx = 0
+    total_tasks = len(batches) + len(large_thread_ids)
+
+    # Fire initial progress so the TUI shows the total immediately
+    if on_progress:
+        on_progress(0, len(thread_ids))
 
     if concurrency > 1:
         # ── Parallel extraction ───────────────────────────────────────────
