@@ -11,6 +11,7 @@ class TokenUsage:
     """Token usage for a single LLM call."""
     input_tokens: int = 0
     output_tokens: int = 0
+    duration_ms: int | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -45,6 +46,12 @@ class TokenTracker:
     def call_count(self) -> int:
         with self._lock:
             return len(self.calls)
+
+    @property
+    def total_duration_ms(self) -> int:
+        """Sum of individual call durations (total LLM compute time, not wall-clock)."""
+        with self._lock:
+            return sum(u.duration_ms for u in self.calls if u.duration_ms is not None)
 
     def reset(self) -> None:
         with self._lock:

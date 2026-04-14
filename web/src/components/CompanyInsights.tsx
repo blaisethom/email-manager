@@ -26,10 +26,8 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function formatDuration(start: string, end: string | null): string {
-  if (!end) return '…';
-  const ms = new Date(end).getTime() - new Date(start).getTime();
-  if (isNaN(ms) || ms < 0) return '—';
+function formatMs(ms: number): string {
+  if (!ms || ms <= 0) return '—';
   if (ms < 1000) return '<1s';
   const secs = Math.round(ms / 1000);
   if (secs < 60) return `${secs}s`;
@@ -38,8 +36,22 @@ function formatDuration(start: string, end: string | null): string {
   return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
 }
 
+function wallClockMs(start: string, end: string | null): number {
+  if (!end) return 0;
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  return isNaN(ms) || ms < 0 ? 0 : ms;
+}
+
 function RunRow({ run }: { run: ProcessingRun }) {
   const totalTokens = (Number(run.input_tokens) || 0) + (Number(run.output_tokens) || 0);
+  const wallMs = wallClockMs(run.started_at, run.completed_at);
+  const llmMs = Number(run.total_llm_ms) || 0;
+  const wallStr = run.completed_at ? formatMs(wallMs) : '…';
+  const llmStr = llmMs > 0 ? formatMs(llmMs) : null;
+  const title = llmStr
+    ? `Wall-clock: ${wallStr}\nTotal LLM time: ${llmStr} (${run.llm_calls || 0} calls)`
+    : wallStr;
+
   return (
     <tr className="border-b border-slate-100 last:border-0">
       <td className="py-2 pr-4 text-sm text-slate-600">{formatDate(run.started_at)}</td>
@@ -57,7 +69,12 @@ function RunRow({ run }: { run: ProcessingRun }) {
       <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.events_created}</td>
       <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.llm_calls || '—'}</td>
       <td className="py-2 pr-4 text-sm text-slate-600 text-right">{formatTokens(totalTokens)}</td>
-      <td className="py-2 text-sm text-slate-500 text-right">{formatDuration(run.started_at, run.completed_at)}</td>
+      <td className="py-2 text-sm text-slate-500 text-right cursor-help" title={title}>
+        {wallStr}
+        {llmStr && wallMs > 0 && llmMs > wallMs * 1.1 && (
+          <span className="text-xs text-slate-400 ml-1">({llmStr} LLM)</span>
+        )}
+      </td>
     </tr>
   );
 }

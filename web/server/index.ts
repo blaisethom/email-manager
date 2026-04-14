@@ -264,13 +264,14 @@ app.get('/api/companies/:id/insights', async (req: Request, res: Response) => {
   );
   if (!company) { res.status(404).json({ error: 'Company not found' }); return; }
 
-  // Processing runs for this company
+  // Processing runs for this company, with total LLM duration
   const runs = await db.query(
-    `SELECT id, mode, model, started_at, completed_at,
-            events_created, discussions_created, discussions_updated, actions_proposed,
-            input_tokens, output_tokens, llm_calls
-     FROM processing_runs WHERE company_domain = ?
-     ORDER BY started_at DESC LIMIT 20`,
+    `SELECT pr.id, pr.mode, pr.model, pr.started_at, pr.completed_at,
+            pr.events_created, pr.discussions_created, pr.discussions_updated, pr.actions_proposed,
+            pr.input_tokens, pr.output_tokens, pr.llm_calls,
+            (SELECT COALESCE(SUM(lc.duration_ms), 0) FROM llm_calls lc WHERE lc.run_id = pr.id) AS total_llm_ms
+     FROM processing_runs pr WHERE pr.company_domain = ?
+     ORDER BY pr.started_at DESC LIMIT 20`,
     company.domain
   );
 

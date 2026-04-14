@@ -241,6 +241,7 @@ export interface ProcessingRun {
   input_tokens: number;
   output_tokens: number;
   llm_calls: number;
+  total_llm_ms: number;
 }
 
 export interface LlmCallsByStage {

@@ -42,38 +42,54 @@ class ClaudeCLIBackend:
     # ── Sync methods ──────────────────────────────────────────────────────
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        import time
+        t0 = time.monotonic()
         result = self._run_claude_sync(system, user)
+        dur = int((time.monotonic() - t0) * 1000)
         self._tracker.record(TokenUsage(
             input_tokens=len(system + user) // CHARS_PER_TOKEN,
             output_tokens=len(result) // CHARS_PER_TOKEN,
+            duration_ms=dur,
         ))
         return result
 
     def complete_json(self, system: str, user: str, temperature: float = 0.0) -> dict:
+        import time
         json_system = system + "\n\nYou MUST respond with valid JSON only. No markdown fences, no other text."
+        t0 = time.monotonic()
         raw = self._run_claude_sync(json_system, user)
+        dur = int((time.monotonic() - t0) * 1000)
         self._tracker.record(TokenUsage(
             input_tokens=len(json_system + user) // CHARS_PER_TOKEN,
             output_tokens=len(raw) // CHARS_PER_TOKEN,
+            duration_ms=dur,
         ))
         return self._parse_json(raw)
 
     # ── Async methods ─────────────────────────────────────────────────────
 
     async def acomplete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        import time
+        t0 = time.monotonic()
         result = await self._run_claude_async(system, user)
+        dur = int((time.monotonic() - t0) * 1000)
         self._tracker.record(TokenUsage(
             input_tokens=len(system + user) // CHARS_PER_TOKEN,
             output_tokens=len(result) // CHARS_PER_TOKEN,
+            duration_ms=dur,
         ))
         return result
 
     async def acomplete_json(self, system: str, user: str, temperature: float = 0.0) -> dict:
+        import time
         json_system = system + "\n\nYou MUST respond with valid JSON only. No markdown fences, no other text."
+        t0 = time.monotonic()
         raw = await self._run_claude_async(json_system, user)
+        dur = int((time.monotonic() - t0) * 1000)
         self._tracker.record(TokenUsage(
             input_tokens=len(json_system + user) // CHARS_PER_TOKEN,
             output_tokens=len(raw) // CHARS_PER_TOKEN,
+            duration_ms=dur,
         ))
         return self._parse_json(raw)
 

@@ -500,9 +500,10 @@ def apply_changes(
             # Write individual call records
             for usage in token_tracker.calls:
                 conn.execute(
-                    """INSERT INTO llm_calls (run_id, stage, model, input_tokens, output_tokens, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (run_id, mode, model or "unknown", usage.input_tokens, usage.output_tokens, now),
+                    """INSERT INTO llm_calls (run_id, stage, model, input_tokens, output_tokens, duration_ms, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (run_id, mode, model or "unknown", usage.input_tokens, usage.output_tokens,
+                     usage.duration_ms, completed_at),
                 )
 
     # Complete the processing run record (fresh timestamp for actual completion time)
