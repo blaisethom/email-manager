@@ -2,14 +2,95 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from typing import Any
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from email_manager.ai.base import LLMBackend
 from email_manager.config import Config
+from email_manager.db import fetchone
 
 logger = logging.getLogger("email_manager.pipeline.stages")
+
+
+def _report_skip(console: Console, stage: str, company: str | None) -> None:
+    """Print a helpful message when a stage returns 0 for a company."""
+    if not company:
+        return
+
+    # Import here to avoid circular imports at module level
+    from email_manager.db import fetchall
+
+    # We need a connection — but we don't have one here. The caller should use
+    # the richer _report_stage_status instead.
+    console.print(f"  [dim]{stage}: nothing to do (already processed)[/dim]")
+
+
+def _report_stage_status(
+    conn: sqlite3.Connection, console: Console, stage: str, company: str | None, count: int
+) -> None:
+    """Report stage result with skip reason and staleness info."""
+    if count > 0 or not company:
+        return
+
+    mode = f"staged:{stage}"
+    run = fetchone(
+        conn,
+        "SELECT id, started_at, model, prompt_hash, email_cutoff_date FROM processing_runs WHERE company_domain = ? AND mode = ? ORDER BY id DESC LIMIT 1",
+        (company, mode),
+    )
+    if not run:
+        console.print(f"  [dim]{stage}: skipped (no data to process)[/dim]")
+        return
+
+    parts = [f"last run #{run['id']}"]
+    if run.get("started_at"):
+        parts.append(run["started_at"][:16])
+    if run.get("model"):
+        parts.append(run["model"])
+
+    # Check staleness
+    stale_reasons = []
+
+    # New emails?
+    if run.get("email_cutoff_date") and company:
+        like = f"%@{company}%"
+        newer = fetchone(
+            conn,
+            "SELECT 1 FROM emails WHERE (from_address LIKE ? OR to_addresses LIKE ?) AND date > ? LIMIT 1",
+            (like, like, run["email_cutoff_date"]),
+        )
+        if newer:
+            stale_reasons.append("new emails since cutoff")
+
+    # Prompt changed?
+    if run.get("prompt_hash"):
+        from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
+        current_hash = None
+        if stage == "extract_events":
+            from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM
+            current_hash = compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + format_rules_block(conn, "events"))
+        elif stage == "analyse_discussions":
+            from email_manager.analysis.analyse_discussions import ANALYSE_SYSTEM
+            current_hash = compute_prompt_hash(ANALYSE_SYSTEM + format_rules_block(conn, "discussion_updates"))
+        elif stage == "propose_actions":
+            from email_manager.analysis.propose_actions import PROPOSE_SYSTEM
+            current_hash = compute_prompt_hash(PROPOSE_SYSTEM + format_rules_block(conn, "actions"))
+        elif stage == "label_companies":
+            from email_manager.analysis.company_labels import _build_system_prompt, load_label_config
+            labels_config = load_label_config()
+            current_hash = compute_prompt_hash(_build_system_prompt(labels_config) + format_rules_block(conn, "labels"))
+        if current_hash and current_hash != run["prompt_hash"]:
+            stale_reasons.append("prompt changed")
+
+    status = f"  [dim]{stage}: skipped ({', '.join(parts)})"
+    if stale_reasons:
+        status += f" [yellow]⚠ stale: {', '.join(stale_reasons)}[/yellow]"
+    else:
+        status += " ✓ up to date"
+    status += "[/dim]"
+    console.print(status)
 
 
 def _make_progress(console: Console) -> Progress:
@@ -64,7 +145,10 @@ def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: C
             logger.info("label_companies: %d/%d — %s", done, total, name)
 
         count = label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company)
-    console.print(f"  [green]label_companies: labelled {count} companies[/green]")
+    if count > 0:
+        console.print(f"  [green]label_companies: labelled {count} companies[/green]")
+    else:
+        _report_stage_status(conn, console, "label_companies", company, count)
     return count
 
 
@@ -146,7 +230,10 @@ def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Co
             company_domain=company, company_label=label,
             on_progress=on_progress, concurrency=concurrency,
         )
-    console.print(f"  [green]extract_events: generated {count} events[/green]")
+    if count > 0:
+        console.print(f"  [green]extract_events: generated {count} events[/green]")
+    else:
+        _report_stage_status(conn, console, "extract_events", company, count)
     return count
 
 
@@ -171,7 +258,10 @@ def run_discover_discussions(conn: sqlite3.Connection, backend: LLMBackend, conf
             on_progress=on_progress,
             categories_config=categories_config,
         )
-    console.print(f"  [green]discover_discussions: created/updated {count} discussions[/green]")
+    if count > 0:
+        console.print(f"  [green]discover_discussions: created/updated {count} discussions[/green]")
+    else:
+        _report_stage_status(conn, console, "discover_discussions", company, count)
     return count
 
 
@@ -194,7 +284,10 @@ def run_analyse_discussions(conn: sqlite3.Connection, backend: LLMBackend, confi
             limit=limit, force=force, clean=clean, company_domain=company,
             company_label=label, on_progress=on_progress, concurrency=concurrency,
         )
-    console.print(f"  [green]analyse_discussions: analysed {count} discussions[/green]")
+    if count > 0:
+        console.print(f"  [green]analyse_discussions: analysed {count} discussions[/green]")
+    else:
+        _report_stage_status(conn, console, "analyse_discussions", company, count)
     return count
 
 
@@ -217,7 +310,10 @@ def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: C
             limit=limit, force=force, clean=clean, company_domain=company,
             company_label=label, on_progress=on_progress, concurrency=concurrency,
         )
-    console.print(f"  [green]propose_actions: proposed actions for {count} discussions[/green]")
+    if count > 0:
+        console.print(f"  [green]propose_actions: proposed actions for {count} discussions[/green]")
+    else:
+        _report_stage_status(conn, console, "propose_actions", company, count)
     return count
 
 
