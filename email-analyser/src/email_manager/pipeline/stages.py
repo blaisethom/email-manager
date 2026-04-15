@@ -217,16 +217,6 @@ def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Co
         except Exception:
             pass  # fall back to default backend
 
-    # Show thread count before starting (so user knows it's working)
-    if company:
-        from email_manager.analysis.events import _get_threads_to_process
-        thread_ids = _get_threads_to_process(conn, force=force, company_domain=company, company_label=label)
-        if thread_ids:
-            console.print(f"  [dim]{len(thread_ids)} threads to process[/dim]")
-        elif not force:
-            # Will skip — let the stage handle reporting
-            pass
-
     with _make_progress(console) as progress:
         task = progress.add_task("extract_events", total=None, unit="threads")
 
