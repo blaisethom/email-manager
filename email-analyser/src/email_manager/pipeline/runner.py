@@ -358,10 +358,10 @@ def run_pipeline(
                         break
 
             if only_stale_model and not include and current_model:
-                # Include if any stage was last run with a different model
+                # Include if any stage was last run with a different model, or never run
                 for mode in modes_to_check:
                     run = by_mode.get(mode)
-                    if run and run.get("model") != current_model:
+                    if not run or run.get("model") != current_model:
                         include = True
                         break
 
