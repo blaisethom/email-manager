@@ -37,7 +37,7 @@ def _report_stage_status(
     mode = f"staged:{stage}"
     run = fetchone(
         conn,
-        "SELECT id, started_at, model, prompt_hash, email_cutoff_date FROM processing_runs WHERE company_domain = ? AND mode = ? ORDER BY id DESC LIMIT 1",
+        "SELECT id, started_at, model, error FROM processing_runs WHERE company_domain = ? AND mode = ? ORDER BY id DESC LIMIT 1",
         (company, mode),
     )
     if not run:
@@ -50,9 +50,10 @@ def _report_stage_status(
     if run.get("model"):
         parts.append(run["model"])
 
-    status = f"  [dim]{stage}: skipped ({', '.join(parts)}) ✓ up to date"
-    status += "[/dim]"
-    console.print(status)
+    if run.get("error"):
+        console.print(f"  [red]{stage}: last run FAILED ({', '.join(parts)}): {run['error'][:100]}[/red]")
+    else:
+        console.print(f"  [dim]{stage}: skipped ({', '.join(parts)}) ✓ up to date[/dim]")
 
 
 def _make_progress(console: Console) -> Progress:

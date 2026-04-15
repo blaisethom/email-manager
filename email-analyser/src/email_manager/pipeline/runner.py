@@ -72,6 +72,21 @@ def _run_stage(
     except Exception as e:
         console.print(f"  [red]{stage_name} failed: {e}[/red]")
         logger.exception("Stage %s failed", stage_name)
+        # Record the error in processing_runs so we can see it later
+        if company:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            mode = f"staged:{stage_name}"
+            model_name = backend.model_name if backend else "unknown"
+            try:
+                conn.execute(
+                    """INSERT INTO processing_runs (company_domain, mode, model, started_at, completed_at, error)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (company, mode, model_name, now, now, str(e)[:500]),
+                )
+                conn.commit()
+            except Exception:
+                pass  # Don't fail on error recording
         return -1
 
 

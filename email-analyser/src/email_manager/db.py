@@ -12,7 +12,7 @@ def _log(msg: str) -> None:
     """Print migration/schema messages to stderr so they don't pollute stdout (e.g. --csv)."""
     print(msg, file=sys.stderr)
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -188,7 +188,8 @@ CREATE TABLE IF NOT EXISTS processing_runs (
     proposed_changes_json TEXT,
     parent_run_id   INTEGER REFERENCES processing_runs(id),
     email_cutoff_date TEXT,
-    prompt_hash     TEXT
+    prompt_hash     TEXT,
+    error           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_processing_runs_company ON processing_runs(company_domain);
@@ -524,6 +525,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v22(conn)
     if current_version < 23:
         _migrate_to_v23(conn)
+    if current_version < 24:
+        _migrate_to_v24(conn)
+
+
+def _migrate_to_v24(conn: sqlite3.Connection) -> None:
+    """Migration v23 -> v24: add error column to processing_runs."""
+    cols = _get_column_names(conn, "processing_runs")
+    if "error" not in cols:
+        conn.execute("ALTER TABLE processing_runs ADD COLUMN error TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v24] error column added to processing_runs")
 
 
 def _migrate_to_v23(conn: sqlite3.Connection) -> None:
