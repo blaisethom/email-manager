@@ -1036,27 +1036,30 @@ def extract_events_propose(
                 tasks.append(asyncio.create_task(_do_batch(batch)))
             for tid in large_thread_ids:
                 tasks.append(asyncio.create_task(_do_thread(tid)))
-            return await asyncio.gather(*tasks, return_exceptions=True)
 
-        all_results = asyncio.run(_run_parallel())
+            # Process results as they complete for live progress
+            nonlocal progress_idx
+            errors = 0
+            for coro in asyncio.as_completed(tasks):
+                try:
+                    result = await coro
+                    if result:
+                        all_events.extend(result)
+                except Exception as e:
+                    logger.error("Extraction task failed: %s", e)
+                    errors += 1
+                progress_idx += 1
+                if on_progress:
+                    on_progress(progress_idx, len(thread_ids))
+            return errors
 
-        errors = 0
-        for i, result in enumerate(all_results):
-            if isinstance(result, Exception):
-                logger.error("Parallel extraction task %d failed: %s", i, result)
-                errors += 1
-                continue
-            if result:
-                all_events.extend(result)
-            progress_idx += 1
-            if on_progress:
-                on_progress(min(progress_idx, len(thread_ids)), len(thread_ids))
+        errors = asyncio.run(_run_parallel())
 
         if errors:
             import sys
-            print(f"  [!] {errors}/{len(all_results)} extraction tasks failed — check email_manager.log", file=sys.stderr)
+            print(f"  [!] {errors}/{total_tasks} extraction tasks failed — check email_manager.log", file=sys.stderr)
         logger.info("Parallel extraction: %d events from %d tasks (%d errors, concurrency=%d)",
-                     len(all_events), len(all_results), errors, concurrency)
+                     len(all_events), total_tasks, errors, concurrency)
 
     else:
         # ── Sequential extraction (original path) ─────────────────────────
