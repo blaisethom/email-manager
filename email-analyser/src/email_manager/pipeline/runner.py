@@ -260,7 +260,21 @@ def run_pipeline(
             f"SELECT c.domain FROM companies c WHERE {where} GROUP BY c.domain ORDER BY MAX(c.email_count) DESC",
             tuple(params),
         )
-        domains = [r[0] for r in rows]
+        resolved = {r[0].lower(): r[0] for r in rows}
+
+        # If a company file was provided, preserve its order
+        if company_list:
+            ordered = []
+            for entry in company_list:
+                low = entry.lower()
+                if low in resolved:
+                    ordered.append(resolved.pop(low))
+            # Append any extras matched by other filters but not in the file
+            ordered.extend(resolved.values())
+            domains = ordered
+        else:
+            domains = list(resolved.values())
+
         if limit:
             domains = domains[:limit]
         return domains
