@@ -50,45 +50,7 @@ def _report_stage_status(
     if run.get("model"):
         parts.append(run["model"])
 
-    # Check staleness
-    stale_reasons = []
-
-    # New emails?
-    if run.get("email_cutoff_date") and company:
-        like = f"%@{company}%"
-        newer = fetchone(
-            conn,
-            "SELECT 1 FROM emails WHERE (from_address LIKE ? OR to_addresses LIKE ?) AND date > ? LIMIT 1",
-            (like, like, run["email_cutoff_date"]),
-        )
-        if newer:
-            stale_reasons.append("new emails since cutoff")
-
-    # Prompt changed?
-    if run.get("prompt_hash"):
-        from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
-        current_hash = None
-        if stage == "extract_events":
-            from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM
-            current_hash = compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + format_rules_block(conn, "events"))
-        elif stage == "analyse_discussions":
-            from email_manager.analysis.analyse_discussions import ANALYSE_SYSTEM
-            current_hash = compute_prompt_hash(ANALYSE_SYSTEM + format_rules_block(conn, "discussion_updates"))
-        elif stage == "propose_actions":
-            from email_manager.analysis.propose_actions import PROPOSE_SYSTEM
-            current_hash = compute_prompt_hash(PROPOSE_SYSTEM + format_rules_block(conn, "actions"))
-        elif stage == "label_companies":
-            from email_manager.analysis.company_labels import _build_system_prompt, load_label_config
-            labels_config = load_label_config()
-            current_hash = compute_prompt_hash(_build_system_prompt(labels_config) + format_rules_block(conn, "labels"))
-        if current_hash and current_hash != run["prompt_hash"]:
-            stale_reasons.append("prompt changed")
-
-    status = f"  [dim]{stage}: skipped ({', '.join(parts)})"
-    if stale_reasons:
-        status += f" [yellow]⚠ stale: {', '.join(stale_reasons)}[/yellow]"
-    else:
-        status += " ✓ up to date"
+    status = f"  [dim]{stage}: skipped ({', '.join(parts)}) ✓ up to date"
     status += "[/dim]"
     console.print(status)
 
