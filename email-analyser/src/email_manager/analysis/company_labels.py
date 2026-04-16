@@ -202,7 +202,7 @@ def _get_email_summaries(
         date = (r["date"] or "")[:10]
         subject = r["subject"] or "(no subject)"
         body = (r["body_text"] or "")[:300]
-        to_line = f" → {r['to_addresses'][:80]}" if show_to and r.get("to_addresses") else ""
+        to_line = f" → {r['to_addresses'][:80]}" if show_to and r["to_addresses"] else ""
         return f"[{date}] From: {sender} <{r['from_address']}>{to_line} | Subject: {subject}\n{body}"
 
     sections = []

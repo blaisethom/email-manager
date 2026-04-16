@@ -45,12 +45,12 @@ def _report_stage_status(
         return
 
     parts = [f"last run #{run['id']}"]
-    if run.get("started_at"):
+    if run["started_at"]:
         parts.append(run["started_at"][:16])
-    if run.get("model"):
+    if run["model"]:
         parts.append(run["model"])
 
-    if run.get("error"):
+    if run["error"]:
         console.print(f"  [red]{stage}: last run FAILED ({', '.join(parts)}): {run['error'][:100]}[/red]")
     else:
         console.print(f"  [dim]{stage}: skipped ({', '.join(parts)}) ✓ up to date[/dim]")

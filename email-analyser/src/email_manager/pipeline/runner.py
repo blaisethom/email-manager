@@ -113,10 +113,10 @@ def _is_stage_stale(
         return True  # never run = stale
 
     if check_model and backend:
-        if run.get("model") != backend.model_name:
+        if run["model"] != backend.model_name:
             return True
 
-    if check_prompt and run.get("prompt_hash"):
+    if check_prompt and run["prompt_hash"]:
         from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
         current_hash = None
         if stage == "extract_events":

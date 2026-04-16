@@ -14,15 +14,19 @@ class TestDatabase:
         table_names = {r["name"] for r in tables}
         expected = {
             "emails", "sync_state", "contacts", "threads",
-            "projects", "email_projects", "entities", "pipeline_runs",
+            "projects", "email_projects", "pipeline_runs",
             "schema_version", "email_references",
+            "companies", "company_contacts", "company_labels",
+            "discussions", "event_ledger", "processing_runs",
+            "milestones", "proposed_actions", "change_journal",
         }
         assert expected.issubset(table_names)
 
     def test_schema_version(self, test_db: sqlite3.Connection) -> None:
+        from email_manager.db import SCHEMA_VERSION
         row = fetchone(test_db, "SELECT version FROM schema_version")
         assert row is not None
-        assert row["version"] == 3
+        assert row["version"] == SCHEMA_VERSION
 
     def test_insert_and_query_email(self, test_db: sqlite3.Connection) -> None:
         execute(
