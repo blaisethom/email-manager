@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import inspect
 import logging
 import sqlite3
+from graphlib import TopologicalSorter
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
@@ -11,7 +11,7 @@ from email_manager.ai.base import LLMBackend
 from email_manager.ai.factory import get_backend
 from email_manager.config import Config
 from email_manager.db import get_db
-from email_manager.pipeline.stages import ALL_STAGES
+from email_manager.pipeline.stages import STAGES, StageScope, ALL_STAGES
 
 logger = logging.getLogger("email_manager.pipeline")
 
@@ -32,6 +32,16 @@ def _setup_file_logging(config: Config) -> None:
     root.setLevel(logging.INFO)
 
 
+def _topo_order(stage_names: list[str]) -> list[str]:
+    """Return stage_names in topological order based on their declared dependencies."""
+    requested = set(stage_names)
+    graph: dict[str, set[str]] = {}
+    for name in stage_names:
+        defn = STAGES.get(name)
+        graph[name] = (defn.depends_on & requested) if defn else set()
+    return list(TopologicalSorter(graph).static_order())
+
+
 def _run_stage(
     stage_name: str,
     conn: sqlite3.Connection,
@@ -48,25 +58,24 @@ def _run_stage(
     concurrency: int = 1,
 ) -> int:
     """Run a single pipeline stage. Returns item count or -1 on error."""
-    if stage_name not in ALL_STAGES:
+    if stage_name not in STAGES:
         console.print(f"[red]Unknown stage: {stage_name}[/red]")
         return -1
 
-    stage_fn = ALL_STAGES[stage_name]
+    defn = STAGES[stage_name]
     console.print(f"\n[bold]Running stage: {stage_name}[/bold]")
     logger.info("Starting stage: %s", stage_name)
 
     try:
-        kwargs = dict(console=console, limit=limit, force=force)
-        sig = inspect.signature(stage_fn)
-        if clean and "clean" in sig.parameters:
-            kwargs["clean"] = True
-        for opt_name, opt_val in [("company", company), ("label", label), ("exclude", exclude), ("contact", contact)]:
-            if opt_name in sig.parameters and opt_val:
-                kwargs[opt_name] = opt_val
-        if "concurrency" in sig.parameters and concurrency > 1:
+        kwargs: dict[str, object] = dict(console=console, limit=limit, force=force)
+        optional = {"clean": clean, "company": company, "label": label,
+                     "exclude": exclude, "contact": contact}
+        for key, val in optional.items():
+            if key in defn.accepts and val:
+                kwargs[key] = val
+        if "concurrency" in defn.accepts and concurrency > 1:
             kwargs["concurrency"] = concurrency
-        count = stage_fn(conn, backend, config, **kwargs)
+        count = defn.run(conn, backend, config, **kwargs)
         logger.info("Finished stage: %s — processed %d items", stage_name, count)
         return count
     except Exception as e:
@@ -90,13 +99,9 @@ def _run_stage(
         return -1
 
 
-# Stages that should run once globally in per-company mode, not per company
-GLOBAL_STAGES = {"extract_base"}
-
-
 def _is_stage_stale(
-    conn: Any, domain: str, stage: str, backend: Any,
-    check_model: bool, check_prompt: bool,
+    conn: sqlite3.Connection, domain: str, stage: str, backend: LLMBackend | None,
+    config: Config, check_model: bool, check_prompt: bool,
 ) -> bool:
     """Check if a specific stage needs forcing for a specific company."""
     if not check_model and not check_prompt:
@@ -117,28 +122,31 @@ def _is_stage_stale(
             return True
 
     if check_prompt and run["prompt_hash"]:
-        from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
-        current_hash = None
-        if stage == "extract_events":
-            from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM
-            current_hash = compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + format_rules_block(conn, "events"))
-        elif stage == "analyse_discussions":
-            from email_manager.analysis.analyse_discussions import ANALYSE_SYSTEM
-            current_hash = compute_prompt_hash(ANALYSE_SYSTEM + format_rules_block(conn, "discussion_updates"))
-        elif stage == "propose_actions":
-            from email_manager.analysis.propose_actions import PROPOSE_SYSTEM
-            current_hash = compute_prompt_hash(PROPOSE_SYSTEM + format_rules_block(conn, "actions"))
-        elif stage == "label_companies":
-            from email_manager.analysis.company_labels import _build_system_prompt, load_label_config
-            labels_config = load_label_config()
-            current_hash = compute_prompt_hash(_build_system_prompt(labels_config) + format_rules_block(conn, "labels"))
-        elif stage == "discover_discussions":
-            from email_manager.analysis.discover_discussions import DISCOVER_SYSTEM
-            current_hash = compute_prompt_hash(DISCOVER_SYSTEM)
-        if current_hash and current_hash != run["prompt_hash"]:
-            return True
+        defn = STAGES.get(stage)
+        if defn and defn.prompt_hash_fn is not None:
+            current_hash = defn.prompt_hash_fn(conn, config)
+            if current_hash and current_hash != run["prompt_hash"]:
+                return True
 
     return False
+
+
+def _print_company_header(
+    conn: sqlite3.Connection, console: Console,
+    domain: str, index: int, total: int,
+) -> None:
+    """Print a company header banner with latest email date."""
+    from email_manager.db import fetchone as _fo
+    like = f"%@{domain}%"
+    latest_email = _fo(
+        conn,
+        "SELECT MAX(date) as d FROM emails WHERE from_address LIKE ? OR to_addresses LIKE ?",
+        (like, like),
+    )
+    latest_str = f"  latest email: {latest_email['d'][:10]}" if latest_email and latest_email["d"] else ""
+    console.print(f"\n{'='*60}")
+    console.print(f"  [bold cyan]Company {index+1}/{total}: {domain}[/bold cyan]{latest_str}")
+    console.print(f"{'='*60}")
 
 
 def run_pipeline(
@@ -171,12 +179,11 @@ def run_pipeline(
 
     conn = get_db(config)
 
-    stage_names = stages or list(ALL_STAGES.keys())
+    stage_names = stages or list(STAGES.keys())
     results: dict[str, int] = {}
 
     # Only initialise AI backend if we need it
-    NO_AI_STAGES = {"extract_base", "fetch_homepages"}
-    needs_ai = any(s not in NO_AI_STAGES for s in stage_names)
+    needs_ai = any(STAGES[s].needs_ai for s in stage_names if s in STAGES)
     backend = None
     if needs_ai:
         backend = get_backend(config)
@@ -282,38 +289,22 @@ def run_pipeline(
     def _filter_by_staleness(domains: list[str]) -> list[str]:
         """Post-filter domains by staleness criteria (new emails, prompt change, model change, unprocessed)."""
         from email_manager.db import fetchall, fetchone
-        from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
 
         # Determine which modes to check based on requested stages
-        modes_to_check = []
-        for s in stage_names:
-            if s not in GLOBAL_STAGES:
-                modes_to_check.append(f"staged:{s}")
+        modes_to_check = [
+            f"staged:{s}" for s in stage_names
+            if s in STAGES and STAGES[s].scope != StageScope.GLOBAL
+        ]
 
         # Compute current prompt hashes for comparison
         current_hashes: dict[str, str] = {}
         if only_stale_prompt and backend:
             for s in stage_names:
-                if s == "extract_events":
-                    from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM
-                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
-                        EXTRACT_EVENTS_SYSTEM + format_rules_block(conn, "events"))
-                elif s == "analyse_discussions":
-                    from email_manager.analysis.analyse_discussions import ANALYSE_SYSTEM
-                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
-                        ANALYSE_SYSTEM + format_rules_block(conn, "discussion_updates"))
-                elif s == "propose_actions":
-                    from email_manager.analysis.propose_actions import PROPOSE_SYSTEM
-                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
-                        PROPOSE_SYSTEM + format_rules_block(conn, "actions"))
-                elif s == "label_companies":
-                    from email_manager.analysis.company_labels import _build_system_prompt, load_label_config
-                    labels_config = load_label_config(getattr(config, "company_labels_path", None))
-                    current_hashes[f"staged:{s}"] = compute_prompt_hash(
-                        _build_system_prompt(labels_config) + format_rules_block(conn, "labels"))
-                elif s == "discover_discussions":
-                    from email_manager.analysis.discover_discussions import DISCOVER_SYSTEM
-                    current_hashes[f"staged:{s}"] = compute_prompt_hash(DISCOVER_SYSTEM)
+                defn = STAGES.get(s)
+                if defn and defn.prompt_hash_fn is not None:
+                    h = defn.prompt_hash_fn(conn, config)
+                    if h:
+                        current_hashes[f"staged:{s}"] = h
 
         current_model = backend.model_name if backend else None
 
@@ -435,57 +426,48 @@ def run_pipeline(
         conn.close()
         return {}
 
+    # Topologically order stages based on declared dependencies
+    ordered = _topo_order(stage_names)
+    global_ordered = [s for s in ordered if s in STAGES and STAGES[s].scope == StageScope.GLOBAL]
+    perco_ordered = [s for s in ordered if s not in global_ordered]
+
     if per_company and target_domains is not None:
         # Company-first mode: run all stages for each company before moving on
 
         # Run global stages once first
-        global_stages = [s for s in stage_names if s in GLOBAL_STAGES]
-        per_co_stages = [s for s in stage_names if s not in GLOBAL_STAGES]
-
-        for stage_name in global_stages:
+        for stage_name in global_ordered:
             count = _run_stage(stage_name, conn, backend, config, console,
                                limit=limit, force=force, clean=clean, concurrency=concurrency)
             results[stage_name] = count
 
         for i, domain in enumerate(target_domains):
-            # Show company header with latest email date
-            from email_manager.db import fetchone as _fo
-            like = f"%@{domain}%"
-            latest_email = _fo(
-                conn,
-                "SELECT MAX(date) as d FROM emails WHERE from_address LIKE ? OR to_addresses LIKE ?",
-                (like, like),
-            )
-            latest_str = f"  latest email: {latest_email['d'][:10]}" if latest_email and latest_email["d"] else ""
-            console.print(f"\n{'='*60}")
-            console.print(f"  [bold cyan]Company {i+1}/{len(target_domains)}: {domain}[/bold cyan]{latest_str}")
-            console.print(f"{'='*60}")
+            _print_company_header(conn, console, domain, i, len(target_domains))
 
-            for stage_name in per_co_stages:
+            for stage_name in perco_ordered:
                 # Only force stages that are actually stale for this company
                 sf = force or _is_stage_stale(conn, domain, stage_name, backend,
-                                              only_stale_model, only_stale_prompt)
+                                              config, only_stale_model, only_stale_prompt)
                 count = _run_stage(stage_name, conn, backend, config, console,
                                    limit=None, force=sf, clean=clean, company=domain, concurrency=concurrency)
                 results[stage_name] = results.get(stage_name, 0) + max(count, 0)
     elif target_domains is not None and not per_company:
         # Stage-first mode with resolved company list
-        for stage_name in stage_names:
-            if stage_name in GLOBAL_STAGES:
+        for stage_name in ordered:
+            if stage_name in global_ordered:
                 count = _run_stage(stage_name, conn, backend, config, console,
                                    limit=limit, force=force, clean=clean)
             else:
                 count = 0
                 for domain in target_domains:
                     sf = force or _is_stage_stale(conn, domain, stage_name, backend,
-                                                  only_stale_model, only_stale_prompt)
+                                                  config, only_stale_model, only_stale_prompt)
                     c = _run_stage(stage_name, conn, backend, config, console,
                                    limit=None, force=sf, clean=clean, company=domain, concurrency=concurrency)
                     count += max(c, 0)
             results[stage_name] = count
     else:
         # Single company or no filtering — original behavior
-        for stage_name in stage_names:
+        for stage_name in ordered:
             count = _run_stage(stage_name, conn, backend, config, console,
                                limit=limit, force=force, clean=clean,
                                company=company, label=label, exclude=exclude, contact=contact,

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import enum
 import logging
 import sqlite3
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
@@ -12,6 +14,61 @@ from email_manager.config import Config
 from email_manager.db import fetchone
 
 logger = logging.getLogger("email_manager.pipeline.stages")
+
+
+# ── Declarative stage metadata ──────────────────────────────────────────────
+
+
+class StageScope(enum.Enum):
+    GLOBAL = "global"        # runs once, not per-company (e.g. extract_base)
+    PER_COMPANY = "company"  # runs per company
+
+
+@dataclass(frozen=True, slots=True)
+class StageDefinition:
+    """Declarative metadata for a pipeline stage."""
+
+    name: str
+    run: Callable[..., int]
+    scope: StageScope = StageScope.PER_COMPANY
+    needs_ai: bool = True
+    accepts: frozenset[str] = field(default_factory=frozenset)
+    depends_on: frozenset[str] = field(default_factory=frozenset)
+    prompt_hash_fn: Callable[[sqlite3.Connection, Config], str | None] | None = None
+
+
+# ── Prompt hash helpers (lazy imports, same pattern as wrapper functions) ────
+
+
+def _hash_extract_events(conn: sqlite3.Connection, config: Config) -> str | None:
+    from email_manager.ai.prompts import EXTRACT_EVENTS_SYSTEM
+    from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
+    return compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + format_rules_block(conn, "events"))
+
+
+def _hash_discover_discussions(conn: sqlite3.Connection, config: Config) -> str | None:
+    from email_manager.analysis.discover_discussions import DISCOVER_SYSTEM
+    from email_manager.analysis.feedback import compute_prompt_hash
+    return compute_prompt_hash(DISCOVER_SYSTEM)
+
+
+def _hash_analyse_discussions(conn: sqlite3.Connection, config: Config) -> str | None:
+    from email_manager.analysis.analyse_discussions import ANALYSE_SYSTEM
+    from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
+    return compute_prompt_hash(ANALYSE_SYSTEM + format_rules_block(conn, "discussion_updates"))
+
+
+def _hash_propose_actions(conn: sqlite3.Connection, config: Config) -> str | None:
+    from email_manager.analysis.propose_actions import PROPOSE_SYSTEM
+    from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
+    return compute_prompt_hash(PROPOSE_SYSTEM + format_rules_block(conn, "actions"))
+
+
+def _hash_label_companies(conn: sqlite3.Connection, config: Config) -> str | None:
+    from email_manager.analysis.company_labels import _build_system_prompt, load_label_config
+    from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block
+    labels_config = load_label_config(getattr(config, "company_labels_path", None))
+    return compute_prompt_hash(_build_system_prompt(labels_config) + format_rules_block(conn, "labels"))
 
 
 def _report_skip(console: Console, stage: str, company: str | None) -> None:
@@ -281,16 +338,67 @@ def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: C
     return count
 
 
-ALL_STAGES = {
+STAGES: dict[str, StageDefinition] = {
     # Phase 1: Base extraction
-    "extract_base": run_extract_base,
-    "fetch_homepages": run_fetch_homepages,
-    "label_companies": run_label_companies,
+    "extract_base": StageDefinition(
+        name="extract_base",
+        run=run_extract_base,
+        scope=StageScope.GLOBAL,
+        needs_ai=False,
+        accepts=frozenset(),
+        depends_on=frozenset(),
+    ),
+    "fetch_homepages": StageDefinition(
+        name="fetch_homepages",
+        run=run_fetch_homepages,
+        needs_ai=False,
+        accepts=frozenset({"company", "label"}),
+        depends_on=frozenset({"extract_base"}),
+    ),
+    "label_companies": StageDefinition(
+        name="label_companies",
+        run=run_label_companies,
+        accepts=frozenset({"company", "label"}),
+        depends_on=frozenset({"extract_base"}),
+        prompt_hash_fn=_hash_label_companies,
+    ),
     # Phase 2: Event-driven discussion pipeline
-    "extract_events": run_extract_events,
-    "discover_discussions": run_discover_discussions,
-    "analyse_discussions": run_analyse_discussions,
+    "extract_events": StageDefinition(
+        name="extract_events",
+        run=run_extract_events,
+        accepts=frozenset({"clean", "company", "label", "concurrency"}),
+        depends_on=frozenset({"extract_base"}),
+        prompt_hash_fn=_hash_extract_events,
+    ),
+    "discover_discussions": StageDefinition(
+        name="discover_discussions",
+        run=run_discover_discussions,
+        accepts=frozenset({"clean", "company", "label"}),
+        depends_on=frozenset({"extract_events"}),
+        prompt_hash_fn=_hash_discover_discussions,
+    ),
+    "analyse_discussions": StageDefinition(
+        name="analyse_discussions",
+        run=run_analyse_discussions,
+        accepts=frozenset({"clean", "company", "label", "concurrency"}),
+        depends_on=frozenset({"discover_discussions"}),
+        prompt_hash_fn=_hash_analyse_discussions,
+    ),
     # Phase 3: Proposed actions & contact enrichment
-    "propose_actions": run_propose_actions,
-    "contact_memory": run_contact_memory,
+    "propose_actions": StageDefinition(
+        name="propose_actions",
+        run=run_propose_actions,
+        accepts=frozenset({"clean", "company", "label", "concurrency"}),
+        depends_on=frozenset({"analyse_discussions"}),
+        prompt_hash_fn=_hash_propose_actions,
+    ),
+    "contact_memory": StageDefinition(
+        name="contact_memory",
+        run=run_contact_memory,
+        accepts=frozenset({"company", "label"}),
+        depends_on=frozenset({"extract_base"}),
+    ),
 }
+
+# Backward compatibility alias
+ALL_STAGES = {name: defn.run for name, defn in STAGES.items()}
