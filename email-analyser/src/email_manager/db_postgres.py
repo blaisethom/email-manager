@@ -122,6 +122,17 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
         out, flags=re.IGNORECASE,
     )
 
+    # julianday(X) → EXTRACT(EPOCH FROM (X)::timestamptz) / 86400.0
+    # SQLite returns days since the Julian epoch; for date *differences*,
+    # epoch-seconds / 86400 is exactly equivalent. timestamptz tolerates ISO
+    # strings with or without an offset. Inner expression must not contain
+    # nested parens (true for all current call sites).
+    out = re.sub(
+        r"\bjulianday\s*\(([^)]+)\)",
+        r"(EXTRACT(EPOCH FROM (\1)::timestamptz) / 86400.0)",
+        out, flags=re.IGNORECASE,
+    )
+
     # INTEGER PRIMARY KEY → SERIAL PRIMARY KEY (for auto-increment)
     out = _INTEGER_PRIMARY_KEY_RE.sub("SERIAL PRIMARY KEY", out)
     out = _AUTOINCREMENT_RE.sub("", out)

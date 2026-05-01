@@ -4,11 +4,17 @@ import { api } from '../api';
 import type { ContactDetail, Thread } from '../types';
 import Badge from '../components/Badge';
 import Breadcrumbs from '../components/Breadcrumbs';
+import { HubSpotContactPanel } from '../components/HubSpotPanel';
+import ThreadModal from '../components/ThreadModal';
 import { formatDate } from '../utils';
 
-function ThreadRow({ thread }: { thread: Thread }) {
+function ThreadRow({ thread, onClick }: { thread: Thread; onClick: () => void }) {
   return (
-    <div className="py-3 border-b border-slate-100 last:border-0">
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full text-left py-3 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors px-2 -mx-2 rounded"
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="font-medium text-slate-900 truncate">
@@ -28,7 +34,7 @@ function ThreadRow({ thread }: { thread: Thread }) {
           {thread.email_count} email{thread.email_count !== 1 ? 's' : ''}
         </span>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -38,6 +44,7 @@ export default function ContactDetailPage() {
   const [data, setData] = useState<ContactDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
 
   const email = emailParam ? decodeURIComponent(emailParam) : '';
 
@@ -86,15 +93,35 @@ export default function ContactDetailPage() {
 
       {/* Header */}
       <div className="mb-6">
-        {data.name && (
-          <h1 className="text-3xl font-bold text-slate-900">{data.name}</h1>
-        )}
-        <p className={`text-slate-500 ${data.name ? 'mt-1' : 'text-3xl font-bold text-slate-900'}`}>
-          {data.email}
-        </p>
-        {data.company && (
-          <p className="text-slate-600 mt-1">{data.company}</p>
-        )}
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            {data.name && (
+              <h1 className="text-3xl font-bold text-slate-900">{data.name}</h1>
+            )}
+            <p className={`text-slate-500 ${data.name ? 'mt-1' : 'text-3xl font-bold text-slate-900'}`}>
+              {data.email}
+            </p>
+            {data.company && (
+              <p className="text-slate-600 mt-1">{data.company}</p>
+            )}
+          </div>
+          {Array.isArray(data.sources) && data.sources.length > 0 && (
+            <div className="flex flex-wrap gap-1 shrink-0">
+              {data.sources.map((s) => (
+                <span
+                  key={s}
+                  className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border uppercase tracking-wider ${
+                    s === 'email' ? 'bg-blue-50 text-blue-700 border-blue-200'
+                    : 'bg-orange-50 text-orange-700 border-orange-200'
+                  }`}
+                  title={`Data from ${s}`}
+                >
+                  {s}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Stats */}
@@ -116,6 +143,13 @@ export default function ContactDetailPage() {
           <div className="text-base font-semibold text-slate-900">{formatDate(data.last_seen)}</div>
         </div>
       </div>
+
+      {/* HubSpot CRM data */}
+      {data.hubspot && (
+        <div className="mb-6">
+          <HubSpotContactPanel data={data.hubspot} />
+        </div>
+      )}
 
       {/* Memory section */}
       {data.memory && (
@@ -185,7 +219,11 @@ export default function ContactDetailPage() {
           </h2>
           <div>
             {data.threads.map((thread) => (
-              <ThreadRow key={thread.id} thread={thread} />
+              <ThreadRow
+                key={thread.id}
+                thread={thread}
+                onClick={() => setSelectedThread(thread)}
+              />
             ))}
           </div>
         </div>
@@ -195,6 +233,13 @@ export default function ContactDetailPage() {
         <div className="card p-6 text-center text-slate-500">
           <p className="text-sm">No additional information available for this contact.</p>
         </div>
+      )}
+
+      {selectedThread && (
+        <ThreadModal
+          thread={selectedThread}
+          onClose={() => setSelectedThread(null)}
+        />
       )}
     </div>
   );

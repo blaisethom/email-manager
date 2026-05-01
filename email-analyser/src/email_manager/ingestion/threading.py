@@ -209,7 +209,7 @@ def _find_thread_for_email(
            FROM email_references er
            JOIN emails e ON e.message_id = er.referenced_id
            WHERE er.email_id = ? AND e.thread_id IS NOT NULL""",
-        (email_id,),
+        (str(email_id),),
     ).fetchall()
     for r in rows:
         found_thread_ids.add(r["thread_id"])
@@ -307,6 +307,27 @@ def _merge_threads(
         conn.execute(
             "UPDATE emails SET thread_id = ? WHERE thread_id = ?",
             (winner, loser),
+        )
+        # Update all tables that reference thread_id
+        conn.execute(
+            "UPDATE event_ledger SET thread_id = ? WHERE thread_id = ?",
+            (winner, loser),
+        )
+        # discussion_threads has a composite PK — avoid duplicates
+        conn.execute(
+            "DELETE FROM discussion_threads WHERE thread_id = ? AND discussion_id IN "
+            "(SELECT discussion_id FROM discussion_threads WHERE thread_id = ?)",
+            (loser, winner),
+        )
+        conn.execute(
+            "UPDATE discussion_threads SET thread_id = ? WHERE thread_id = ?",
+            (winner, loser),
+        )
+        conn.execute(
+            "DELETE FROM thread_search_docs WHERE thread_id = ?", (loser,)
+        )
+        conn.execute(
+            "DELETE FROM thread_embeddings WHERE thread_id = ?", (loser,)
         )
         conn.execute("DELETE FROM threads WHERE thread_id = ?", (loser,))
         dirty_threads.discard(loser)
