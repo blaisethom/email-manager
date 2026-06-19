@@ -426,4 +426,20 @@ export const api = {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
   },
+
+  async getCompanyDiscussionFeedback(companyId: number): Promise<{ id: number; rule_text: string; active: boolean; created_at: string }[]> {
+    const res = await fetch(`${BASE}/review/companies/${companyId}/discussion-feedback`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async addCompanyDiscussionFeedback(companyId: number, feedback: string): Promise<{ id: number; rule_text: string }> {
+    const res = await fetch(`${BASE}/review/companies/${companyId}/discussion-feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
 };

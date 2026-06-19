@@ -246,4 +246,61 @@ export function registerReviewRoutes(app: Express, db: Database): void {
 
     res.json({ ok: true, value });
   });
+
+  // ── Per-company discussion feedback ────────────────────────────────────────
+
+  // GET /api/review/companies/:companyId/discussion-feedback
+  app.get('/api/review/companies/:companyId/discussion-feedback', async (req: Request, res: Response) => {
+    const companyId = parseInt(req.params.companyId, 10);
+    if (isNaN(companyId)) { res.status(400).json({ error: 'Invalid company id' }); return; }
+
+    const rows = await db.query<{ id: number; rule_text: string; active: number; created_at: string }>(
+      `SELECT id, rule_text, active, created_at FROM learned_rules
+       WHERE layer = 'discussions' AND category = ? AND active = 1
+       ORDER BY created_at DESC`,
+      `__company_${companyId}__`,
+    );
+    res.json(rows.map(r => ({ ...r, active: Boolean(r.active) })));
+  });
+
+  // POST /api/review/companies/:companyId/discussion-feedback
+  // body: { feedback: string } — plain-text instruction for the AI
+  app.post('/api/review/companies/:companyId/discussion-feedback', async (req: Request, res: Response) => {
+    const companyId = parseInt(req.params.companyId, 10);
+    if (isNaN(companyId)) { res.status(400).json({ error: 'Invalid company id' }); return; }
+
+    const { feedback } = req.body as { feedback?: string };
+    if (!feedback?.trim()) { res.status(400).json({ error: 'feedback is required' }); return; }
+
+    const company = await db.queryOne<{ name: string | null; domain: string | null }>(
+      'SELECT name, domain FROM companies WHERE id = ?', companyId,
+    );
+    if (!company) { res.status(404).json({ error: 'Company not found' }); return; }
+
+    const category = `__company_${companyId}__`;
+    const now = nowIso();
+
+    // Deactivate old feedback rules for this company
+    await db.query(
+      `UPDATE learned_rules SET active = 0 WHERE layer = 'discussions' AND category = ?`,
+      category,
+    );
+
+    const companyLabel = company.name ?? company.domain ?? String(companyId);
+    const ruleText = `For ${companyLabel}: ${feedback.trim()}`;
+
+    const result = await db.queryOne<{ id: number }>(
+      `INSERT INTO learned_rules (layer, category, rule_text, active, created_at)
+       VALUES ('discussions', ?, ?, 1, ?) RETURNING id`,
+      category, ruleText, now,
+    );
+
+    await db.query(
+      `INSERT INTO feedback (layer, target_type, target_id, action, new_value, reason, created_at)
+       VALUES ('discussions', 'company', ?, 'granularity_feedback', ?, ?, ?)`,
+      String(companyId), ruleText, feedback.trim(), now,
+    );
+
+    res.status(201).json({ id: result?.id, rule_text: ruleText, active: true, created_at: now });
+  });
 }

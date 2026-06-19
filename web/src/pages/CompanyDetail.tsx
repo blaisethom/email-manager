@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
-import type { CompanyDetail, CompanyLabel, CompanyThread, DiscussionSummary, ThreadEmail } from '../types';
+import type { CompanyDetail, CompanyLabel, CompanyThread, DiscussionSummary, ThreadEmail, LabelConfig } from '../types';
 import Badge from '../components/Badge';
 import Breadcrumbs, { extendBreadcrumbs } from '../components/Breadcrumbs';
 import Markdown from '../components/Markdown';
@@ -73,29 +73,231 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-function LabelRow({ item }: { item: CompanyLabel }) {
-  const [expanded, setExpanded] = useState(false);
+function LabelsSection({
+  companyId,
+  labels,
+  labelConfig,
+  onUpdate,
+}: {
+  companyId: number;
+  labels: CompanyLabel[];
+  labelConfig: LabelConfig[];
+  onUpdate: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set(labels.map(l => l.label)));
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [expandedReasoning, setExpandedReasoning] = useState<string | null>(null);
+
+  const startEdit = () => {
+    setSelected(new Set(labels.map(l => l.label)));
+    setReason('');
+    setError(null);
+    setEditing(true);
+  };
+
+  const toggle = (name: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.saveCompanyLabels(companyId, Array.from(selected), reason.trim() || undefined);
+      setEditing(false);
+      onUpdate();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="card p-6 mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-slate-900">Labels</h2>
+          <button onClick={() => setEditing(false)} className="text-sm text-slate-500 hover:text-slate-700">Cancel</button>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
+          {labelConfig.map(lc => (
+            <label key={lc.name} className="flex items-start gap-2 p-2 rounded-lg border border-slate-200 hover:bg-slate-50 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={selected.has(lc.name)}
+                onChange={() => toggle(lc.name)}
+                className="mt-0.5 rounded"
+              />
+              <div>
+                <div className="text-sm font-medium text-slate-800">{lc.name}</div>
+                {lc.description && (
+                  <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{lc.description}</div>
+                )}
+              </div>
+            </label>
+          ))}
+        </div>
+        <div className="mb-3">
+          <input
+            type="text"
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            placeholder="Reason (optional — will be saved as a rule for future AI runs)"
+            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          />
+        </div>
+        {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
+        <button
+          onClick={save}
+          disabled={saving}
+          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+        >
+          {saving ? 'Saving…' : 'Save labels'}
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <div className="py-3 border-b border-slate-100 last:border-0">
-      <div className="flex items-center gap-3">
-        <Badge label={item.label} variant="label" />
-        {item.confidence != null && (
-          <span className="text-sm text-slate-500">{Math.round(item.confidence * 100)}% confidence</span>
-        )}
-        {item.reasoning && (
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className="ml-auto text-xs text-slate-400 hover:text-slate-600 transition-colors"
-          >
-            {expanded ? 'Hide reasoning ↑' : 'Show reasoning ↓'}
-          </button>
-        )}
+    <div className="card p-6 mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-base font-semibold text-slate-900">Labels</h2>
+        <button onClick={startEdit} className="text-xs text-slate-400 hover:text-slate-600 transition-colors">
+          Edit
+        </button>
       </div>
-      {expanded && item.reasoning && (
-        <p className="mt-2 text-sm text-slate-600 leading-relaxed bg-slate-50 rounded-lg p-3">
-          {item.reasoning}
-        </p>
+      {labels.length === 0 ? (
+        <p className="text-sm text-slate-400">No labels assigned</p>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {labels.map(item => (
+            <div key={item.label} className="py-3 border-b border-slate-100 last:border-0">
+              <div className="flex items-center gap-3">
+                <Badge label={item.label} variant="label" />
+                {item.confidence != null && (
+                  <span className="text-sm text-slate-500">{Math.round(item.confidence * 100)}% confidence</span>
+                )}
+                {item.model_used === 'human' && (
+                  <span className="text-xs text-purple-600 font-medium">human</span>
+                )}
+                {item.reasoning && (
+                  <button
+                    onClick={() => setExpandedReasoning(expandedReasoning === item.label ? null : item.label)}
+                    className="ml-auto text-xs text-slate-400 hover:text-slate-600 transition-colors"
+                  >
+                    {expandedReasoning === item.label ? 'Hide ↑' : 'Reasoning ↓'}
+                  </button>
+                )}
+              </div>
+              {expandedReasoning === item.label && item.reasoning && (
+                <p className="mt-2 text-sm text-slate-600 leading-relaxed bg-slate-50 rounded-lg p-3">
+                  {item.reasoning}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiscussionFeedbackSection({
+  companyId,
+  companyDomain,
+  onRerun,
+}: {
+  companyId: number;
+  companyDomain: string | null;
+  onRerun: (jobId: number) => void;
+}) {
+  const [feedback, setFeedback] = useState('');
+  const [pastRules, setPastRules] = useState<{ id: number; rule_text: string; created_at: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showPast, setShowPast] = useState(false);
+
+  useEffect(() => {
+    api.getCompanyDiscussionFeedback(companyId)
+      .then(setPastRules)
+      .catch(console.error);
+  }, [companyId]);
+
+  const submit = async () => {
+    if (!feedback.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.addCompanyDiscussionFeedback(companyId, feedback.trim());
+      const updated = await api.getCompanyDiscussionFeedback(companyId);
+      setPastRules(updated);
+      setFeedback('');
+      // Trigger a discover_discussions re-run for this company
+      if (companyDomain) {
+        const job = await api.createJob({
+          job_type: 'analyse',
+          company: companyDomain,
+          stages: ['discover_discussions'],
+        });
+        onRerun(job.id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 pt-4 border-t border-slate-100">
+      <div className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">Discussion Feedback</div>
+      <p className="text-xs text-slate-400 mb-3">
+        Tell the AI how to restructure discussions for this company. Your feedback will be saved as a rule and the discussions will be re-analysed.
+      </p>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={feedback}
+          onChange={e => setFeedback(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && submit()}
+          placeholder="e.g. merge the contract threads into one discussion"
+          className="flex-1 px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+        />
+        <button
+          onClick={submit}
+          disabled={saving || !feedback.trim()}
+          className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+        >
+          {saving ? 'Saving…' : companyDomain ? 'Save & Re-run' : 'Save'}
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
+      {pastRules.length > 0 && (
+        <div className="mt-3">
+          <button
+            onClick={() => setShowPast(!showPast)}
+            className="text-xs text-slate-400 hover:text-slate-600"
+          >
+            {showPast ? '▲ Hide' : '▼ Show'} past feedback ({pastRules.length})
+          </button>
+          {showPast && (
+            <ul className="mt-2 space-y-1">
+              {pastRules.map(r => (
+                <li key={r.id} className="text-xs text-slate-500 bg-slate-50 rounded px-2 py-1">
+                  {r.rule_text}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );
@@ -278,16 +480,30 @@ export default function CompanyDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showHomepage, setShowHomepage] = useState(false);
+  const [labelConfig, setLabelConfig] = useState<LabelConfig[]>([]);
   const activeTab = (searchParams.get('tab') as Tab) || 'overview';
   const setTab = (tab: Tab) => setSearchParams(tab === 'overview' ? {} : { tab });
+
+  const loadCompany = useCallback(() => {
+    if (!id) return;
+    api
+      .getCompany(parseInt(id, 10))
+      .then(setData)
+      .catch((err: Error) => setError(err.message));
+  }, [id]);
 
   useEffect(() => {
     if (!id) return;
     setLoading(true);
     setError(null);
-    api
-      .getCompany(parseInt(id, 10))
-      .then(setData)
+    Promise.all([
+      api.getCompany(parseInt(id, 10)),
+      api.getMeta(),
+    ])
+      .then(([company, meta]) => {
+        setData(company);
+        setLabelConfig(meta.labelConfig ?? []);
+      })
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
   }, [id]);
@@ -407,16 +623,14 @@ export default function CompanyDetailPage() {
 
       {activeTab === 'overview' && (
         <>
-          {/* Labels */}
-          {Array.isArray(data.labels) && data.labels.length > 0 && (
-            <div className="card p-6 mb-6">
-              <h2 className="text-base font-semibold text-slate-900 mb-3">Labels</h2>
-              <div className="divide-y divide-slate-100">
-                {(data.labels as CompanyLabel[]).map((item) => (
-                  <LabelRow key={item.label} item={item} />
-                ))}
-              </div>
-            </div>
+          {/* Labels — always show if labelConfig is available, even if no labels yet */}
+          {(Array.isArray(data.labels) || labelConfig.length > 0) && (
+            <LabelsSection
+              companyId={data.id}
+              labels={(data.labels as CompanyLabel[]) ?? []}
+              labelConfig={labelConfig}
+              onUpdate={loadCompany}
+            />
           )}
 
           {/* HubSpot CRM data */}
@@ -467,14 +681,19 @@ export default function CompanyDetailPage() {
           )}
 
           {/* Discussions */}
-          {data.discussions.length > 0 && (
+          {(data.discussions.length > 0 || data.last_analysed_at) && (
             <div className="card p-6 mb-6">
               <h2 className="text-base font-semibold text-slate-900 mb-3">
                 Discussions
-                <span className="ml-2 text-sm font-normal text-slate-500">
-                  ({data.discussions.length})
-                </span>
+                {data.discussions.length > 0 && (
+                  <span className="ml-2 text-sm font-normal text-slate-500">
+                    ({data.discussions.length})
+                  </span>
+                )}
               </h2>
+              {data.discussions.length === 0 && (
+                <p className="text-sm text-slate-400 mb-4">No discussions yet.</p>
+              )}
               <div className="space-y-2">
                 {data.discussions.map((disc) => (
                   <DiscussionCard
@@ -484,6 +703,11 @@ export default function CompanyDetailPage() {
                   />
                 ))}
               </div>
+              <DiscussionFeedbackSection
+                companyId={data.id}
+                companyDomain={data.domain}
+                onRerun={(jobId) => navigate(`/jobs/${jobId}`)}
+              />
             </div>
           )}
 

@@ -197,9 +197,12 @@ function loadLabelConfig(): LabelConfig[] {
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) {
-      const raw = yaml.load(fs.readFileSync(p, 'utf8')) as Record<string, string> | null;
-      if (raw && typeof raw === 'object') {
-        return Object.entries(raw).map(([name, description]) => ({ name, description: String(description) }));
+      const raw = yaml.load(fs.readFileSync(p, 'utf8')) as { labels?: Array<{ name: string; description: string }> } | null;
+      if (raw?.labels && Array.isArray(raw.labels)) {
+        return raw.labels.map((l: { name?: unknown; description?: unknown }) => ({
+          name: String(l.name ?? ''),
+          description: String(l.description ?? ''),
+        }));
       }
     }
   }
