@@ -890,7 +890,9 @@ def discover_discussions(
                             len(batch_events), len(existing))
 
             try:
-                result = backend.complete_json(DISCOVER_SYSTEM, user_prompt)
+                from email_manager.analysis.feedback import format_rules_block
+                system = DISCOVER_SYSTEM + format_rules_block(conn, "discussions")
+                result = backend.complete_json(system, user_prompt)
             except Exception as e:
                 logger.error("LLM call failed for company %s (batch %d): %s",
                              company["domain"], batch_idx + 1, e)

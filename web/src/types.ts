@@ -398,6 +398,11 @@ export interface CategoryConfig {
   terminal_states: string[];
 }
 
+export interface LabelConfig {
+  name: string;
+  description: string;
+}
+
 export interface MetaResponse {
   labels: string[];
   categories: string[];
@@ -412,7 +417,43 @@ export interface MetaResponse {
     calendar_events: number;
   };
   categoryConfig: CategoryConfig[];
+  labelConfig: LabelConfig[];
 }
+
+// ── Review ─────────────────────────────────────────────────────────────────
+
+export interface ReviewCompanyLabel {
+  label: string;
+  confidence: number | null;
+  reasoning: string | null;
+  model_used: string | null;
+}
+
+export interface ReviewCompany {
+  company_id: number;
+  domain: string | null;
+  name: string | null;
+  description: string | null;
+  last_analysed_at: string | null;
+  labels: ReviewCompanyLabel[];
+}
+
+export interface ReviewLabelsResponse {
+  items: ReviewCompany[];
+  total: number;
+}
+
+export interface LearnedRule {
+  id: number;
+  layer: string;
+  category: string | null;
+  rule_text: string;
+  active: boolean;
+  created_at: string;
+  source_feedback_ids: string | null;
+}
+
+export type Granularity = 'fewer' | 'balanced' | 'more';
 
 // ── Unified entity model ───────────────────────────────────────────────────
 

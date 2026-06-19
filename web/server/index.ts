@@ -14,6 +14,7 @@ import {
   listOrganizations, getOrganization, listPeople, getPerson,
   mergeOrganizations, mergePersons,
 } from './entities.js';
+import { registerReviewRoutes } from './review.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -67,6 +68,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS hubspot_task_threads (
     contact_email TEXT NOT NULL,
     PRIMARY KEY (task_id, thread_id)
 )`);
+
+// Ensure human_state_override column exists (Python migration v39)
+try { db.exec('ALTER TABLE discussions ADD COLUMN human_state_override TEXT'); } catch { /* already exists */ }
 
 // Ensure notes tables exist (Python migration v38)
 db.exec(`CREATE TABLE IF NOT EXISTS hubspot_notes (
@@ -181,6 +185,31 @@ function loadCategoryConfig(): CategoryConfig[] {
 const categoryConfig = loadCategoryConfig();
 console.log(`Loaded ${categoryConfig.length} discussion categories`);
 
+// ── Load company label config ───────────────────────────────────────────────
+
+interface LabelConfig { name: string; description: string; }
+
+function loadLabelConfig(): LabelConfig[] {
+  const candidates = [
+    path.resolve(__dirname, '../../email-analyser/company_labels.yaml'),
+    path.resolve(__dirname, '../../company_labels.yaml'),
+    path.resolve(__dirname, '../../data/company_labels.yaml'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      const raw = yaml.load(fs.readFileSync(p, 'utf8')) as Record<string, string> | null;
+      if (raw && typeof raw === 'object') {
+        return Object.entries(raw).map(([name, description]) => ({ name, description: String(description) }));
+      }
+    }
+  }
+  // Fallback to labels observed in the database — returned dynamically in /api/meta.
+  return [];
+}
+
+const labelConfig = loadLabelConfig();
+console.log(`Loaded ${labelConfig.length} company label definitions`);
+
 function parseJsonField<T>(value: unknown): T | null {
   if (value == null) return null;
   if (typeof value === 'string') {
@@ -229,7 +258,12 @@ app.get('/api/meta', async (_req: Request, res: Response) => {
   );
   const userEmails = userEmailRows.map(r => r.from_address);
 
-  res.json({ labels, categories, states, stats, userEmails, categoryConfig });
+  // If labelConfig was not loaded from YAML, derive options from DB values
+  const effectiveLabelConfig: LabelConfig[] = labelConfig.length > 0
+    ? labelConfig
+    : labels.map(l => ({ name: l, description: '' }));
+
+  res.json({ labels, categories, states, stats, userEmails, categoryConfig, labelConfig: effectiveLabelConfig });
 });
 
 // ── /api/organizations ─────────────────────────────────────────────────────
@@ -1011,16 +1045,16 @@ app.patch('/api/discussions/:id', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid discussion id' }); return; }
 
-  const { title, summary, reason } = (req.body ?? {}) as {
-    title?: string | null; summary?: string | null; reason?: string | null;
+  const { title, summary, state, reason } = (req.body ?? {}) as {
+    title?: string | null; summary?: string | null; state?: string | null; reason?: string | null;
   };
-  if (title === undefined && summary === undefined) {
-    res.status(400).json({ error: 'Provide at least one of: title, summary' });
+  if (title === undefined && summary === undefined && state === undefined) {
+    res.status(400).json({ error: 'Provide at least one of: title, summary, state' });
     return;
   }
 
-  const existing = await db.queryOne<{ title: string; summary: string | null }>(
-    'SELECT title, summary FROM discussions WHERE id = ?', id,
+  const existing = await db.queryOne<{ title: string; summary: string | null; current_state: string | null }>(
+    'SELECT title, summary, current_state FROM discussions WHERE id = ?', id,
   );
   if (!existing) { res.status(404).json({ error: 'Discussion not found' }); return; }
 
@@ -1036,6 +1070,19 @@ app.patch('/api/discussions/:id', async (req: Request, res: Response) => {
     await db.query('UPDATE discussions SET summary = ?, updated_at = ? WHERE id = ?', summary, now, id);
     await recordFeedback('discussions', 'discussion', id, 'summary_change', existing.summary, summary, reason);
     changes.push('summary');
+  }
+  if (state !== undefined && state !== existing.current_state) {
+    await db.query(
+      'UPDATE discussions SET current_state = ?, updated_at = ? WHERE id = ?', state, now, id,
+    );
+    // Record in the state history so the timeline stays accurate
+    await db.query(
+      `INSERT INTO discussion_state_history (discussion_id, state, entered_at, reasoning, model_used, detected_at)
+       VALUES (?, ?, ?, ?, 'human', ?)`,
+      id, state, now, reason ?? null, now,
+    );
+    await recordFeedback('discussions', 'discussion', id, 'state_override', existing.current_state, state, reason);
+    changes.push('state');
   }
 
   res.json({ id, updated: changes });
@@ -1927,6 +1974,8 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // ── Start server ───────────────────────────────────────────────────────────
+
+registerReviewRoutes(app, db);
 
 initJobs(db).then(() => {
   app.listen(PORT, () => {

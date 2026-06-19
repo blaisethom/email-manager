@@ -14,6 +14,7 @@ import JobsPage from './pages/Jobs';
 import JobDetailPage from './pages/JobDetail';
 import SearchPage from './pages/Search';
 import TasksPage from './pages/Tasks';
+import ReviewPage from './pages/Review';
 
 export default function App() {
   return (
@@ -35,6 +36,7 @@ export default function App() {
           <Route path="jobs" element={<JobsPage />} />
           <Route path="jobs/:id" element={<JobDetailPage />} />
           <Route path="tasks" element={<TasksPage />} />
+          <Route path="review" element={<ReviewPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -274,7 +274,7 @@ export const api = {
 
   async updateDiscussion(
     id: number,
-    patch: { title?: string; summary?: string | null; reason?: string | null },
+    patch: { title?: string; summary?: string | null; state?: string | null; reason?: string | null },
   ): Promise<{ id: number; updated: string[] }> {
     const res = await fetch(`${BASE}/discussions/${id}`, {
       method: 'PATCH',
@@ -358,5 +358,72 @@ export const api = {
       const text = await res.text().catch(() => res.statusText);
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
+  },
+
+  // ── Review ────────────────────────────────────────────────────────────────
+
+  async getReviewLabels(params: { q?: string; label?: string; page?: number } = {}) {
+    const qs = new URLSearchParams();
+    if (params.q)     qs.set('q', params.q);
+    if (params.label) qs.set('label', params.label);
+    if (params.page)  qs.set('page', String(params.page));
+    const res = await fetch(`${BASE}/review/labels?${qs}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async saveCompanyLabels(companyId: number, labels: string[], reason?: string): Promise<void> {
+    const res = await fetch(`${BASE}/review/labels/${companyId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labels, reason }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  },
+
+  async getRules(layer?: string) {
+    const qs = layer ? `?layer=${encodeURIComponent(layer)}` : '';
+    const res = await fetch(`${BASE}/review/rules${qs}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async createRule(data: { layer: string; category?: string; rule_text: string }) {
+    const res = await fetch(`${BASE}/review/rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async updateRule(id: number, patch: { active?: boolean; rule_text?: string }) {
+    const res = await fetch(`${BASE}/review/rules/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  },
+
+  async deleteRule(id: number) {
+    const res = await fetch(`${BASE}/review/rules/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  },
+
+  async getGranularity(): Promise<{ value: 'fewer' | 'balanced' | 'more' }> {
+    const res = await fetch(`${BASE}/review/granularity`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async setGranularity(value: 'fewer' | 'balanced' | 'more') {
+    const res = await fetch(`${BASE}/review/granularity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
   },
 };

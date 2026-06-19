@@ -12,7 +12,7 @@ def _log(msg: str) -> None:
     """Print migration/schema messages to stderr so they don't pollute stdout (e.g. --csv)."""
     print(msg, file=sys.stderr)
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -725,6 +725,18 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v37(conn)
     if current_version < 38:
         _migrate_to_v38(conn)
+    if current_version < 39:
+        _migrate_to_v39(conn)
+
+
+def _migrate_to_v39(conn: sqlite3.Connection) -> None:
+    """Migration v38 -> v39: add human_state_override to discussions."""
+    try:
+        conn.execute("ALTER TABLE discussions ADD COLUMN human_state_override TEXT")
+    except Exception:
+        pass  # column may already exist
+    conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+    conn.commit()
 
 
 def _migrate_to_v38(conn: sqlite3.Connection) -> None:
