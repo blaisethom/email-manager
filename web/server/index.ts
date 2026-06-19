@@ -15,6 +15,7 @@ import {
   mergeOrganizations, mergePersons,
 } from './entities.js';
 import { registerReviewRoutes } from './review.js';
+import { registerConfigRoutes } from './config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1979,6 +1980,7 @@ if (process.env.NODE_ENV === 'production') {
 // ── Start server ───────────────────────────────────────────────────────────
 
 registerReviewRoutes(app, db);
+registerConfigRoutes(app);
 
 initJobs(db).then(() => {
   app.listen(PORT, () => {

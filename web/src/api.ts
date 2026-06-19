@@ -22,6 +22,8 @@ import type {
   PersonDetail,
   TasksResponse,
   HubSpotTaskDetail,
+  LabelDef,
+  CategoryDef,
 } from './types';
 
 const BASE = '/api';
@@ -441,5 +443,43 @@ export const api = {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
+  },
+
+  // ── Config (YAML file editors) ────────────────────────────────────────────
+
+  async getConfigLabels(): Promise<{ labels: LabelDef[]; filePath: string | null }> {
+    const res = await fetch(`${BASE}/config/labels`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async saveConfigLabels(labels: LabelDef[]): Promise<void> {
+    const res = await fetch(`${BASE}/config/labels`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labels }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+  },
+
+  async getConfigCategories(): Promise<{ categories: CategoryDef[]; filePath: string | null }> {
+    const res = await fetch(`${BASE}/config/categories`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async saveConfigCategories(categories: CategoryDef[]): Promise<void> {
+    const res = await fetch(`${BASE}/config/categories`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ categories }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
   },
 };

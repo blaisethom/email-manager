@@ -455,6 +455,21 @@ export interface LearnedRule {
 
 export type Granularity = 'fewer' | 'balanced' | 'more';
 
+// ── Config ──────────────────────────────────────────────────────────────────
+
+export interface LabelDef {
+  name: string;
+  description: string;
+}
+
+export interface CategoryDef {
+  name: string;
+  description: string;
+  workflow_states: string[];
+  terminal_states: string[];
+  sub_discussion?: boolean;
+}
+
 // ── Unified entity model ───────────────────────────────────────────────────
 
 export type EntitySource = 'email' | 'homepage' | 'hubspot';
