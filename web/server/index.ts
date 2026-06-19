@@ -262,12 +262,16 @@ app.get('/api/meta', async (_req: Request, res: Response) => {
   );
   const userEmails = userEmailRows.map(r => r.from_address);
 
-  // If labelConfig was not loaded from YAML, derive options from DB values
-  const effectiveLabelConfig: LabelConfig[] = labelConfig.length > 0
-    ? labelConfig
+  // Read label and category config fresh from disk on each request so edits
+  // via the Config page (or direct YAML edits) take effect without a restart.
+  const freshLabelConfig = loadLabelConfig();
+  const freshCategoryConfig = loadCategoryConfig();
+
+  const effectiveLabelConfig: LabelConfig[] = freshLabelConfig.length > 0
+    ? freshLabelConfig
     : labels.map(l => ({ name: l, description: '' }));
 
-  res.json({ labels, categories, states, stats, userEmails, categoryConfig, labelConfig: effectiveLabelConfig });
+  res.json({ labels, categories, states, stats, userEmails, categoryConfig: freshCategoryConfig, labelConfig: effectiveLabelConfig });
 });
 
 // ── /api/organizations ─────────────────────────────────────────────────────

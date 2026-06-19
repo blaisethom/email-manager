@@ -1,0 +1,33 @@
+labels:
+  - name: pharma
+    description: A pharmaceutical company - they typically pays us for products or services.
+  - name: cro
+    description: >-
+      A contract resource organisation - they typically run trials and either pay us or are the contracter that the
+      pharma pays through.
+  - name: academic
+    description: An academic institution - they could be interacting with us as a model developer, clinical site or partner
+  - name: hospital
+    description: A hospital that has patients that might be data points for our services like clinical trials
+  - name: clinic
+    description: A clinical site that is not a large hospital but has patients and might run clinical trials
+  - name: vendor
+    description: >-
+      A company that provides products or services to us but isn't providing professional services of legal, accounting
+      or consulting.
+  - name: modeldeveloper
+    description: A company that develops AI models for use in our platform
+  - name: partner
+    description: A company we collaborate with on joint initiatives.
+  - name: investor
+    description: A company or fund that has invested in us or is considering investment.
+  - name: recruiter
+    description: A recruitment agency or headhunter.
+  - name: service-provider
+    description: A company providing professional services (legal, accounting, consulting).
+  - name: internal
+    description: Our own company or a subsidiary/division of it.
+  - name: other
+    description: Does not fit any of the above categories.
+  - name: medical-device
+    description: A medical device company - they typically pay us for products or services
