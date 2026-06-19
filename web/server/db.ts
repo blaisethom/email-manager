@@ -87,6 +87,7 @@ export function createPgDb(): Database {
   const pool = new pg.Pool({
     connectionString: dbUrl,
     max: 10,
+    connectionTimeoutMillis: 5000,
   });
 
   return {

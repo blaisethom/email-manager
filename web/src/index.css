@@ -32,4 +32,13 @@
   .btn-secondary {
     @apply px-3 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500;
   }
+
+  .task-body p { @apply mb-2 last:mb-0; }
+  .task-body ul { @apply list-disc pl-5 mb-2; }
+  .task-body ol { @apply list-decimal pl-5 mb-2; }
+  .task-body li { @apply mb-0.5; }
+  .task-body strong { @apply font-semibold; }
+  .task-body em { @apply italic; }
+  .task-body a { @apply text-blue-600 hover:underline; }
+  .task-body br { @apply block; }
 }

@@ -21,8 +21,9 @@ RETRY_BASE_DELAY = 5  # seconds, doubles each retry
 DB_RETRY_DELAY = 2
 
 
-def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> int:
+def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> tuple[int, int]:
     total_new = 0
+    total_failed = 0
     is_yahoo = _is_yahoo(config.imap_host)
     batch_size = YAHOO_BATCH_SIZE if is_yahoo else DEFAULT_BATCH_SIZE
 
@@ -42,7 +43,7 @@ def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> int:
         except (ConnectionError, OSError, TimeoutError) as e:
             from rich.console import Console
             Console().print(f"[yellow]Cannot list folders: {e}[/yellow]")
-            return 0
+            return 0, 0
 
     with Progress(
         SpinnerColumn(),
@@ -52,18 +53,19 @@ def sync_emails(conn: sqlite3.Connection, config: EmailAccount) -> int:
     ) as progress:
         for folder_name in folders:
             try:
-                count = _sync_folder_with_reconnect(
+                new, failed = _sync_folder_with_reconnect(
                     config, conn, folder_name, progress,
                     batch_size=batch_size, is_yahoo=is_yahoo,
                     use_export=is_yahoo,
                 )
-                total_new += count
+                total_new += new
+                total_failed += failed
             except Exception as e:
                 progress.console.print(
                     f"[red]Error syncing {folder_name}: {e}[/red]"
                 )
 
-    return total_new
+    return total_new, total_failed
 
 
 def _is_yahoo(host: str) -> bool:
@@ -200,7 +202,7 @@ def _sync_folder_with_reconnect(
     batch_size: int = DEFAULT_BATCH_SIZE,
     is_yahoo: bool = False,
     use_export: bool = False,
-) -> int:
+) -> tuple[int, int]:
     """Sync a folder, reconnecting if the connection drops mid-sync."""
     for attempt in range(MAX_RETRIES):
         try:
@@ -234,7 +236,7 @@ def _sync_folder_with_reconnect(
             else:
                 raise
 
-    return 0
+    return 0, 0
 
 
 def _sync_folder(
@@ -281,6 +283,7 @@ def _sync_folder(
 
     progress.update(task, description=f"Syncing {folder_name}", total=len(uids), completed=0)
     new_count = 0
+    failed_count = 0
 
     for i in range(0, len(uids), batch_size):
         batch_uids = uids[i : i + batch_size]
@@ -294,6 +297,7 @@ def _sync_folder(
             raw = data.get(b"RFC822")
             if not raw:
                 max_processed_uid = max(max_processed_uid, uid)
+                failed_count += 1
                 progress.advance(task)
                 continue
             try:
@@ -306,6 +310,7 @@ def _sync_folder(
             except Exception as e:
                 # Parse errors are non-recoverable, advance past them
                 max_processed_uid = max(max_processed_uid, uid)
+                failed_count += 1
                 progress.console.print(
                     f"[yellow]Skipping UID {uid}: {e}[/yellow]"
                 )
@@ -334,7 +339,7 @@ def _sync_folder(
         if is_yahoo and i + batch_size < len(uids):
             time.sleep(1)
 
-    return new_count
+    return new_count, failed_count
 
 
 def _db_insert_email(conn: sqlite3.Connection, row: dict) -> None:

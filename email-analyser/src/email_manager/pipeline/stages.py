@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.table import Column
 
 from email_manager.ai.base import LLMBackend
 from email_manager.config import Config
@@ -35,6 +36,7 @@ class StageDefinition:
     accepts: frozenset[str] = field(default_factory=frozenset)
     depends_on: frozenset[str] = field(default_factory=frozenset)
     prompt_hash_fn: Callable[[sqlite3.Connection, Config], str | None] | None = None
+    skip_when_scoped: bool = False  # skip this stage when running with --company/--label
 
 
 # ── Prompt hash helpers (lazy imports, same pattern as wrapper functions) ────
@@ -116,7 +118,10 @@ def _report_stage_status(
 def _make_progress(console: Console) -> Progress:
     return Progress(
         SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
+        TextColumn(
+            "[progress.description]{task.description}",
+            table_column=Column(width=45, no_wrap=True, overflow="ellipsis"),
+        ),
         BarColumn(),
         TextColumn("{task.completed}/{task.total} {task.fields[unit]}"),
         console=console,
@@ -150,7 +155,7 @@ def run_fetch_homepages(conn: sqlite3.Connection, backend: LLMBackend, config: C
     return fetch_homepages(conn, console=console or Console(), limit=limit, company_domain=company, max_workers=config.homepage_max_workers)
 
 
-def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None) -> int:
+def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False, company: str | None = None, label: str | None = None, concurrency: int = 1) -> int:
     from email_manager.analysis.company_labels import label_companies, load_label_config
 
     console = console or Console()
@@ -164,7 +169,7 @@ def run_label_companies(conn: sqlite3.Connection, backend: LLMBackend, config: C
             progress.update(task, completed=done, total=total or 0, description=desc)
             logger.info("label_companies: %d/%d — %s", done, total, name)
 
-        count = label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company)
+        count = label_companies(conn, backend, labels_config=labels_config, on_progress=on_progress, limit=limit, force=force, company_domain=company, concurrency=concurrency)
     if count > 0:
         console.print(f"  [green]label_companies: labelled {count} companies[/green]")
     else:
@@ -338,6 +343,76 @@ def run_propose_actions(conn: sqlite3.Connection, backend: LLMBackend, config: C
     return count
 
 
+def run_hubspot_task_enrichment(
+    conn: sqlite3.Connection,
+    backend: LLMBackend,
+    config: Config,
+    console: Console = None,
+    force: bool = False,
+    **_kwargs: Any,
+) -> int:
+    from email_manager.integrations.hubspot import enrich_tasks_with_threads
+
+    return enrich_tasks_with_threads(conn, force=force, console=console or Console())
+
+
+def run_build_search_index(conn: sqlite3.Connection, backend: LLMBackend, config: Config, console: Console = None, limit: int | None = None, force: bool = False) -> int:
+    from email_manager.search.indexer import (
+        build_search_index,
+        generate_embeddings,
+        build_discussion_search_index,
+        generate_discussion_embeddings,
+    )
+
+    console = console or Console()
+
+    # Phase 1a: thread search docs + tsvector
+    with _make_progress(console) as progress:
+        task = progress.add_task("build_search_index", total=None, unit="threads")
+
+        def on_progress(done: int, total: int) -> None:
+            progress.update(task, completed=done, total=total or 0)
+
+        count = build_search_index(conn, console=console, on_progress=on_progress, force=force)
+
+    # Phase 1b: discussion search docs + tsvector
+    with _make_progress(console) as progress:
+        task = progress.add_task("build_discussion_search_index", total=None, unit="discussions")
+
+        def on_disc_progress(done: int, total: int) -> None:
+            progress.update(task, completed=done, total=total or 0)
+
+        count += build_discussion_search_index(conn, console=console, on_progress=on_disc_progress, force=force)
+
+    # Phase 2a: thread embeddings
+    try:
+        with _make_progress(console) as progress:
+            task = progress.add_task("generate_embeddings", total=None, unit="embeddings")
+
+            def on_embed_progress(done: int, total: int) -> None:
+                progress.update(task, completed=done, total=total or 0)
+
+            count += generate_embeddings(conn, config, console=console, on_progress=on_embed_progress, force=force)
+    except Exception as e:
+        console.print(f"  [yellow]Thread embedding generation skipped: {e}[/yellow]")
+        logger.warning("Thread embedding generation failed: %s", e)
+
+    # Phase 2b: discussion embeddings
+    try:
+        with _make_progress(console) as progress:
+            task = progress.add_task("generate_discussion_embeddings", total=None, unit="embeddings")
+
+            def on_disc_embed_progress(done: int, total: int) -> None:
+                progress.update(task, completed=done, total=total or 0)
+
+            count += generate_discussion_embeddings(conn, config, console=console, on_progress=on_disc_embed_progress, force=force)
+    except Exception as e:
+        console.print(f"  [yellow]Discussion embedding generation skipped: {e}[/yellow]")
+        logger.warning("Discussion embedding generation failed: %s", e)
+
+    return count
+
+
 STAGES: dict[str, StageDefinition] = {
     # Phase 1: Base extraction
     "extract_base": StageDefinition(
@@ -358,7 +433,7 @@ STAGES: dict[str, StageDefinition] = {
     "label_companies": StageDefinition(
         name="label_companies",
         run=run_label_companies,
-        accepts=frozenset({"company", "label"}),
+        accepts=frozenset({"company", "label", "concurrency"}),
         depends_on=frozenset({"extract_base"}),
         prompt_hash_fn=_hash_label_companies,
     ),
@@ -397,6 +472,25 @@ STAGES: dict[str, StageDefinition] = {
         run=run_contact_memory,
         accepts=frozenset({"company", "label"}),
         depends_on=frozenset({"extract_base"}),
+    ),
+    # HubSpot task enrichment
+    "hubspot_task_enrichment": StageDefinition(
+        name="hubspot_task_enrichment",
+        run=run_hubspot_task_enrichment,
+        scope=StageScope.GLOBAL,
+        needs_ai=False,
+        accepts=frozenset({"force"}),
+        depends_on=frozenset(),
+    ),
+    # Search index
+    "build_search_index": StageDefinition(
+        name="build_search_index",
+        run=run_build_search_index,
+        scope=StageScope.GLOBAL,
+        needs_ai=False,
+        accepts=frozenset(),
+        depends_on=frozenset({"extract_base"}),
+        skip_when_scoped=True,  # full-corpus rebuild; use 'prep' to update the index
     ),
 }
 

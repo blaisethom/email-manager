@@ -5,6 +5,15 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 import { createDb, type Database, type DbRow } from './db.js';
+import {
+  initJobs, createJob, listJobs, getJob, getActiveJob, cancelJob,
+  subscribeToLogs, PIPELINE_STAGES, type JobConfig,
+} from './jobs.js';
+import { hybridSearch } from './search.js';
+import {
+  listOrganizations, getOrganization, listPeople, getPerson,
+  mergeOrganizations, mergePersons,
+} from './entities.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,6 +57,92 @@ if (db.backend === 'sqlite') {
       evidence_event_ids TEXT, confidence REAL, last_evaluated_at TEXT,
       UNIQUE(discussion_id, name)
   )`);
+}
+
+// Ensure HubSpot task enrichment table exists (created by Python migration v35,
+// but guard here so the server works even if migration hasn't run yet)
+db.exec(`CREATE TABLE IF NOT EXISTS hubspot_task_threads (
+    task_id       TEXT NOT NULL,
+    thread_id     TEXT NOT NULL,
+    contact_email TEXT NOT NULL,
+    PRIMARY KEY (task_id, thread_id)
+)`);
+
+// Ensure notes tables exist (Python migration v38)
+db.exec(`CREATE TABLE IF NOT EXISTS hubspot_notes (
+    id                      TEXT PRIMARY KEY,
+    body                    TEXT,
+    created_at              TEXT,
+    updated_at              TEXT,
+    owner_id                TEXT,
+    associated_contact_ids  TEXT,
+    associated_company_ids  TEXT,
+    associated_deal_ids     TEXT,
+    hs_url                  TEXT,
+    properties_json         TEXT,
+    fetched_at              TEXT NOT NULL
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS discussion_notes (
+    discussion_id  INTEGER NOT NULL,
+    note_id        TEXT NOT NULL,
+    PRIMARY KEY (discussion_id, note_id)
+)`);
+
+// Ensure search tables exist (PG-specific: tsvector column, pgvector extension)
+if (db.backend === 'postgres') {
+  db.exec(`CREATE EXTENSION IF NOT EXISTS vector`);
+  db.exec(`CREATE TABLE IF NOT EXISTS thread_search_docs (
+      thread_id       TEXT PRIMARY KEY,
+      doc_text        TEXT NOT NULL,
+      doc_tsv         TSVECTOR,
+      company_domain  TEXT,
+      is_important    BOOLEAN DEFAULT FALSE,
+      outreach_score  DOUBLE PRECISION DEFAULT 0,
+      doc_hash        TEXT,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+  )`);
+  db.exec(`ALTER TABLE thread_search_docs ADD COLUMN IF NOT EXISTS doc_tsv_simple TSVECTOR`);
+  db.exec(`ALTER TABLE thread_search_docs ADD COLUMN IF NOT EXISTS outreach_score DOUBLE PRECISION DEFAULT 0`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tsd_tsv ON thread_search_docs USING GIN(doc_tsv)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tsd_tsv_simple ON thread_search_docs USING GIN(doc_tsv_simple)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tsd_company ON thread_search_docs(company_domain)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS thread_embeddings (
+      thread_id       TEXT NOT NULL,
+      model_name      TEXT NOT NULL,
+      embedding       vector NOT NULL,
+      doc_hash        TEXT,
+      created_at      TEXT NOT NULL,
+      PRIMARY KEY (thread_id, model_name)
+  )`);
+  db.exec(`ALTER TABLE thread_embeddings ADD COLUMN IF NOT EXISTS doc_hash TEXT`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_te_model ON thread_embeddings(model_name)`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS discussion_search_docs (
+      discussion_id   INTEGER PRIMARY KEY,
+      doc_text        TEXT NOT NULL,
+      doc_tsv         TSVECTOR,
+      doc_tsv_simple  TSVECTOR,
+      doc_hash        TEXT,
+      company_domain  TEXT,
+      category        TEXT,
+      current_state   TEXT,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dsd_tsv ON discussion_search_docs USING GIN(doc_tsv)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dsd_tsv_simple ON discussion_search_docs USING GIN(doc_tsv_simple)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dsd_company ON discussion_search_docs(company_domain)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dsd_category ON discussion_search_docs(category)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS discussion_embeddings (
+      discussion_id   INTEGER NOT NULL,
+      model_name      TEXT NOT NULL,
+      embedding       vector NOT NULL,
+      doc_hash        TEXT,
+      created_at      TEXT NOT NULL,
+      PRIMARY KEY (discussion_id, model_name)
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_de_model ON discussion_embeddings(model_name)`);
 }
 
 console.log(`Database backend: ${db.backend}`);
@@ -137,11 +232,85 @@ app.get('/api/meta', async (_req: Request, res: Response) => {
   res.json({ labels, categories, states, stats, userEmails, categoryConfig });
 });
 
+// ── /api/organizations ─────────────────────────────────────────────────────
+// Unified view of companies across email-derived, homepage, and HubSpot
+// sources. Each row carries an `org_id` (entity-model PK), `email_company_id`
+// (the legacy companies.id when present, used by the existing CompanyDetail
+// page and downstream joins), and `hubspot_id` (when present).
+
+app.get('/api/organizations', async (req: Request, res: Response) => {
+  const result = await listOrganizations(db, {
+    q: (req.query.q as string) ?? '',
+    label: (req.query.label as string) ?? '',
+    stale: (req.query.stale as string) ?? '',
+    source: (req.query.source as string) ?? '',
+    sort: (req.query.sort as string) ?? 'email_count',
+    order: (req.query.order as string) ?? 'desc',
+    page: parseInt(req.query.page as string) || 1,
+    limit: parseInt(req.query.limit as string) || 25,
+  });
+  res.json(result);
+});
+
+app.get('/api/organizations/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid organization id' }); return; }
+  const org = await getOrganization(db, id);
+  if (!org) { res.status(404).json({ error: 'Organization not found' }); return; }
+  res.json(org);
+});
+
+app.post('/api/organizations/:id/merge', async (req: Request, res: Response) => {
+  const sourceId = parseInt(req.params.id, 10);
+  const targetId = parseInt((req.body?.target_id ?? '').toString(), 10);
+  if (isNaN(sourceId) || isNaN(targetId)) {
+    res.status(400).json({ error: 'source_id and target_id must be integers' });
+    return;
+  }
+  const moved = await mergeOrganizations(db, sourceId, targetId, 'web', req.body?.notes ?? null);
+  res.json({ moved, source_id: sourceId, target_id: targetId });
+});
+
+// ── /api/people ────────────────────────────────────────────────────────────
+
+app.get('/api/people', async (req: Request, res: Response) => {
+  const result = await listPeople(db, {
+    q: (req.query.q as string) ?? '',
+    company: (req.query.company as string) ?? '',
+    source: (req.query.source as string) ?? '',
+    sort: (req.query.sort as string) ?? 'email_count',
+    order: (req.query.order as string) ?? 'desc',
+    page: parseInt(req.query.page as string) || 1,
+    limit: parseInt(req.query.limit as string) || 25,
+  });
+  res.json(result);
+});
+
+app.get('/api/people/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid person id' }); return; }
+  const person = await getPerson(db, id);
+  if (!person) { res.status(404).json({ error: 'Person not found' }); return; }
+  res.json(person);
+});
+
+app.post('/api/people/:id/merge', async (req: Request, res: Response) => {
+  const sourceId = parseInt(req.params.id, 10);
+  const targetId = parseInt((req.body?.target_id ?? '').toString(), 10);
+  if (isNaN(sourceId) || isNaN(targetId)) {
+    res.status(400).json({ error: 'source_id and target_id must be integers' });
+    return;
+  }
+  const moved = await mergePersons(db, sourceId, targetId, 'web', req.body?.notes ?? null);
+  res.json({ moved, source_id: sourceId, target_id: targetId });
+});
+
 // ── /api/companies ─────────────────────────────────────────────────────────
 
 app.get('/api/companies', async (req: Request, res: Response) => {
   const q = (req.query.q as string) ?? '';
   const label = (req.query.label as string) ?? '';
+  const staleFilter = (req.query.stale as string) ?? '';
   const sort = (req.query.sort as string) ?? 'email_count';
   const order = (req.query.order as string) === 'asc' ? 'ASC' : 'DESC';
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -156,6 +325,10 @@ app.get('/api/companies', async (req: Request, res: Response) => {
 
   if (q) { where.push('(c.name LIKE ? OR c.domain LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
   if (label) { where.push('c.id IN (SELECT company_id FROM company_labels WHERE label = ?)'); params.push(label); }
+  // Staleness filter uses pre-computed staleness_status column (refreshed by job manager)
+  if (staleFilter === '1') { where.push("c.staleness_status = 'stale'"); }
+  else if (staleFilter === '0') { where.push("c.staleness_status = 'up_to_date'"); }
+  else if (staleFilter === 'never') { where.push("(c.staleness_status = 'never' OR c.staleness_status IS NULL)"); }
 
   const whereClause = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
 
@@ -164,8 +337,11 @@ app.get('/api/companies', async (req: Request, res: Response) => {
 
   const items = await db.query(
     `SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen,
-            c.homepage_fetched_at, c.description,
-            GROUP_CONCAT(cl.label, '||') AS labels_concat
+            c.homepage_fetched_at, c.description, c.staleness_status,
+            GROUP_CONCAT(cl.label, '||') AS labels_concat,
+            (SELECT MAX(pr.started_at) FROM processing_runs pr
+             WHERE LOWER(pr.company_domain) = LOWER(c.domain) AND pr.mode LIKE 'staged:%' AND pr.error IS NULL
+            ) AS last_analysed_at
      FROM companies c
      LEFT JOIN company_labels cl ON cl.company_id = c.id
      ${whereClause}
@@ -175,14 +351,37 @@ app.get('/api/companies', async (req: Request, res: Response) => {
     ...params, limit, offset
   );
 
-  const enriched = items.map(({ labels_concat, ...rest }: any) => ({
+  const enriched = items.map(({ labels_concat, last_analysed_at, staleness_status, ...rest }: any) => ({
     ...rest,
     labels: labels_concat ? [...new Set((labels_concat as string).split('||'))] : [],
+    last_analysed_at: last_analysed_at ?? null,
+    is_stale: staleness_status === 'stale',
   }));
 
   const allLabels = (await db.query<{ label: string }>('SELECT DISTINCT label FROM company_labels ORDER BY label')).map(r => r.label);
 
-  res.json({ items: enriched, total, labels: allLabels });
+  // Staleness counts from pre-computed column (fast — no email table scan)
+  const baseWhere: string[] = [];
+  const baseParams: unknown[] = [];
+  if (q) { baseWhere.push('(c.name LIKE ? OR c.domain LIKE ?)'); baseParams.push(`%${q}%`, `%${q}%`); }
+  if (label) { baseWhere.push('c.id IN (SELECT company_id FROM company_labels WHERE label = ?)'); baseParams.push(label); }
+  const baseWhereClause = baseWhere.length > 0 ? 'WHERE ' + baseWhere.join(' AND ') : '';
+
+  const staleCountRow = await db.queryOne<{ stale: number; up_to_date: number; never_analysed: number }>(
+    `SELECT
+       SUM(CASE WHEN c.staleness_status = 'stale' THEN 1 ELSE 0 END) AS stale,
+       SUM(CASE WHEN c.staleness_status = 'up_to_date' THEN 1 ELSE 0 END) AS up_to_date,
+       SUM(CASE WHEN c.staleness_status = 'never' OR c.staleness_status IS NULL THEN 1 ELSE 0 END) AS never_analysed
+     FROM companies c ${baseWhereClause}`,
+    ...baseParams
+  );
+
+  res.json({
+    items: enriched, total, labels: allLabels,
+    stale_count: Number(staleCountRow?.stale ?? 0),
+    up_to_date_count: Number(staleCountRow?.up_to_date ?? 0),
+    never_analysed_count: Number(staleCountRow?.never_analysed ?? 0),
+  });
 });
 
 // ── /api/companies/:id ─────────────────────────────────────────────────────
@@ -212,7 +411,10 @@ app.get('/api/companies/:id', async (req: Request, res: Response) => {
 
   // Email threads for this company (via contacts)
   const like = `%@${(company as any).domain}%`;
-  const threadsRaw = await db.query(
+  const threadsRaw = await db.query<{
+    thread_id: string; subject: string | null; email_count: number;
+    first_date: string | null; last_date: string | null; summary: string | null;
+  }>(
     `SELECT t.thread_id, t.subject, t.email_count, t.first_date, t.last_date, t.summary
      FROM threads t
      WHERE t.thread_id IN (
@@ -224,7 +426,106 @@ app.get('/api/companies/:id', async (req: Request, res: Response) => {
     like, like, like
   );
 
-  res.json({ ...company, labels, contacts, discussions, threads: threadsRaw });
+  // Fetch discussion memberships for these threads in one pass.
+  const threadIdList = threadsRaw.map(t => t.thread_id);
+  let threadDiscussions = new Map<string, Array<{ id: number; title: string; category: string | null; current_state: string | null }>>();
+  if (threadIdList.length > 0) {
+    const placeholders = threadIdList.map(() => '?').join(',');
+    const rows = await db.query<{
+      thread_id: string; id: number; title: string;
+      category: string | null; current_state: string | null; last_seen: string | null;
+    }>(
+      `SELECT dt.thread_id, d.id, d.title, d.category, d.current_state, d.last_seen
+       FROM discussion_threads dt
+       JOIN discussions d ON d.id = dt.discussion_id
+       WHERE dt.thread_id IN (${placeholders})
+       ORDER BY d.last_seen DESC NULLS LAST`,
+      ...threadIdList
+    );
+    for (const r of rows) {
+      const list = threadDiscussions.get(r.thread_id) ?? [];
+      list.push({ id: r.id, title: r.title, category: r.category, current_state: r.current_state });
+      threadDiscussions.set(r.thread_id, list);
+    }
+  }
+  const threadsEnriched = threadsRaw.map(t => ({
+    ...t,
+    discussions: threadDiscussions.get(t.thread_id) ?? [],
+  }));
+
+  // Staleness from pre-computed column + last analysed date
+  const domain = (company as any).domain;
+  const stalenessStatus = (company as any).staleness_status ?? 'never';
+
+  const lastRunRow = domain ? await db.queryOne<{ started_at: string }>(
+    `SELECT MAX(started_at) AS started_at
+     FROM processing_runs WHERE LOWER(company_domain) = LOWER(?) AND mode LIKE 'staged:%' AND error IS NULL`,
+    domain
+  ) : null;
+  const lastAnalysedAt = lastRunRow?.started_at ?? null;
+
+  // For the detail page, get the exact new email count (single company — fast enough)
+  let newEmailCount = 0;
+  if (stalenessStatus === 'stale' && domain) {
+    const cutoffRow = await db.queryOne<{ email_cutoff_date: string }>(
+      `SELECT email_cutoff_date FROM processing_runs
+       WHERE LOWER(company_domain) = LOWER(?) AND mode = 'staged:extract_events' AND error IS NULL
+       ORDER BY id DESC LIMIT 1`,
+      domain
+    );
+    if (cutoffRow?.email_cutoff_date) {
+      const countRow = await db.queryOne<{ cnt: number }>(
+        `SELECT COUNT(*) AS cnt FROM emails
+         WHERE (from_address LIKE ? OR to_addresses LIKE ?) AND date > ?`,
+        `%@${domain}%`, `%@${domain}%`, cutoffRow.email_cutoff_date
+      );
+      newEmailCount = countRow?.cnt ?? 0;
+    }
+  } else if (stalenessStatus === 'never' || !lastAnalysedAt) {
+    newEmailCount = (company as any).email_count ?? 0;
+  }
+
+  // Look up the unified org and any HubSpot identity attached to this email-derived company.
+  const orgRow = await db.queryOne<{ organization_id: number }>(
+    `SELECT organization_id FROM organization_identities
+     WHERE source = 'email' AND source_id = ? LIMIT 1`,
+    String(id)
+  );
+  let hubspot: Record<string, unknown> | null = null;
+  let sources: string[] = ['email'];
+  if (orgRow) {
+    const sourceRows = await db.query<{ source: string }>(
+      `SELECT DISTINCT source FROM organization_identities WHERE organization_id = ?`,
+      orgRow.organization_id
+    );
+    sources = sourceRows.map(r => r.source).sort();
+    const hsIdent = await db.queryOne<{ source_id: string }>(
+      `SELECT source_id FROM organization_identities
+       WHERE organization_id = ? AND source = 'hubspot'
+       ORDER BY source_id LIMIT 1`,
+      orgRow.organization_id
+    );
+    if (hsIdent) {
+      hubspot = await db.queryOne<DbRow>(
+        `SELECT id, name, domain, website, industry, description, about_us,
+                city, state, country, phone, num_employees, annual_revenue,
+                lifecycle_stage, type, owner_id, founded_year,
+                linkedin_url, twitter_handle, hs_updated_at, hs_url
+         FROM hubspot_companies WHERE id = ?`,
+        hsIdent.source_id
+      ) ?? null;
+    }
+  }
+
+  res.json({
+    ...company, labels, contacts, discussions, threads: threadsEnriched,
+    last_analysed_at: lastAnalysedAt,
+    is_stale: stalenessStatus === 'stale',
+    new_email_count: newEmailCount,
+    org_id: orgRow?.organization_id ?? null,
+    sources,
+    hubspot,
+  });
 });
 
 // ── /api/companies/:id/homepage ────────────────────────────────────────────
@@ -270,7 +571,7 @@ app.get('/api/companies/:id/insights', async (req: Request, res: Response) => {
             pr.events_created, pr.discussions_created, pr.discussions_updated, pr.actions_proposed,
             pr.input_tokens, pr.output_tokens, pr.llm_calls,
             (SELECT COALESCE(SUM(lc.duration_ms), 0) FROM llm_calls lc WHERE lc.run_id = pr.id) AS total_llm_ms
-     FROM processing_runs pr WHERE pr.company_domain = ?
+     FROM processing_runs pr WHERE LOWER(pr.company_domain) = LOWER(?)
      ORDER BY pr.started_at DESC LIMIT 20`,
     company.domain
   );
@@ -454,7 +755,44 @@ app.get('/api/contacts/:email', async (req: Request, res: Response) => {
 
   const enrichedThreads = threads.map((t: any) => ({ ...t, participants: parseJsonField<string[]>(t.participants) ?? [] }));
 
-  res.json({ ...contact, memory, threads: enrichedThreads });
+  // Look up the unified person and any HubSpot identity attached to this contact.
+  const personRow = await db.queryOne<{ person_id: number }>(
+    `SELECT person_id FROM person_identities
+     WHERE source = 'email' AND match_key = LOWER(?) LIMIT 1`,
+    email
+  );
+  let hubspot: Record<string, unknown> | null = null;
+  let sources: string[] = ['email'];
+  if (personRow) {
+    const sourceRows = await db.query<{ source: string }>(
+      `SELECT DISTINCT source FROM person_identities WHERE person_id = ?`,
+      personRow.person_id
+    );
+    sources = sourceRows.map(r => r.source).sort();
+    const hsIdent = await db.queryOne<{ source_id: string }>(
+      `SELECT source_id FROM person_identities
+       WHERE person_id = ? AND source = 'hubspot'
+       ORDER BY source_id LIMIT 1`,
+      personRow.person_id
+    );
+    if (hsIdent) {
+      hubspot = await db.queryOne<DbRow>(
+        `SELECT id, email, firstname, lastname, company_name, job_title, phone,
+                city, state, country, address, lifecycle_stage, lead_status,
+                owner_id, twitter_handle, linkedin_url, website, industry, salutation,
+                hs_updated_at, hs_url
+         FROM hubspot_contacts WHERE id = ?`,
+        hsIdent.source_id
+      ) ?? null;
+    }
+  }
+
+  res.json({
+    ...contact, memory, threads: enrichedThreads,
+    person_id: personRow?.person_id ?? null,
+    sources,
+    hubspot,
+  });
 });
 
 // ── /api/discussions ───────────────────────────────────────────────────────
@@ -585,6 +923,12 @@ app.get('/api/discussions/:id', async (req: Request, res: Response) => {
      ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, id ASC`, id
   ).catch(() => []);
 
+  const notes = await db.query(
+    `SELECT hn.id, hn.body, hn.created_at, hn.updated_at, hn.owner_id, hn.hs_url
+     FROM hubspot_notes hn INNER JOIN discussion_notes dn ON dn.note_id = hn.id
+     WHERE dn.discussion_id = ? ORDER BY hn.created_at ASC`, id
+  ).catch(() => []);
+
   const childrenRaw = await db.query(
     `SELECT d.id, d.title, d.category, d.current_state, d.company_id, d.parent_id, d.summary,
             d.participants, d.first_seen, d.last_seen, d.updated_at, c.name AS company_name
@@ -611,7 +955,7 @@ app.get('/api/discussions/:id', async (req: Request, res: Response) => {
     parent,
     state_history: stateHistory, threads, actions,
     calendar_events: calendarEvents, events, milestones,
-    proposed_actions: proposedActions, children,
+    proposed_actions: proposedActions, children, notes,
   });
 });
 
@@ -627,6 +971,230 @@ app.get('/api/discussions/:id/proposed-actions', async (req: Request, res: Respo
      ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, id ASC`, id
   ).catch(() => []);
   res.json(actions);
+});
+
+// ── Feedback mutations on discussions + events + threads ──────────────────
+//
+// Every edit writes to the `feedback` table (layer + target_type + target_id +
+// action + old_value + new_value + reason). Phase 2 will also snapshot the
+// LLM input context into few_shot_examples — for now we record the correction
+// only. The `feedback` rows are consumed later by format_examples_block() /
+// format_rules_block() in analysis/feedback.py.
+
+function nowIso(): string { return new Date().toISOString(); }
+
+async function recordFeedback(
+  layer: string,
+  targetType: string,
+  targetId: string | number,
+  action: string,
+  oldValue: unknown,
+  newValue: unknown,
+  reason: string | null | undefined,
+): Promise<void> {
+  const toText = (v: unknown): string | null => {
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'string') return v;
+    return JSON.stringify(v);
+  };
+  await db.query(
+    `INSERT INTO feedback (layer, target_type, target_id, action, old_value, new_value, reason, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    layer, targetType, String(targetId), action, toText(oldValue), toText(newValue), reason ?? null, nowIso(),
+  );
+}
+
+// PATCH /api/discussions/:id — edit title / summary (one or both).
+// Records a feedback row per changed field so the learning loop has fine-grained
+// corrections to draw on.
+app.patch('/api/discussions/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid discussion id' }); return; }
+
+  const { title, summary, reason } = (req.body ?? {}) as {
+    title?: string | null; summary?: string | null; reason?: string | null;
+  };
+  if (title === undefined && summary === undefined) {
+    res.status(400).json({ error: 'Provide at least one of: title, summary' });
+    return;
+  }
+
+  const existing = await db.queryOne<{ title: string; summary: string | null }>(
+    'SELECT title, summary FROM discussions WHERE id = ?', id,
+  );
+  if (!existing) { res.status(404).json({ error: 'Discussion not found' }); return; }
+
+  const now = nowIso();
+  const changes: string[] = [];
+
+  if (title !== undefined && title !== existing.title) {
+    await db.query('UPDATE discussions SET title = ?, updated_at = ? WHERE id = ?', title, now, id);
+    await recordFeedback('discussions', 'discussion', id, 'title_change', existing.title, title, reason);
+    changes.push('title');
+  }
+  if (summary !== undefined && summary !== existing.summary) {
+    await db.query('UPDATE discussions SET summary = ?, updated_at = ? WHERE id = ?', summary, now, id);
+    await recordFeedback('discussions', 'discussion', id, 'summary_change', existing.summary, summary, reason);
+    changes.push('summary');
+  }
+
+  res.json({ id, updated: changes });
+});
+
+// POST /api/discussions/:id/merge — merge source discussion into this (target).
+// Moves events, threads, actions, proposed_actions, milestones, state history,
+// calendar event links, and re-parents sub-discussions. Ports the CLI
+// `merge-discussions` command (cli.py:1056).
+app.post('/api/discussions/:id/merge', async (req: Request, res: Response) => {
+  const targetId = parseInt(req.params.id, 10);
+  const { source_id, reason } = (req.body ?? {}) as { source_id?: number; reason?: string | null };
+  if (isNaN(targetId) || !source_id || isNaN(Number(source_id))) {
+    res.status(400).json({ error: 'Invalid target or source id' });
+    return;
+  }
+  const sourceId = Number(source_id);
+  if (sourceId === targetId) {
+    res.status(400).json({ error: 'source_id must differ from target id' });
+    return;
+  }
+
+  const target = await db.queryOne<{ id: number; title: string; first_seen: string; last_seen: string }>(
+    'SELECT id, title, first_seen, last_seen FROM discussions WHERE id = ?', targetId,
+  );
+  const source = await db.queryOne<{ id: number; title: string; first_seen: string; last_seen: string }>(
+    'SELECT id, title, first_seen, last_seen FROM discussions WHERE id = ?', sourceId,
+  );
+  if (!target) { res.status(404).json({ error: 'Target discussion not found' }); return; }
+  if (!source) { res.status(404).json({ error: 'Source discussion not found' }); return; }
+
+  const now = nowIso();
+
+  // Move child tables from source → target. Use UPDATE OR IGNORE (SQLite) /
+  // ON CONFLICT DO NOTHING (PG) semantics where there's a uniqueness constraint.
+  await db.query('UPDATE event_ledger SET discussion_id = ? WHERE discussion_id = ?', targetId, sourceId);
+  await db.query('UPDATE actions SET discussion_id = ? WHERE discussion_id = ?', targetId, sourceId);
+  await db.query('UPDATE proposed_actions SET discussion_id = ? WHERE discussion_id = ?', targetId, sourceId);
+  await db.query('UPDATE discussion_state_history SET discussion_id = ? WHERE discussion_id = ?', targetId, sourceId);
+  await db.query('UPDATE discussions SET parent_id = ? WHERE parent_id = ?', targetId, sourceId);
+
+  // Composite-PK tables: delete source rows that already exist on target, then move the rest.
+  for (const table of ['discussion_threads', 'discussion_events', 'milestones'] as const) {
+    const joinCol = table === 'discussion_threads' ? 'thread_id' : table === 'discussion_events' ? 'event_id' : 'name';
+    await db.query(
+      `DELETE FROM ${table} WHERE discussion_id = ? AND ${joinCol} IN (
+         SELECT ${joinCol} FROM ${table} WHERE discussion_id = ?
+       )`,
+      sourceId, targetId,
+    );
+    await db.query(`UPDATE ${table} SET discussion_id = ? WHERE discussion_id = ?`, targetId, sourceId);
+  }
+
+  // Extend target's date range.
+  await db.query(
+    `UPDATE discussions SET
+       first_seen = LEAST(first_seen, ?),
+       last_seen = GREATEST(last_seen, ?),
+       updated_at = ? WHERE id = ?`,
+    source.first_seen, source.last_seen, now, targetId,
+  );
+  await db.query('DELETE FROM discussions WHERE id = ?', sourceId);
+
+  await recordFeedback(
+    'discussions', 'discussion', targetId, 'merge',
+    { source_id: sourceId, source_title: source.title },
+    { merged_into: targetId },
+    reason,
+  );
+
+  res.json({ target_id: targetId, source_id: sourceId });
+});
+
+// DELETE /api/discussions/:id/threads/:threadId — remove a thread from a discussion.
+app.delete('/api/discussions/:id/threads/:threadId', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  const threadId = decodeURIComponent(req.params.threadId);
+  if (isNaN(id) || !threadId) { res.status(400).json({ error: 'Invalid id or thread_id' }); return; }
+
+  const reason = (req.query.reason as string | undefined) ?? null;
+  await db.query(
+    'DELETE FROM discussion_threads WHERE discussion_id = ? AND thread_id = ?', id, threadId,
+  );
+  await recordFeedback(
+    'discussions', 'discussion_thread', id, 'thread_removed',
+    { thread_id: threadId }, null, reason,
+  );
+  res.json({ removed: true, discussion_id: id, thread_id: threadId });
+});
+
+// POST /api/discussions/:id/threads — attach a thread to a discussion (reassignment).
+// If the thread is already in another discussion, move it. `from_discussion_id`
+// is optional metadata captured in feedback.
+app.post('/api/discussions/:id/threads', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  const { thread_id, from_discussion_id, reason } = (req.body ?? {}) as {
+    thread_id?: string; from_discussion_id?: number; reason?: string | null;
+  };
+  if (isNaN(id) || !thread_id) { res.status(400).json({ error: 'Invalid id or thread_id' }); return; }
+
+  // Remove any existing links, then link to target. Simplest safe reassignment.
+  await db.query('DELETE FROM discussion_threads WHERE thread_id = ?', thread_id);
+  await db.query(
+    'INSERT INTO discussion_threads (discussion_id, thread_id) VALUES (?, ?)', id, thread_id,
+  );
+  await recordFeedback(
+    'discussions', 'discussion_thread', id, 'thread_added',
+    from_discussion_id ? { from_discussion_id } : null,
+    { thread_id },
+    reason,
+  );
+  res.json({ added: true, discussion_id: id, thread_id });
+});
+
+// PATCH /api/events/:id — edit event_ledger row fields.
+app.patch('/api/events/:id', async (req: Request, res: Response) => {
+  const id = req.params.id;
+  const body = (req.body ?? {}) as Record<string, string | null>;
+  const editable = ['type', 'actor', 'target', 'event_date', 'detail'] as const;
+  const updates: Array<[string, string | null]> = [];
+  for (const k of editable) {
+    if (k in body) updates.push([k, body[k] ?? null]);
+  }
+  if (updates.length === 0) {
+    res.status(400).json({ error: `Provide at least one of: ${editable.join(', ')}` });
+    return;
+  }
+
+  const existing = await db.queryOne<Record<string, unknown>>(
+    'SELECT id, discussion_id, type, actor, target, event_date, detail FROM event_ledger WHERE id = ?', id,
+  );
+  if (!existing) { res.status(404).json({ error: 'Event not found' }); return; }
+
+  const setClause = updates.map(([k]) => `${k} = ?`).join(', ');
+  const values = updates.map(([, v]) => v);
+  await db.query(`UPDATE event_ledger SET ${setClause} WHERE id = ?`, ...values, id);
+
+  const oldSnapshot: Record<string, unknown> = {};
+  const newSnapshot: Record<string, unknown> = {};
+  for (const [k, v] of updates) {
+    oldSnapshot[k] = (existing as any)[k];
+    newSnapshot[k] = v;
+  }
+  await recordFeedback('events', 'event', id, 'edit', oldSnapshot, newSnapshot, body.reason);
+  res.json({ id, updated: updates.map(([k]) => k) });
+});
+
+// DELETE /api/events/:id — remove an event from the ledger.
+app.delete('/api/events/:id', async (req: Request, res: Response) => {
+  const id = req.params.id;
+  const reason = (req.query.reason as string | undefined) ?? null;
+  const existing = await db.queryOne<Record<string, unknown>>(
+    'SELECT id, discussion_id, type, actor, target, event_date, detail FROM event_ledger WHERE id = ?', id,
+  );
+  if (!existing) { res.status(404).json({ error: 'Event not found' }); return; }
+
+  await db.query('DELETE FROM event_ledger WHERE id = ?', id);
+  await recordFeedback('events', 'event', id, 'delete', existing, null, reason);
+  res.json({ deleted: true, id });
 });
 
 // ── /api/threads/:threadId/emails ─────────────────────────────────────────
@@ -654,6 +1222,14 @@ app.get('/api/threads/:threadId/emails', async (req: Request, res: Response) => 
          ) ORDER BY date ASC`,
         threadId, like, like, like, discussionId
       );
+      // Fall back to all emails in thread if domain filter matched nothing
+      // (e.g. event sourced from an internal thread that mentions the company)
+      if (emails.length === 0) {
+        emails = await db.query(
+          `SELECT id, message_id, subject, from_address, from_name, to_addresses, cc_addresses, date, body_text
+           FROM emails WHERE thread_id = ? ORDER BY date ASC`, threadId
+        );
+      }
     } else {
       emails = await db.query(
         `SELECT id, message_id, subject, from_address, from_name, to_addresses, cc_addresses, date, body_text
@@ -794,6 +1370,553 @@ app.get('/api/calendar-events', async (req: Request, res: Response) => {
   res.json({ items: enriched, total });
 });
 
+// ── /api/tasks ────────────────────────────────────────────────────────────
+
+app.get('/api/tasks', async (req: Request, res: Response) => {
+  const q = (req.query.q as string) ?? '';
+  const status = (req.query.status as string) ?? '';
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+  const offset = (page - 1) * limit;
+
+  const params: unknown[] = [];
+  const where: string[] = [];
+
+  if (status === 'open') {
+    where.push("(t.status IS NULL OR t.status != 'COMPLETED')");
+  } else if (status === 'completed') {
+    where.push("t.status = 'COMPLETED'");
+  } else if (status && status !== 'all') {
+    where.push('t.status = ?');
+    params.push(status);
+  }
+
+  if (q) {
+    where.push('(t.subject LIKE ? OR t.body LIKE ?)');
+    params.push(`%${q}%`, `%${q}%`);
+  }
+
+  const whereClause = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
+
+  const totalRow = await db.queryOne<{ cnt: number }>(
+    `SELECT COUNT(*) AS cnt FROM hubspot_tasks t ${whereClause}`, ...params
+  );
+  const total = totalRow?.cnt ?? 0;
+
+  const rows = await db.query<DbRow>(
+    `SELECT t.*,
+            (SELECT COUNT(*) FROM hubspot_task_threads thr WHERE thr.task_id = t.id) AS thread_count
+     FROM hubspot_tasks t
+     ${whereClause}
+     ORDER BY CASE WHEN t.due_date IS NULL THEN 1 ELSE 0 END, t.due_date ASC
+     LIMIT ? OFFSET ?`,
+    ...params, limit, offset
+  );
+
+  const items = await Promise.all(rows.map(async (row) => {
+    const contactIds: string[] = parseJsonField<string[]>(row.associated_contact_ids) ?? [];
+    const contacts = (await Promise.all(
+      contactIds.map(id =>
+        db.queryOne<DbRow>(`SELECT id, email, firstname, lastname FROM hubspot_contacts WHERE id = ?`, id)
+      )
+    ))
+      .filter(Boolean)
+      .map(c => ({
+        id: c!.id as string,
+        email: (c!.email as string) ?? null,
+        name: [c!.firstname, c!.lastname].filter(Boolean).join(' ') || null,
+      }));
+
+    const companyIds: string[] = parseJsonField<string[]>(row.associated_company_ids) ?? [];
+    const companies = (await Promise.all(
+      companyIds.map(id =>
+        db.queryOne<DbRow>(
+          `SELECT hc.id, hc.name, hc.domain, hc.hs_url, c.id AS local_id
+           FROM hubspot_companies hc
+           LEFT JOIN companies c ON c.domain = hc.domain AND hc.domain IS NOT NULL AND hc.domain != ''
+           WHERE hc.id = ?`,
+          id
+        )
+      )
+    ))
+      .filter(Boolean)
+      .map(c => ({
+        id: c!.id as string,
+        name: (c!.name as string) ?? null,
+        domain: (c!.domain as string) ?? null,
+        hs_url: (c!.hs_url as string) ?? null,
+        local_id: c!.local_id != null ? Number(c!.local_id) : null,
+      }));
+
+    return {
+      ...row,
+      associated_contact_ids: contactIds,
+      associated_company_ids: companyIds,
+      contacts,
+      companies,
+      thread_count: Number(row.thread_count ?? 0),
+    };
+  }));
+
+  res.json({ items, total });
+});
+
+app.get('/api/tasks/:id', async (req: Request, res: Response) => {
+  const task = await db.queryOne<DbRow>(
+    `SELECT t.*,
+            (SELECT COUNT(*) FROM hubspot_task_threads thr WHERE thr.task_id = t.id) AS thread_count
+     FROM hubspot_tasks t WHERE t.id = ?`,
+    req.params.id
+  );
+  if (!task) return res.status(404).json({ error: 'Task not found' });
+
+  const contactIds: string[] = parseJsonField<string[]>(task.associated_contact_ids) ?? [];
+  const contacts = (await Promise.all(
+    contactIds.map(id =>
+      db.queryOne<DbRow>(`SELECT id, email, firstname, lastname FROM hubspot_contacts WHERE id = ?`, id)
+    )
+  ))
+    .filter(Boolean)
+    .map(c => ({
+      id: c!.id as string,
+      email: (c!.email as string) ?? null,
+      name: [c!.firstname, c!.lastname].filter(Boolean).join(' ') || null,
+    }));
+
+  const companyIds: string[] = parseJsonField<string[]>(task.associated_company_ids) ?? [];
+  const companies = (await Promise.all(
+    companyIds.map(id =>
+      db.queryOne<DbRow>(
+        `SELECT hc.id, hc.name, hc.domain, hc.hs_url, c.id AS local_id
+         FROM hubspot_companies hc
+         LEFT JOIN companies c ON c.domain = hc.domain AND hc.domain IS NOT NULL AND hc.domain != ''
+         WHERE hc.id = ?`,
+        id
+      )
+    )
+  ))
+    .filter(Boolean)
+    .map(c => ({
+      id: c!.id as string,
+      name: (c!.name as string) ?? null,
+      domain: (c!.domain as string) ?? null,
+      hs_url: (c!.hs_url as string) ?? null,
+      local_id: c!.local_id != null ? Number(c!.local_id) : null,
+    }));
+
+  const threads = await db.query<DbRow>(
+    `SELECT thr.thread_id, thr.contact_email,
+            MIN(e.subject) AS subject,
+            COUNT(e.id) AS email_count,
+            MIN(e.date) AS first_date,
+            MAX(e.date) AS last_date
+     FROM hubspot_task_threads thr
+     JOIN emails e ON e.thread_id = thr.thread_id
+     WHERE thr.task_id = ?
+     GROUP BY thr.thread_id, thr.contact_email
+     ORDER BY last_date DESC
+     LIMIT 50`,
+    req.params.id
+  );
+
+  res.json({
+    ...task,
+    associated_contact_ids: contactIds,
+    associated_company_ids: companyIds,
+    contacts,
+    companies,
+    thread_count: Number(task.thread_count ?? 0),
+    threads: threads.map(t => ({ ...t, email_count: Number(t.email_count ?? 0) })),
+  });
+});
+
+// ── /api/jobs ─────────────────────────────────────────────────────────────
+
+app.get('/api/jobs/stages', (_req: Request, res: Response) => {
+  res.json({ stages: PIPELINE_STAGES });
+});
+
+app.get('/api/jobs/active', (_req: Request, res: Response) => {
+  const active = getActiveJob();
+  res.json({ active });
+});
+
+app.get('/api/jobs', async (req: Request, res: Response) => {
+  const status = (req.query.status as string) ?? '';
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 25));
+
+  const result = await listJobs({ status: status || undefined, page, limit });
+  res.json(result);
+});
+
+app.post('/api/jobs', async (req: Request, res: Response) => {
+  const body = req.body;
+
+  const jobType = body.job_type;
+  if (!jobType || !['sync', 'analyse'].includes(jobType)) {
+    res.status(400).json({ error: 'Invalid job_type. Must be "sync" or "analyse".' });
+    return;
+  }
+
+  if (jobType === 'analyse' && body.stages) {
+    const validNames = new Set(PIPELINE_STAGES.map(s => s.name));
+    const invalid = body.stages.filter((s: string) => !validNames.has(s));
+    if (invalid.length > 0) {
+      res.status(400).json({ error: `Invalid stages: ${invalid.join(', ')}` });
+      return;
+    }
+  }
+
+  const config: JobConfig = {
+    job_type: jobType,
+    stages: body.stages ?? null,
+    company: body.company ?? null,
+    label: body.label ?? null,
+    force: !!body.force,
+    clean: !!body.clean,
+    per_company: !!body.per_company,
+    concurrency: body.concurrency ?? 1,
+    new_emails: !!body.new_emails,
+    stale_model: !!body.stale_model,
+    stale_prompt: !!body.stale_prompt,
+  };
+
+  const job = await createJob(config);
+  res.status(201).json(job);
+});
+
+app.get('/api/jobs/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid job id' }); return; }
+
+  const job = await getJob(id);
+  if (!job) { res.status(404).json({ error: 'Job not found' }); return; }
+
+  res.json(job);
+});
+
+app.post('/api/jobs/:id/cancel', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid job id' }); return; }
+
+  const ok = await cancelJob(id);
+  if (!ok) {
+    res.status(400).json({ error: 'Job cannot be cancelled (not running or queued)' });
+    return;
+  }
+
+  const job = await getJob(id);
+  res.json(job);
+});
+
+app.get('/api/jobs/:id/logs', (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid job id' }); return; }
+
+  subscribeToLogs(id, res);
+});
+
+// ── /api/search ───────────────────────────────────────────────────────────
+
+app.get('/api/search', async (req: Request, res: Response) => {
+  const q = (req.query.q as string) ?? '';
+  if (!q.trim()) { res.json({ results: [], discussion_results: [], total: 0, discussion_total: 0, query_time_ms: 0, search_mode: 'none' }); return; }
+
+  const limitParam = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
+  const pageParam = Math.max(1, parseInt(req.query.page as string) || 1);
+  const offset = (pageParam - 1) * limitParam;
+  const company = (req.query.company as string) ?? '';
+  const label = (req.query.label as string) ?? '';
+  const dateFrom = (req.query.from as string) ?? '';
+  const dateTo = (req.query.to as string) ?? '';
+  const category = (req.query.category as string) ?? '';      // discussion category filter
+  const discussionOnly = req.query.discussions === '1';        // only threads in a discussion
+  const model = (req.query.model as string) === 'quality' ? 'quality' as const : 'fast' as const;
+
+  const start = Date.now();
+
+  if (db.backend !== 'postgres') {
+    // SQLite fallback: simple LIKE search
+    const likeQ = `%${q}%`;
+    const totalRow = await db.queryOne<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM thread_search_docs WHERE doc_text LIKE ?`,
+      likeQ
+    );
+    const results = await db.query(
+      `SELECT tsd.thread_id, t.subject, t.email_count, t.first_date, t.last_date, t.participants,
+              tsd.company_domain, c.name AS company_name, 1.0 AS score
+       FROM thread_search_docs tsd
+       JOIN threads t ON t.thread_id = tsd.thread_id
+       LEFT JOIN companies c ON c.domain = tsd.company_domain
+       WHERE tsd.doc_text LIKE ? ORDER BY t.last_date DESC LIMIT ? OFFSET ?`,
+      likeQ, limitParam, offset
+    );
+    res.json({
+      results: results.map((r: any) => ({
+        thread_id: r.thread_id, subject: r.subject, company_domain: r.company_domain,
+        company_name: r.company_name, participants: parseJsonField<string[]>(r.participants) ?? [],
+        first_date: r.first_date, last_date: r.last_date, email_count: r.email_count,
+        snippet: null, score: r.score, score_type: 'like',
+      })),
+      discussion_results: [],
+      total: totalRow?.cnt ?? results.length,
+      discussion_total: 0,
+      query_time_ms: Date.now() - start, search_mode: 'like',
+    });
+    return;
+  }
+
+  // ── Build filter clauses (shared between BM25 and hybrid paths) ──
+  // These apply in the "ranked" CTE which has access to tsd.* and can join threads
+  const rankFilters: string[] = [];
+  const rankFilterParams: unknown[] = [];
+
+  if (company) {
+    rankFilters.push('AND tsd.company_domain = ?');
+    rankFilterParams.push(company);
+  }
+  if (label) {
+    rankFilters.push('AND tsd.company_domain IN (SELECT c.domain FROM companies c JOIN company_labels cl ON cl.company_id = c.id WHERE cl.label = ?)');
+    rankFilterParams.push(label);
+  }
+  if (dateFrom) {
+    rankFilters.push('AND tsd.thread_id IN (SELECT thread_id FROM threads WHERE last_date >= ?)');
+    rankFilterParams.push(dateFrom);
+  }
+  if (dateTo) {
+    rankFilters.push('AND tsd.thread_id IN (SELECT thread_id FROM threads WHERE first_date <= ?)');
+    rankFilterParams.push(dateTo);
+  }
+  if (discussionOnly || category) {
+    if (category) {
+      rankFilters.push('AND tsd.thread_id IN (SELECT dt.thread_id FROM discussion_threads dt JOIN discussions d ON d.id = dt.discussion_id WHERE d.category = ?)');
+      rankFilterParams.push(category);
+    } else {
+      rankFilters.push('AND tsd.thread_id IN (SELECT dt.thread_id FROM discussion_threads dt)');
+    }
+  }
+
+  const filterSQL = rankFilters.join(' ');
+
+  // ── Discussion BM25 search (runs alongside thread search) ──
+  // Filters applied: company (via discussion_search_docs.company_domain), category.
+  // Date and label filters are skipped — discussions aren't tied to individual emails.
+  let discussionResults: any[] = [];
+  let discussionTotal = 0;
+  if (db.backend === 'postgres') {
+    const discFilters: string[] = [];
+    const discFilterParams: unknown[] = [];
+    if (company) { discFilters.push('AND dsd.company_domain = ?'); discFilterParams.push(company); }
+    if (category) { discFilters.push('AND dsd.category = ?'); discFilterParams.push(category); }
+    const discFilterSQL = discFilters.join(' ');
+
+    const DISC_LIMIT = 10;
+    const discParams: unknown[] = [q, q, q, q, ...discFilterParams, DISC_LIMIT, q];
+
+    try {
+      discussionResults = await db.query(
+        `WITH matched AS (
+           SELECT discussion_id FROM discussion_search_docs WHERE doc_tsv @@ websearch_to_tsquery('english', ?)
+           UNION
+           SELECT discussion_id FROM discussion_search_docs WHERE doc_tsv_simple @@ phraseto_tsquery('simple', ?)
+         ),
+         ranked AS (
+           SELECT dsd.discussion_id,
+                  (ts_rank_cd(dsd.doc_tsv, websearch_to_tsquery('english', ?))
+                    + 10.0 * ts_rank_cd(dsd.doc_tsv_simple, phraseto_tsquery('simple', ?)))
+                  AS score,
+                  dsd.company_domain, dsd.category, dsd.current_state
+           FROM matched m
+           JOIN discussion_search_docs dsd ON dsd.discussion_id = m.discussion_id
+           WHERE 1=1 ${discFilterSQL}
+           ORDER BY score DESC LIMIT ?
+         )
+         SELECT r.discussion_id, r.score, r.category, r.current_state, r.company_domain,
+                d.title, d.first_seen, d.last_seen,
+                c.name AS company_name,
+                ts_headline('simple', dsd2.doc_text, phraseto_tsquery('simple', ?),
+                  'StartSel=**, StopSel=**, MaxWords=60, MinWords=20, MaxFragments=2'
+                ) AS snippet
+         FROM ranked r
+         JOIN discussions d ON d.id = r.discussion_id
+         JOIN discussion_search_docs dsd2 ON dsd2.discussion_id = r.discussion_id
+         LEFT JOIN companies c ON c.domain = r.company_domain
+         ORDER BY r.score DESC`,
+        ...discParams
+      );
+
+      const discCountParams: unknown[] = [q, q, ...discFilterParams];
+      const discTotalRow = await db.queryOne<{ cnt: number }>(
+        `WITH matched AS (
+           SELECT discussion_id FROM discussion_search_docs WHERE doc_tsv @@ websearch_to_tsquery('english', ?)
+           UNION
+           SELECT discussion_id FROM discussion_search_docs WHERE doc_tsv_simple @@ phraseto_tsquery('simple', ?)
+         )
+         SELECT COUNT(*) AS cnt FROM matched m
+         JOIN discussion_search_docs dsd ON dsd.discussion_id = m.discussion_id
+         WHERE 1=1 ${discFilterSQL}`,
+        ...discCountParams
+      );
+      discussionTotal = Number(discTotalRow?.cnt ?? discussionResults.length);
+    } catch (err) {
+      // discussion_search_docs may not exist yet — swallow and return empty
+      console.log('[search] Discussion search failed:', (err as Error).message);
+    }
+  }
+
+  const discussionResultsMapped = discussionResults.map((r: any) => ({
+    discussion_id: r.discussion_id,
+    title: r.title,
+    category: r.category,
+    current_state: r.current_state,
+    company_domain: r.company_domain,
+    company_name: r.company_name,
+    first_seen: r.first_seen,
+    last_seen: r.last_seen,
+    snippet: r.snippet,
+    score: Number(r.score),
+    score_type: 'bm25',
+  }));
+
+  // ── Try hybrid search (BM25 + vector) first ──
+  let threadIds: string[] | null = null;
+  let searchMode = 'bm25';
+
+  try {
+    const hybrid = await hybridSearch(db, {
+      query: q, limit: limitParam, offset, model, company: company || undefined, label: label || undefined,
+    });
+    if (hybrid.vector_available && hybrid.results.length > 0) {
+      threadIds = hybrid.results.map(r => r.thread_id);
+      searchMode = 'hybrid';
+    }
+  } catch (err) {
+    console.log('[search] Hybrid search failed, falling back to BM25:', (err as Error).message);
+  }
+
+  if (threadIds) {
+    // Fetch full thread data for the RRF-ranked results, preserving order
+    const placeholders = threadIds.map(() => '?').join(',');
+    const rows = await db.query(
+      `SELECT tsd.thread_id, t.subject, t.email_count, t.first_date, t.last_date, t.participants,
+              tsd.company_domain, c.name AS company_name,
+              ts_headline('simple', tsd.doc_text, phraseto_tsquery('simple', ?),
+                'StartSel=**, StopSel=**, MaxWords=60, MinWords=20, MaxFragments=2'
+              ) AS snippet
+       FROM thread_search_docs tsd
+       JOIN threads t ON t.thread_id = tsd.thread_id
+       LEFT JOIN companies c ON c.domain = tsd.company_domain
+       WHERE tsd.thread_id IN (${placeholders}) ${filterSQL}`,
+      q, ...threadIds, ...rankFilterParams
+    );
+
+    const rowMap = new Map(rows.map((r: any) => [r.thread_id, r]));
+    const enriched = threadIds
+      .map((tid, i) => {
+        const r: any = rowMap.get(tid);
+        if (!r) return null;
+        return {
+          thread_id: r.thread_id, subject: r.subject, company_domain: r.company_domain,
+          company_name: r.company_name, participants: parseJsonField<string[]>(r.participants) ?? [],
+          first_date: r.first_date, last_date: r.last_date, email_count: r.email_count,
+          snippet: r.snippet, score: limitParam - i, score_type: 'hybrid',
+        };
+      })
+      .filter(Boolean);
+
+    // Count total matches with filters applied
+    const hybridCountParams: unknown[] = [q, q, ...rankFilterParams];
+    const hybridTotal = await db.queryOne<{ cnt: number }>(
+      `WITH matched AS (
+         SELECT thread_id FROM thread_search_docs WHERE doc_tsv @@ websearch_to_tsquery('english', ?)
+         UNION
+         SELECT thread_id FROM thread_search_docs WHERE doc_tsv_simple @@ phraseto_tsquery('simple', ?)
+       )
+       SELECT COUNT(*) AS cnt FROM matched m
+       JOIN thread_search_docs tsd ON tsd.thread_id = m.thread_id
+       WHERE 1=1 ${filterSQL}`,
+      ...hybridCountParams
+    );
+
+    res.json({
+      results: enriched,
+      discussion_results: discussionResultsMapped,
+      total: hybridTotal?.cnt ?? enriched.length,
+      discussion_total: discussionTotal,
+      query_time_ms: Date.now() - start, search_mode: searchMode,
+    });
+  } else {
+    // ── BM25-only with recency boost ──
+    // Recency: ln(days_ago + 1) decays slowly. We subtract a fraction of it from the score.
+    // A thread from today gets 0 penalty; 1 year ago ~6 penalty; 5 years ago ~7.5 penalty.
+    // With text scores in the 1-15 range, scale factor of 0.3 gives meaningful but not overwhelming boost.
+    const bm25Params: unknown[] = [q, q, q, q, ...rankFilterParams, limitParam, offset, q];
+
+    const results = await db.query(
+      `WITH matched AS (
+         SELECT thread_id FROM thread_search_docs WHERE doc_tsv @@ websearch_to_tsquery('english', ?)
+         UNION
+         SELECT thread_id FROM thread_search_docs WHERE doc_tsv_simple @@ phraseto_tsquery('simple', ?)
+       ),
+       ranked AS (
+         SELECT tsd.thread_id,
+                (ts_rank_cd(tsd.doc_tsv, websearch_to_tsquery('english', ?))
+                  + 10.0 * ts_rank_cd(tsd.doc_tsv_simple, phraseto_tsquery('simple', ?)))
+                * (1.0 + 0.3 / (1.0 + EXTRACT(EPOCH FROM (NOW() - COALESCE(t.last_date::timestamptz, NOW()))) / 86400.0 / 365.0))
+                * (1.0 + 0.4 * LN(1.0 + COALESCE(tsd.outreach_score, 0)))
+                AS score,
+                tsd.company_domain
+         FROM matched m
+         JOIN thread_search_docs tsd ON tsd.thread_id = m.thread_id
+         JOIN threads t ON t.thread_id = m.thread_id
+         WHERE 1=1 ${filterSQL}
+         ORDER BY score DESC LIMIT ? OFFSET ?
+       )
+       SELECT r.thread_id, r.score, r.company_domain,
+              t.subject, t.email_count, t.first_date, t.last_date, t.participants,
+              c.name AS company_name,
+              ts_headline('simple', tsd2.doc_text, phraseto_tsquery('simple', ?),
+                'StartSel=**, StopSel=**, MaxWords=60, MinWords=20, MaxFragments=2'
+              ) AS snippet
+       FROM ranked r
+       JOIN threads t ON t.thread_id = r.thread_id
+       JOIN thread_search_docs tsd2 ON tsd2.thread_id = r.thread_id
+       LEFT JOIN companies c ON c.domain = r.company_domain
+       ORDER BY r.score DESC`,
+      ...bm25Params
+    );
+
+    // Count (with filters applied)
+    const countParams: unknown[] = [q, q, ...rankFilterParams];
+    const totalRow = await db.queryOne<{ cnt: number }>(
+      `WITH matched AS (
+         SELECT thread_id FROM thread_search_docs WHERE doc_tsv @@ websearch_to_tsquery('english', ?)
+         UNION
+         SELECT thread_id FROM thread_search_docs WHERE doc_tsv_simple @@ phraseto_tsquery('simple', ?)
+       )
+       SELECT COUNT(*) AS cnt FROM matched m
+       JOIN thread_search_docs tsd ON tsd.thread_id = m.thread_id
+       WHERE 1=1 ${filterSQL}`,
+      ...countParams
+    );
+
+    res.json({
+      results: results.map((r: any) => ({
+        thread_id: r.thread_id, subject: r.subject, company_domain: r.company_domain,
+        company_name: r.company_name, participants: parseJsonField<string[]>(r.participants) ?? [],
+        first_date: r.first_date, last_date: r.last_date, email_count: r.email_count,
+        snippet: r.snippet, score: r.score, score_type: 'bm25',
+      })),
+      discussion_results: discussionResultsMapped,
+      total: totalRow?.cnt ?? results.length,
+      discussion_total: discussionTotal,
+      query_time_ms: Date.now() - start,
+      search_mode: 'bm25',
+    });
+  }
+});
+
 // ── Production SPA fallback ────────────────────────────────────────────────
 
 if (process.env.NODE_ENV === 'production') {
@@ -803,7 +1926,15 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`API server running on http://localhost:${PORT}`);
-  console.log(`Database backend: ${db.backend}`);
+// ── Start server ───────────────────────────────────────────────────────────
+
+initJobs(db).then(() => {
+  app.listen(PORT, () => {
+    console.log(`API server running on http://localhost:${PORT}`);
+    console.log(`Database backend: ${db.backend}`);
+  });
+}).catch((err) => {
+  console.error('Cannot connect to PostgreSQL database. Check DB_URL and ensure the database is accessible.');
+  console.error(err.message);
+  process.exit(1);
 });

@@ -770,9 +770,9 @@ def _clean_discussions(
         disc_where = "1=1"
         params = ()
 
-    # Get discussion IDs to clean
+    # Get discussion IDs to clean — preserve externally sourced discussions (e.g. hubspot_deal)
     disc_ids = [r[0] for r in fetchall(
-        conn, f"SELECT id FROM discussions WHERE {disc_where}", params
+        conn, f"SELECT id FROM discussions WHERE {disc_where} AND source_type IS NULL", params
     )]
     if not disc_ids:
         return 0

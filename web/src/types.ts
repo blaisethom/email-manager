@@ -8,6 +8,8 @@ export interface Company {
   homepage_fetched_at: string | null;
   description: string | null;
   labels: string[];
+  last_analysed_at: string | null;
+  is_stale: boolean;
 }
 
 export interface CompanyLabel {
@@ -25,6 +27,60 @@ export interface CompanyThread {
   first_date: string | null;
   last_date: string | null;
   summary: string | null;
+  discussions: Array<{
+    id: number;
+    title: string;
+    category: string | null;
+    current_state: string | null;
+  }>;
+}
+
+export interface HubSpotCompany {
+  id: string;
+  name: string | null;
+  domain: string | null;
+  website: string | null;
+  industry: string | null;
+  description: string | null;
+  about_us: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  phone: string | null;
+  num_employees: number | null;
+  annual_revenue: number | null;
+  lifecycle_stage: string | null;
+  type: string | null;
+  owner_id: string | null;
+  founded_year: string | null;
+  linkedin_url: string | null;
+  twitter_handle: string | null;
+  hs_updated_at: string | null;
+  hs_url: string | null;
+}
+
+export interface HubSpotContact {
+  id: string;
+  email: string | null;
+  firstname: string | null;
+  lastname: string | null;
+  company_name: string | null;
+  job_title: string | null;
+  phone: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  address: string | null;
+  lifecycle_stage: string | null;
+  lead_status: string | null;
+  owner_id: string | null;
+  twitter_handle: string | null;
+  linkedin_url: string | null;
+  website: string | null;
+  industry: string | null;
+  salutation: string | null;
+  hs_updated_at: string | null;
+  hs_url: string | null;
 }
 
 export interface CompanyDetail extends Omit<Company, 'labels'> {
@@ -32,6 +88,10 @@ export interface CompanyDetail extends Omit<Company, 'labels'> {
   contacts: ContactSummary[];
   discussions: DiscussionSummary[];
   threads: CompanyThread[];
+  new_email_count: number;
+  org_id: number | null;
+  sources: Array<'email' | 'homepage' | 'hubspot'>;
+  hubspot: HubSpotCompany | null;
 }
 
 export interface ContactSummary {
@@ -94,6 +154,9 @@ export interface ThreadEmail {
 export interface ContactDetail extends Contact {
   memory: ContactMemory | null;
   threads: Thread[];
+  person_id: number | null;
+  sources: Array<'email' | 'hubspot'>;
+  hubspot: HubSpotContact | null;
 }
 
 export interface DiscussionSummary {
@@ -216,6 +279,15 @@ export interface ParentDiscussion {
   company_name: string | null;
 }
 
+export interface HubSpotNote {
+  id: string;
+  body: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  owner_id: string | null;
+  hs_url: string | null;
+}
+
 export interface DiscussionDetail extends Discussion {
   parent: ParentDiscussion | null;
   state_history: StateHistoryEntry[];
@@ -226,6 +298,7 @@ export interface DiscussionDetail extends Discussion {
   milestones: Milestone[];
   proposed_actions: ProposedAction[];
   children: Discussion[];
+  notes: HubSpotNote[];
 }
 
 export interface ProcessingRun {
@@ -293,6 +366,9 @@ export interface CompaniesResponse {
   items: Company[];
   total: number;
   labels: string[];
+  stale_count: number;
+  up_to_date_count: number;
+  never_analysed_count: number;
 }
 
 export interface ContactsResponse {
@@ -336,4 +412,237 @@ export interface MetaResponse {
     calendar_events: number;
   };
   categoryConfig: CategoryConfig[];
+}
+
+// ── Unified entity model ───────────────────────────────────────────────────
+
+export type EntitySource = 'email' | 'homepage' | 'hubspot';
+
+export interface Organization {
+  org_id: number;
+  email_company_id: number | null;
+  hubspot_id: string | null;
+  name: string | null;
+  domain: string | null;
+  description: string | null;
+  email_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+  homepage_fetched_at: string | null;
+  industry: string | null;
+  lifecycle_stage: string | null;
+  country: string | null;
+  is_stale: boolean;
+  staleness_status: string;
+  last_analysed_at: string | null;
+  sources: EntitySource[];
+  labels: string[];
+}
+
+export interface OrganizationsResponse {
+  items: Organization[];
+  total: number;
+  labels: string[];
+  stale_count: number;
+  up_to_date_count: number;
+  never_analysed_count: number;
+}
+
+export interface OrganizationDetail extends Omit<Organization, 'org_id' | 'sources' | 'labels'> {
+  id: number;
+  org_id: number;
+  hubspot_url: string | null;
+  sources: EntitySource[];
+  identities: Array<{
+    source: EntitySource;
+    source_id: string;
+    match_key: string | null;
+    confidence: number;
+    is_manual: number;
+    created_at: string;
+  }>;
+  notes: string | null;
+  website: string | null;
+  type: string | null;
+  owner_id: string | null;
+  phone: string | null;
+  city: string | null;
+  state: string | null;
+  num_employees: number | null;
+  annual_revenue: number | null;
+  linkedin_url: string | null;
+  twitter_handle: string | null;
+  founded_year: string | null;
+}
+
+export interface Person {
+  person_id: number;
+  email_contact_id: number | null;
+  hubspot_id: string | null;
+  name: string | null;
+  email: string | null;
+  company_name: string | null;
+  email_count: number;
+  sent_count: number;
+  received_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+  job_title: string | null;
+  lifecycle_stage: string | null;
+  lead_status: string | null;
+  country: string | null;
+  sources: Array<'email' | 'hubspot'>;
+}
+
+export interface PeopleResponse {
+  items: Person[];
+  total: number;
+  companies: string[];
+}
+
+export interface PersonDetail extends Person {
+  id: number;
+  hubspot_url: string | null;
+  identities: Array<{
+    source: 'email' | 'hubspot';
+    source_id: string;
+    match_key: string | null;
+    confidence: number;
+    is_manual: number;
+    created_at: string;
+  }>;
+  notes: string | null;
+  phone: string | null;
+  city: string | null;
+  state: string | null;
+  address: string | null;
+  owner_id: string | null;
+  linkedin_url: string | null;
+  twitter_handle: string | null;
+  industry: string | null;
+  salutation: string | null;
+  website: string | null;
+}
+
+// ── HubSpot Tasks ─────────────────────────────────────────────────────────
+
+export interface HubSpotTask {
+  id: string;
+  subject: string | null;
+  body: string | null;
+  status: string | null;
+  type: string | null;
+  priority: string | null;
+  due_date: string | null;
+  completed_at: string | null;
+  owner_id: string | null;
+  associated_contact_ids: string[];
+  associated_company_ids: string[];
+  hs_url: string | null;
+  fetched_at: string;
+  contacts: Array<{ id: string; email: string | null; name: string | null }>;
+  companies: Array<{ id: string; name: string | null; domain: string | null; hs_url: string | null; local_id: number | null }>;
+  thread_count: number;
+}
+
+export interface HubSpotTaskThread {
+  thread_id: string;
+  subject: string | null;
+  email_count: number;
+  first_date: string | null;
+  last_date: string | null;
+  contact_email: string;
+}
+
+export interface HubSpotTaskDetail extends HubSpotTask {
+  threads: HubSpotTaskThread[];
+}
+
+export interface TasksResponse {
+  items: HubSpotTask[];
+  total: number;
+}
+
+// ── Pipeline Jobs ──────────────────────────────────────────────────────────
+
+export interface PipelineJob {
+  id: number;
+  job_type: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  config_json: string;
+  pid: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  exit_code: number | null;
+  error_message: string | null;
+  current_stage: string | null;
+  progress_done: number;
+  progress_total: number;
+  current_company: string | null;
+}
+
+export interface PipelineStage {
+  name: string;
+  scope: 'global' | 'company';
+  needs_ai: boolean;
+  depends_on: string[];
+}
+
+export interface JobConfig {
+  job_type: 'sync' | 'analyse';
+  stages?: string[] | null;
+  company?: string | null;
+  label?: string | null;
+  force?: boolean;
+  clean?: boolean;
+  per_company?: boolean;
+  concurrency?: number;
+  new_emails?: boolean;
+  stale_model?: boolean;
+  stale_prompt?: boolean;
+}
+
+export interface JobsResponse {
+  items: PipelineJob[];
+  total: number;
+}
+
+// ── Search ─────────────────────────────────────────────────────────────────
+
+export interface SearchResult {
+  thread_id: string;
+  subject: string | null;
+  company_domain: string | null;
+  company_name: string | null;
+  participants: string[];
+  first_date: string | null;
+  last_date: string | null;
+  email_count: number;
+  snippet: string | null;
+  score: number;
+  score_type: string;
+}
+
+export interface DiscussionSearchResult {
+  discussion_id: number;
+  title: string;
+  category: string | null;
+  current_state: string | null;
+  company_domain: string | null;
+  company_name: string | null;
+  first_seen: string | null;
+  last_seen: string | null;
+  snippet: string | null;
+  score: number;
+  score_type: string;
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
+  discussion_results: DiscussionSearchResult[];
+  total: number;
+  discussion_total: number;
+  query_time_ms: number;
+  search_mode: string;
 }

@@ -1,0 +1,64 @@
+# Docker Compose overlay for the Prefect scheduler stack.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prefect.yml up
+#
+# Or, if you only want the scheduler alongside an already-running app:
+#   docker compose -f docker-compose.prefect.yml up
+
+services:
+
+  # ── Prefect server (orchestration backend + UI) ──────────────────────────────
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    command: prefect server start --host 0.0.0.0
+    ports:
+      - "4200:4200"
+    environment:
+      PREFECT_SERVER_DATABASE_CONNECTION_URL: >-
+        postgresql+asyncpg://prefect:prefect@prefect-db/prefect
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      prefect-db:
+        condition: service_healthy
+
+  # ── Prefect metadata database (separate from the app DB) ────────────────────
+  prefect-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: prefect
+    volumes:
+      - prefect-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Prefect worker (runs flow tasks as subprocesses) ─────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      # Inherit all app env vars from .env (DB_URL, ANTHROPIC_API_KEY, etc.)
+    env_file:
+      - .env
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    volumes:
+      # Mount codebase read-only so hot-reload works in dev
+      - ./src:/app/src:ro
+      # Persist OAuth tokens and local DB between restarts
+      - ../data:/app/data
+
+volumes:
+  prefect-db-data:

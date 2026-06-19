@@ -256,10 +256,16 @@ export default function DiscussionsPage() {
   }, [categoryConfig]);
 
   const terminalStatesStr = useMemo(() => {
-    if (!category || !configByCategory[category]) return '';
-    const ts = configByCategory[category].terminal_states;
-    return ts.length > 0 ? ts.join(',') : '';
-  }, [category, configByCategory]);
+    // When a category is selected, hide only that category's terminal states.
+    // Otherwise, hide terminal states across every category.
+    if (category && configByCategory[category]) {
+      const ts = configByCategory[category].terminal_states;
+      return ts.length > 0 ? ts.join(',') : '';
+    }
+    const all = new Set<string>();
+    for (const c of categoryConfig) for (const s of c.terminal_states) all.add(s);
+    return all.size > 0 ? Array.from(all).join(',') : '';
+  }, [category, categoryConfig, configByCategory]);
 
   const fetchData = useCallback(() => {
     setLoading(true);

@@ -118,6 +118,15 @@ def fetch_homepages(
                     "UPDATE companies SET homepage_fetched_at = ? WHERE id = ?",
                     (now, company_id),
                 )
+                # Mint a homepage-source identity now that this company has homepage data.
+                from email_manager.entities.reconcile import SOURCE_HOMEPAGE, link_or_create_org
+                link_or_create_org(
+                    conn,
+                    source=SOURCE_HOMEPAGE,
+                    source_id=str(company_id),
+                    domain=domain,
+                    name=row["name"],
+                )
                 conn.commit()
                 progress.advance(task)
 

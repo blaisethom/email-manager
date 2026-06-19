@@ -25,6 +25,12 @@ class EmailAccount(BaseModel):
     gmail_credentials_path: Path = Path("../data/gmail_credentials.json")
     gmail_token_path: Path = Path("../data/gmail_token.json")
     gmail_labels: list[str] = Field(default_factory=list)
+    gmail_bearer_token: str = ""  # if set, use this bearer token instead of local OAuth (for proxy-managed tokens)
+
+    # HubSpot — if set, this account's token is used for HubSpot API calls.
+    # Use a placeholder like "HUBSPOT_TOKEN" and let the proxy substitute the real token.
+    hubspot_bearer_token: str = ""
+    hubspot_owner_email: str = ""  # HubSpot owner email to filter tasks/assignments by
 
 
 class Config(BaseSettings):
@@ -58,6 +64,12 @@ class Config(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ai_batch_size: int = 10
 
+    # Embeddings
+    embedding_backend: str = "voyage"  # "voyage" or "ollama"
+    voyage_api_key: str = "VOYAGER_API_KEY"  # placeholder swapped by proxy
+    embedding_model_fast: str = "voyage-3-lite"  # 512 dims, cheap, all threads
+    embedding_model_quality: str = "voyage-3"  # 1024 dims, important threads only
+
     # Memory
     memory_backend: str = "both"  # "sqlite", "markdown", or "both"
     memory_strategy: str = "default"  # "default" or "detailed"
@@ -78,6 +90,13 @@ class Config(BaseSettings):
 
     # Accounts config file
     accounts_path: Path = Path("accounts.json")
+
+    def get_hubspot_account(self) -> "EmailAccount | None":
+        """Return the first account that has a hubspot_bearer_token configured."""
+        for acct in self.get_accounts():
+            if acct.hubspot_bearer_token:
+                return acct
+        return None
 
     @property
     def db_abs_path(self) -> Path:

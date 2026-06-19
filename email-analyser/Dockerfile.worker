@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System dependencies for psycopg2, lxml, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml .
+COPY src/ src/
+
+RUN pip install --no-cache-dir -e ".[postgres,scheduler]"
+
+# Prefect worker registers itself with the server on startup.
+# The work pool and concurrency limit are created by the entrypoint script.
+COPY scripts/worker-entrypoint.sh /worker-entrypoint.sh
+RUN chmod +x /worker-entrypoint.sh
+
+ENTRYPOINT ["/worker-entrypoint.sh"]

@@ -58,6 +58,38 @@ function ChecklistIcon() {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  );
+}
+
+function TasksIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="5" width="6" height="6" rx="1" />
+      <path d="m3 17 2 2 4-4" />
+      <path d="M13 6h8" />
+      <path d="M13 12h8" />
+      <path d="M13 18h8" />
+    </svg>
+  );
+}
+
+function PipelineIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="5 3 19 12 5 21 5 3" />
+    </svg>
+  );
+}
+
 function EnvelopeIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
@@ -119,6 +151,15 @@ export default function Layout() {
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-1">
         <NavLink
+          to="/search"
+          className={({ isActive }) =>
+            `sidebar-link${isActive ? ' active' : ''}`
+          }
+        >
+          <SearchIcon />
+          Search
+        </NavLink>
+        <NavLink
           to="/companies"
           className={({ isActive }) =>
             `sidebar-link${isActive ? ' active' : ''}`
@@ -162,6 +203,24 @@ export default function Layout() {
         >
           <CalendarIcon />
           Calendar
+        </NavLink>
+        <NavLink
+          to="/tasks"
+          className={({ isActive }) =>
+            `sidebar-link${isActive ? ' active' : ''}`
+          }
+        >
+          <TasksIcon />
+          Tasks
+        </NavLink>
+        <NavLink
+          to="/jobs"
+          className={({ isActive }) =>
+            `sidebar-link${isActive ? ' active' : ''}`
+          }
+        >
+          <PipelineIcon />
+          Pipeline
         </NavLink>
       </nav>
 

@@ -45,6 +45,35 @@ SUBJECT_PREFIX_RE = re.compile(
 )
 
 
+def _external_recipients(
+    from_address: str | None,
+    to_addresses: str | None,
+    cc_addresses: str | None,
+) -> set[str]:
+    """Return TO/CC addresses that are outside the sender's domain.
+
+    Excludes the sender's own address and any same-domain colleagues so that
+    internal CCs don't create false subject-based thread groupings.
+    """
+    sender_domain = ""
+    if from_address and "@" in from_address:
+        sender_domain = from_address.lower().split("@", 1)[1]
+
+    result: set[str] = set()
+    for field in (to_addresses, cc_addresses):
+        if not field:
+            continue
+        try:
+            for addr in json.loads(field):
+                if addr and "@" in addr:
+                    domain = addr.lower().split("@", 1)[1]
+                    if not sender_domain or domain != sender_domain:
+                        result.add(addr.lower())
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return result
+
+
 def normalise_subject(subject: str | None) -> str:
     if not subject:
         return ""
@@ -233,54 +262,42 @@ def _find_thread_for_email(
         winner = _merge_threads(conn, found_thread_ids, dirty_threads)
         return winner
 
-    # Fallback: subject matching within time window, requiring participant overlap
+    # Fallback: subject matching within time window, requiring external recipient overlap.
+    # We only count TO/CC addresses outside the sender's domain — this prevents
+    # internal CCs (e.g. colleagues) and the sender themselves from creating false
+    # groupings when the same person sends the same subject to different companies.
     if norm_subj:
-        # Collect participants of this email
         addr_row = conn.execute(
             "SELECT from_address, to_addresses, cc_addresses FROM emails WHERE id = ?",
             (email_id,),
         ).fetchone()
         my_addrs: set[str] = set()
         if addr_row:
-            if addr_row["from_address"]:
-                my_addrs.add(addr_row["from_address"].lower())
-            for field in ("to_addresses", "cc_addresses"):
-                val = addr_row[field]
-                if val:
-                    try:
-                        for a in json.loads(val):
-                            if a:
-                                my_addrs.add(a.lower())
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            my_addrs = _external_recipients(
+                addr_row["from_address"],
+                addr_row["to_addresses"],
+                addr_row["cc_addresses"],
+            )
 
-        # Find candidate threads with matching subject within time window
-        candidates = conn.execute(
-            """SELECT thread_id, from_address, to_addresses, cc_addresses FROM emails
-               WHERE normalised_subject = ?
-                 AND thread_id IS NOT NULL
-                 AND ABS(julianday(?) - julianday(date)) <= ?
-               ORDER BY date DESC
-               LIMIT 20""",
-            (norm_subj, email_date, SUBJECT_WINDOW_DAYS),
-        ).fetchall()
+        if my_addrs:
+            candidates = conn.execute(
+                """SELECT thread_id, from_address, to_addresses, cc_addresses FROM emails
+                   WHERE normalised_subject = ?
+                     AND thread_id IS NOT NULL
+                     AND ABS(julianday(?) - julianday(date)) <= ?
+                   ORDER BY date DESC
+                   LIMIT 20""",
+                (norm_subj, email_date, SUBJECT_WINDOW_DAYS),
+            ).fetchall()
 
-        for cand in candidates:
-            cand_addrs: set[str] = set()
-            if cand["from_address"]:
-                cand_addrs.add(cand["from_address"].lower())
-            for field in ("to_addresses", "cc_addresses"):
-                val = cand[field]
-                if val:
-                    try:
-                        for a in json.loads(val):
-                            if a:
-                                cand_addrs.add(a.lower())
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            # Require at least one participant in common
-            if my_addrs & cand_addrs:
-                return cand["thread_id"]
+            for cand in candidates:
+                cand_addrs = _external_recipients(
+                    cand["from_address"],
+                    cand["to_addresses"],
+                    cand["cc_addresses"],
+                )
+                if my_addrs & cand_addrs:
+                    return cand["thread_id"]
 
     # No match — start a new thread
     return message_id
@@ -444,21 +461,15 @@ def _build_union_find(
             msg_id = row["message_id"]
             root = uf.find(msg_id)
             if root == msg_id:  # not linked to anything yet
-                addrs: set[str] = set()
-                if row["from_address"]:
-                    addrs.add(row["from_address"].lower())
-                for field in ("to_addresses", "cc_addresses"):
-                    val = row[field]
-                    if val:
-                        try:
-                            for a in json.loads(val):
-                                if a:
-                                    addrs.add(a.lower())
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                subject_groups.setdefault(norm_subj, []).append(
-                    (msg_id, row["date"], addrs)
+                addrs = _external_recipients(
+                    row["from_address"],
+                    row["to_addresses"],
+                    row["cc_addresses"],
                 )
+                if addrs:
+                    subject_groups.setdefault(norm_subj, []).append(
+                        (msg_id, row["date"], addrs)
+                    )
         progress.update(task, advance=len(rows))
         offset += BATCH_SIZE
 

@@ -6,7 +6,8 @@ import Badge from '../components/Badge';
 import Breadcrumbs, { extendBreadcrumbs } from '../components/Breadcrumbs';
 import Markdown from '../components/Markdown';
 import CompanyInsightsTab from '../components/CompanyInsights';
-import { formatDate } from '../utils';
+import { HubSpotCompanyPanel } from '../components/HubSpotPanel';
+import { formatDate, formatDateTime } from '../utils';
 
 function HomepageModal({ companyId, onClose }: { companyId: number; onClose: () => void }) {
   const [content, setContent] = useState<string | null>(null);
@@ -147,24 +148,40 @@ function ThreadRow({ thread }: { thread: CompanyThread }) {
 
   return (
     <div className="border-b border-slate-100 last:border-0">
-      <button
-        onClick={toggle}
-        className="w-full text-left py-3 px-1 hover:bg-slate-50 transition-colors flex items-start gap-3"
-      >
-        <span className="text-slate-400 text-xs mt-1 flex-shrink-0">{expanded ? '▼' : '▶'}</span>
-        <div className="flex-1 min-w-0">
-          <div className="font-medium text-slate-900 truncate text-sm">
-            {thread.subject || '(no subject)'}
+      <div className="flex items-start gap-3 py-3 px-1 hover:bg-slate-50 transition-colors">
+        <button
+          onClick={toggle}
+          className="flex items-start gap-3 flex-1 min-w-0 text-left"
+        >
+          <span className="text-slate-400 text-xs mt-1 flex-shrink-0">{expanded ? '▼' : '▶'}</span>
+          <div className="flex-1 min-w-0">
+            <div className="font-medium text-slate-900 truncate text-sm">
+              {thread.subject || '(no subject)'}
+            </div>
+            <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5">
+              <span>{thread.email_count} email{thread.email_count !== 1 ? 's' : ''}</span>
+              {thread.first_date && <span>{formatDate(thread.first_date)} — {formatDate(thread.last_date)}</span>}
+            </div>
+            {thread.summary && !expanded && (
+              <p className="text-xs text-slate-500 mt-1 line-clamp-1">{thread.summary}</p>
+            )}
           </div>
-          <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5">
-            <span>{thread.email_count} email{thread.email_count !== 1 ? 's' : ''}</span>
-            {thread.first_date && <span>{formatDate(thread.first_date)} — {formatDate(thread.last_date)}</span>}
+        </button>
+        {thread.discussions.length > 0 && (
+          <div className="flex flex-wrap gap-1 justify-end max-w-[40%] flex-shrink-0">
+            {thread.discussions.map((d) => (
+              <Link
+                key={d.id}
+                to={`/discussions/${d.id}`}
+                title={`${d.title}${d.current_state ? ` · ${d.current_state}` : ''}`}
+                className="inline-flex items-center max-w-[14rem] px-1.5 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors"
+              >
+                <span className="truncate">{d.title}</span>
+              </Link>
+            ))}
           </div>
-          {thread.summary && !expanded && (
-            <p className="text-xs text-slate-500 mt-1 line-clamp-1">{thread.summary}</p>
-          )}
-        </div>
-      </button>
+        )}
+      </div>
       {expanded && (
         <div className="pl-7 pb-3">
           {loading ? (
@@ -197,6 +214,55 @@ function ThreadRow({ thread }: { thread: CompanyThread }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function StaleBanner({ data }: { data: CompanyDetail }) {
+  const navigate = useNavigate();
+  const [launching, setLaunching] = useState(false);
+
+  const handleUpdate = async () => {
+    if (!data.domain || launching) return;
+    setLaunching(true);
+    try {
+      const job = await api.createJob({
+        job_type: 'analyse',
+        company: data.domain,
+      });
+      navigate(`/jobs/${job.id}`);
+    } catch (err) {
+      console.error('Failed to create job:', err);
+      setLaunching(false);
+    }
+  };
+
+  const lastAnalysed = data.last_analysed_at;
+  const newCount = data.new_email_count;
+
+  return (
+    <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-4">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" />
+        <div className="text-sm text-amber-800">
+          <span className="font-medium">Analysis is out of date.</span>
+          {' '}
+          {!lastAnalysed ? (
+            <span>This company has never been analysed.</span>
+          ) : newCount > 0 ? (
+            <span>{newCount} new email{newCount !== 1 ? 's' : ''} since last analysis ({formatDateTime(lastAnalysed)}).</span>
+          ) : (
+            <span>Last analysed {formatDateTime(lastAnalysed)}.</span>
+          )}
+        </div>
+      </div>
+      <button
+        onClick={handleUpdate}
+        disabled={launching}
+        className="flex-shrink-0 px-3 py-1.5 text-sm font-medium text-amber-800 bg-amber-100 border border-amber-300 rounded-lg hover:bg-amber-200 disabled:opacity-50 transition-colors"
+      >
+        {launching ? 'Launching...' : 'Update Now'}
+      </button>
     </div>
   );
 }
@@ -260,23 +326,49 @@ export default function CompanyDetailPage() {
 
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-3xl font-bold text-slate-900">{data.name}</h1>
-        {data.domain && (
-          <p className="text-slate-500 mt-1">
-            <a
-              href={`https://${data.domain}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-blue-600 transition-colors"
-            >
-              {data.domain} ↗
-            </a>
-          </p>
-        )}
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-slate-900">{data.name}</h1>
+            {data.domain && (
+              <p className="text-slate-500 mt-1">
+                <a
+                  href={`https://${data.domain}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-blue-600 transition-colors"
+                >
+                  {data.domain} ↗
+                </a>
+              </p>
+            )}
+          </div>
+          {Array.isArray(data.sources) && data.sources.length > 0 && (
+            <div className="flex flex-wrap gap-1 shrink-0">
+              {data.sources.map((s) => (
+                <span
+                  key={s}
+                  className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border uppercase tracking-wider ${
+                    s === 'email' ? 'bg-blue-50 text-blue-700 border-blue-200'
+                    : s === 'homepage' ? 'bg-purple-50 text-purple-700 border-purple-200'
+                    : 'bg-orange-50 text-orange-700 border-orange-200'
+                  }`}
+                  title={`Data from ${s}`}
+                >
+                  {s}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
         {data.description && (
           <p className="mt-3 text-slate-700 leading-relaxed max-w-2xl">{data.description}</p>
         )}
       </div>
+
+      {/* Staleness banner */}
+      {(data.is_stale || !data.last_analysed_at) && (
+        <StaleBanner data={data} />
+      )}
 
       {/* Stats row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
@@ -324,6 +416,13 @@ export default function CompanyDetailPage() {
                   <LabelRow key={item.label} item={item} />
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* HubSpot CRM data */}
+          {data.hubspot && (
+            <div className="mb-6">
+              <HubSpotCompanyPanel data={data.hubspot} />
             </div>
           )}
 

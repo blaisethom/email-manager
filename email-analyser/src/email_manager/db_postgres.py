@@ -141,6 +141,9 @@ def translate_sql(sql: str, is_ddl: bool = False) -> str:
     # json_group_array(x) → json_agg(x)
     out = re.sub(r'json_group_array\(', 'json_agg(', out, flags=re.IGNORECASE)
 
+    # SQLite INSTR(str, substr) → PostgreSQL STRPOS(str, substr)
+    out = re.sub(r'\bINSTR\(', 'STRPOS(', out, flags=re.IGNORECASE)
+
     # SQLite MIN(a, b) / MAX(a, b) as scalar two-value functions → LEAST / GREATEST
     # Only match the two-arg form (not aggregate MIN/MAX which take one arg).
     # Use [^,)]+ for first arg to avoid matching across separate function calls.
@@ -243,14 +246,51 @@ class PostgresCursor:
         return [PostgresRow(dict(zip(cols, row))) for row in rows]
 
 
+def _is_dead_connection(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(kw in msg for kw in (
+        "connection already closed",
+        "connection is closed",
+        "cursor already closed",
+        "cursor is closed",
+        "server closed the connection",
+        "ssl connection has been closed",
+        "terminating connection",
+    ))
+
+
 class PostgresConnection:
     """Wraps a psycopg2 connection to provide sqlite3-compatible interface.
 
     Translates SQL automatically and provides dict-style row access.
     """
 
-    def __init__(self, conn: Any) -> None:
+    def __init__(self, conn: Any, url: str = "") -> None:
         self._conn = conn
+        self._url = url
+
+    def _reconnect(self) -> None:
+        import psycopg2
+        import time
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        for attempt in range(8):
+            try:
+                self._conn = psycopg2.connect(
+                    self._url,
+                    keepalives=1,
+                    keepalives_idle=60,
+                    keepalives_interval=10,
+                    keepalives_count=5,
+                )
+                self._conn.autocommit = False
+                return
+            except Exception:
+                if attempt < 7:
+                    time.sleep(min(2 ** attempt, 30))
+        raise RuntimeError(f"Could not reconnect to PostgreSQL after 8 attempts")
 
     @property
     def row_factory(self) -> Any:
@@ -261,36 +301,70 @@ class PostgresConnection:
         pass  # Ignored — we always use dict-style rows
 
     def execute(self, sql: str, params: tuple | list | dict = ()) -> PostgresCursor:
+        try:
+            return self._execute_inner(sql, params)
+        except Exception as e:
+            if self._url and _is_dead_connection(e):
+                self._reconnect()
+                return self._execute_inner(sql, params)
+            raise
+
+    def _execute_inner(self, sql: str, params: tuple | list | dict = ()) -> PostgresCursor:
         pg_sql = translate_sql(sql)
-        cursor = self._conn.cursor()
 
         # Handle named params (:name style) — convert to %(name)s
         if isinstance(params, dict):
             pg_sql = re.sub(r":(\w+)", r"%(\1)s", pg_sql)
 
+        is_insert = pg_sql.strip().upper().startswith("INSERT")
+        has_returning = "RETURNING" in pg_sql.upper()
+
+        cursor = self._conn.cursor()
+
+        if is_insert and not has_returning:
+            # Use RETURNING id to get the inserted row's id atomically from its
+            # own sequence.  lastval() is unreliable because it returns the most
+            # recently advanced sequence in the *session*, which could be from a
+            # completely different table if any other INSERT ran recently.
+            # Wrap in a savepoint so that if the table has no 'id' column (e.g.
+            # compound-PK tables like company_labels), we can fall back to a plain
+            # INSERT without the error poisoning the outer transaction.
+            pg_sql_ret = pg_sql.rstrip().rstrip(";") + " RETURNING id"
+            inserted_id = None
+            try:
+                cursor.execute("SAVEPOINT _ret_id")
+                cursor.execute(pg_sql_ret, params if params else None)
+                row = cursor.fetchone()
+                if row:
+                    inserted_id = row[0]
+                cursor.execute("RELEASE SAVEPOINT _ret_id")
+            except Exception:
+                # Fall back: roll back to the savepoint (undoing any partial effect)
+                # then retry without RETURNING.
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT _ret_id")
+                    cursor.execute("RELEASE SAVEPOINT _ret_id")
+                except Exception:
+                    self._conn.rollback()
+                    raise
+                try:
+                    cursor.execute(pg_sql, params if params else None)
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+            wrapped = PostgresCursor(cursor)
+            wrapped._lastrowid = inserted_id
+            return wrapped
+
+        # Non-INSERT or INSERT that already has RETURNING — execute as-is.
         try:
             cursor.execute(pg_sql, params if params else None)
         except Exception:
             self._conn.rollback()
             raise
 
-        wrapped = PostgresCursor(cursor)
-
-        # Try to get lastrowid for INSERT statements
-        if pg_sql.strip().upper().startswith("INSERT") and "RETURNING" not in pg_sql.upper():
-            try:
-                # Use savepoint so a failed lastval() doesn't poison the transaction
-                cursor.execute("SAVEPOINT _lastval_check")
-                cursor.execute("SELECT lastval()")
-                result = cursor.fetchone()
-                if result:
-                    wrapped._lastrowid = result[0]
-                cursor.execute("RELEASE SAVEPOINT _lastval_check")
-            except Exception:
-                cursor.execute("ROLLBACK TO SAVEPOINT _lastval_check")
-                cursor.execute("RELEASE SAVEPOINT _lastval_check")
-
-        return wrapped
+        return PostgresCursor(cursor)
 
     def executemany(self, sql: str, params_list: list) -> None:
         pg_sql = translate_sql(sql)
@@ -351,6 +425,12 @@ def get_postgres_connection(url: str) -> PostgresConnection:
             "Install it with: pip install psycopg2-binary"
         )
 
-    conn = psycopg2.connect(url)
+    conn = psycopg2.connect(
+        url,
+        keepalives=1,
+        keepalives_idle=60,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
     conn.autocommit = False
-    return PostgresConnection(conn)
+    return PostgresConnection(conn, url=url)

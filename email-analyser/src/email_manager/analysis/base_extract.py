@@ -50,6 +50,11 @@ def extract_base(conn: sqlite3.Connection, console: Console = None, limit: int |
     contacts_count = _extract_contacts(conn, console=console)
     co_email_count = _compute_co_email_stats(conn, console=console)
 
+    # Reconcile new email-source rows into the unified entity model. Cheap
+    # (single pass over companies/contacts tables) and idempotent.
+    from email_manager.entities.reconcile import backfill_all
+    backfill_all(conn)
+
     # Record this run and store the max email ID for fast skip checks
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
@@ -212,6 +217,7 @@ def _extract_companies(
 
     now = datetime.now(timezone.utc).isoformat()
     processed = 0
+    COMMIT_EVERY = 100
 
     with _make_progress(console) as progress:
         task = progress.add_task("Extracting companies", total=len(unprocessed))
@@ -266,6 +272,9 @@ def _extract_companies(
             )
             processed += 1
             progress.update(task, completed=processed)
+
+            if processed % COMMIT_EVERY == 0:
+                conn.commit()
 
     conn.commit()
     return processed
@@ -363,11 +372,15 @@ def _domain_to_company(domain: str) -> str | None:
         "com", "co", "org", "net", "edu", "gov", "ac", "mil",
         "gen", "biz", "info", "nom", "sch", "nhs",
     }
+    def _fmt(slug: str) -> str:
+        """Convert a domain slug to a display name: hyphens → spaces, title-cased."""
+        return " ".join(w.capitalize() for w in slug.split("-")) if slug else slug
+
     parts = domain.split(".")
     # For domains like fourhats.com.au: parts = [fourhats, com, au]
     # If second-to-last part is a generic SLD, take the part before it
     if len(parts) >= 3 and parts[-2].lower() in _SECOND_LEVEL:
-        return parts[-3].capitalize()
+        return _fmt(parts[-3])
     if len(parts) >= 2:
-        return parts[-2].capitalize()
+        return _fmt(parts[-2])
     return domain

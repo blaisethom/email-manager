@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,8 +17,62 @@ from email_manager.ingestion.threading import insert_email_references
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
+# System CA bundle (includes proxy MITM CA when running behind a proxy).
+_SYSTEM_CA_CERTS = "/etc/ssl/certs/ca-certificates.crt"
+
+
+def _is_connection_error(e: Exception) -> bool:
+    """Return True for transient SSL/connection errors that warrant a reconnect."""
+    msg = str(e).lower()
+    return any(kw in msg for kw in ("connection already closed", "eof", "ssl", "tls"))
+
+
+class _BearerTokenCredentials:
+    """Credentials that use a fixed bearer token.
+
+    Used when tokens are managed externally (e.g. by a proxy that swaps
+    the placeholder token for a real OAuth access token).
+    """
+
+    def __init__(self, bearer_token: str):
+        self.token = bearer_token
+        self.expiry = None
+
+    @property
+    def valid(self) -> bool:
+        return True
+
+    @property
+    def expired(self) -> bool:
+        return False
+
+    def refresh(self, request: object) -> None:
+        pass
+
+    def apply(self, headers: dict, token: str | None = None) -> None:
+        headers["Authorization"] = f"Bearer {self.token}"
+
+    def before_request(self, request: object, method: str, url: str, headers: dict) -> None:
+        self.apply(headers)
+
+
+def _build_bearer_token_service(bearer_token: str, api: str = "gmail", version: str = "v1"):
+    """Build a Google API service using a fixed bearer token."""
+    import httplib2
+    import google_auth_httplib2
+    from googleapiclient.discovery import build
+
+    creds = _BearerTokenCredentials(bearer_token)
+    http = httplib2.Http(ca_certs=_SYSTEM_CA_CERTS)
+    authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http)
+    return build(api, version, http=authed_http)
+
 
 def _get_gmail_service(config: EmailAccount, *, remote: bool = False):
+    # Bearer token path — token managed externally (e.g. proxy)
+    if config.gmail_bearer_token:
+        return _build_bearer_token_service(config.gmail_bearer_token)
+
     import json
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
@@ -151,7 +206,7 @@ def authenticate(config: EmailAccount, *, remote: bool = False) -> str:
     return profile["emailAddress"]
 
 
-def sync_emails(conn: sqlite3.Connection, config: EmailAccount, *, remote: bool = False) -> int:
+def sync_emails(conn: sqlite3.Connection, config: EmailAccount, *, remote: bool = False) -> tuple[int, int]:
     service = _get_gmail_service(config, remote=remote)
     console = Console()
     state_key = _sync_state_key(config)
@@ -174,7 +229,7 @@ def sync_emails(conn: sqlite3.Connection, config: EmailAccount, *, remote: bool 
     return _sync_full(service, conn, config, console)
 
 
-def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console: Console) -> int:
+def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console: Console) -> tuple[int, int]:
     console.print("Performing full Gmail sync...")
     state_key = _sync_state_key(config)
 
@@ -182,6 +237,7 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
     message_ids = []
     page_token = None
     labels = config.gmail_labels
+    svc = service
 
     with Progress(
         SpinnerColumn(),
@@ -196,7 +252,20 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
             if page_token:
                 kwargs["pageToken"] = page_token
 
-            result = service.users().messages().list(**kwargs).execute()
+            result = None
+            for attempt in range(3):
+                try:
+                    result = svc.users().messages().list(**kwargs).execute()
+                    break
+                except Exception as e:
+                    if _is_connection_error(e) and attempt < 2:
+                        time.sleep(2 ** attempt)
+                        try:
+                            svc = _get_gmail_service(config)
+                        except Exception:
+                            pass
+                    else:
+                        raise
             messages = result.get("messages", [])
             message_ids.extend(m["id"] for m in messages)
             progress.update(task, description=f"Listed {len(message_ids)} messages...")
@@ -207,7 +276,7 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
 
     if not message_ids:
         console.print("[dim]No messages found.[/dim]")
-        return 0
+        return 0, 0
 
     # Filter out messages already fetched (by gmail_id)
     existing = {
@@ -222,12 +291,14 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
         console.print(f"Skipping {skipped} already-fetched messages...")
     if not to_fetch:
         console.print("[dim]All messages already fetched.[/dim]")
-        return 0
+        return 0, 0
 
     # Fetch each message in raw format, committing in batches
     BATCH_SIZE = 100
     new_count = 0
+    failed_count = 0
     latest_history_id = None
+    # svc already set in the list phase above
 
     with Progress(
         SpinnerColumn(),
@@ -238,13 +309,33 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
         task = progress.add_task("Fetching messages", total=len(to_fetch))
 
         for msg_id in to_fetch:
+            msg = None
+            for attempt in range(3):
+                try:
+                    msg = (
+                        svc.users()
+                        .messages()
+                        .get(userId="me", id=msg_id, format="raw")
+                        .execute()
+                    )
+                    break
+                except Exception as e:
+                    if _is_connection_error(e) and attempt < 2:
+                        time.sleep(2 ** attempt)
+                        try:
+                            svc = _get_gmail_service(config)
+                        except Exception:
+                            pass
+                    else:
+                        progress.console.print(f"[yellow]Skipping {msg_id}: {e}[/yellow]")
+                        break
+
+            if msg is None:
+                failed_count += 1
+                progress.advance(task)
+                continue
+
             try:
-                msg = (
-                    service.users()
-                    .messages()
-                    .get(userId="me", id=msg_id, format="raw")
-                    .execute()
-                )
                 raw_bytes = base64.urlsafe_b64decode(msg["raw"])
                 label_folder = _labels_to_folder(msg.get("labelIds", []))
 
@@ -281,9 +372,9 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
                 h = msg.get("historyId")
                 if h and (latest_history_id is None or int(h) > int(latest_history_id)):
                     latest_history_id = h
-
             except Exception as e:
-                progress.console.print(f"[yellow]Skipping {msg_id}: {e}[/yellow]")
+                progress.console.print(f"[yellow]Skipping {msg_id} (parse/insert error): {e}[/yellow]")
+                failed_count += 1
 
             progress.advance(task)
 
@@ -301,45 +392,67 @@ def _sync_full(service, conn: sqlite3.Connection, config: EmailAccount, console:
         )
 
     conn.commit()
-    return new_count
+    return new_count, failed_count
 
 
 def _sync_incremental(
     service, conn: sqlite3.Connection, start_history_id: int, config: EmailAccount, console: Console
-) -> int:
+) -> tuple[int, int]:
     console.print(f"Incremental Gmail sync from historyId {start_history_id}...")
 
     # Get message IDs added since last sync
     new_message_ids = []
     page_token = None
+    page_num = 0
+    svc = service
 
-    while True:
-        kwargs = {
-            "userId": "me",
-            "startHistoryId": str(start_history_id),
-            "historyTypes": ["messageAdded"],
-        }
-        if page_token:
-            kwargs["pageToken"] = page_token
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console, transient=True) as progress:
+        task = progress.add_task("Listing history...", total=None)
+        while True:
+            kwargs = {
+                "userId": "me",
+                "startHistoryId": str(start_history_id),
+                "historyTypes": ["messageAdded"],
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
 
-        result = service.users().history().list(**kwargs).execute()
-        for record in result.get("history", []):
-            for added in record.get("messagesAdded", []):
-                new_message_ids.append(added["message"]["id"])
+            result = None
+            for attempt in range(3):
+                try:
+                    result = svc.users().history().list(**kwargs).execute()
+                    break
+                except Exception as e:
+                    if _is_connection_error(e) and attempt < 2:
+                        time.sleep(2 ** attempt)
+                        try:
+                            svc = _get_gmail_service(config)
+                        except Exception:
+                            pass
+                    else:
+                        raise
+            page_num += 1
+            for record in result.get("history", []):
+                for added in record.get("messagesAdded", []):
+                    new_message_ids.append(added["message"]["id"])
 
-        page_token = result.get("nextPageToken")
-        if not page_token:
-            break
+            progress.update(task, description=f"Listing history... page {page_num}, {len(new_message_ids)} messages so far")
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
 
     if not new_message_ids:
         console.print("[dim]No new messages.[/dim]")
-        return 0
+        return 0, 0
 
     # Deduplicate
     new_message_ids = list(dict.fromkeys(new_message_ids))
+    console.print(f"Found {len(new_message_ids)} new message(s) to fetch...")
 
     new_count = 0
+    failed_count = 0
     latest_history_id = start_history_id
+    # svc already set in the history listing phase above
 
     with Progress(
         SpinnerColumn(),
@@ -350,13 +463,33 @@ def _sync_incremental(
         task = progress.add_task("Fetching new messages", total=len(new_message_ids))
 
         for msg_id in new_message_ids:
+            msg = None
+            for attempt in range(3):
+                try:
+                    msg = (
+                        svc.users()
+                        .messages()
+                        .get(userId="me", id=msg_id, format="raw")
+                        .execute()
+                    )
+                    break
+                except Exception as e:
+                    if _is_connection_error(e) and attempt < 2:
+                        time.sleep(2 ** attempt)
+                        try:
+                            svc = _get_gmail_service(config)
+                        except Exception:
+                            pass
+                    else:
+                        progress.console.print(f"[yellow]Skipping {msg_id}: {e}[/yellow]")
+                        break
+
+            if msg is None:
+                failed_count += 1
+                progress.advance(task)
+                continue
+
             try:
-                msg = (
-                    service.users()
-                    .messages()
-                    .get(userId="me", id=msg_id, format="raw")
-                    .execute()
-                )
                 raw_bytes = base64.urlsafe_b64decode(msg["raw"])
                 label_folder = _labels_to_folder(msg.get("labelIds", []))
 
@@ -392,9 +525,9 @@ def _sync_incremental(
                 h = msg.get("historyId")
                 if h and int(h) > int(latest_history_id):
                     latest_history_id = int(h)
-
             except Exception as e:
-                progress.console.print(f"[yellow]Skipping {msg_id}: {e}[/yellow]")
+                progress.console.print(f"[yellow]Skipping {msg_id} (parse/insert error): {e}[/yellow]")
+                failed_count += 1
 
             progress.advance(task)
 
@@ -408,7 +541,7 @@ def _sync_incremental(
     )
     conn.commit()
 
-    return new_count
+    return new_count, failed_count
 
 
 def trash_messages(

@@ -12,7 +12,7 @@ def _log(msg: str) -> None:
     """Print migration/schema messages to stderr so they don't pollute stdout (e.g. --csv)."""
     print(msg, file=sys.stderr)
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 38
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -34,13 +34,15 @@ CREATE TABLE IF NOT EXISTS emails (
     has_attachments INTEGER DEFAULT 0,
     fetched_at      TEXT NOT NULL,
     gmail_id        TEXT,
-    account_name    TEXT
+    account_name    TEXT,
+    from_domain     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
 CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date);
 CREATE INDEX IF NOT EXISTS idx_emails_from ON emails(from_address);
 CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
+CREATE INDEX IF NOT EXISTS idx_emails_from_domain ON emails(from_domain);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     folder          TEXT PRIMARY KEY,
@@ -409,6 +411,174 @@ CREATE TABLE IF NOT EXISTS change_journal (
 CREATE INDEX IF NOT EXISTS idx_change_journal_entity ON change_journal(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_change_journal_unprocessed ON change_journal(processed_at) WHERE processed_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS hubspot_companies (
+    id              TEXT PRIMARY KEY,
+    name            TEXT,
+    domain          TEXT,
+    website         TEXT,
+    industry        TEXT,
+    description     TEXT,
+    about_us        TEXT,
+    city            TEXT,
+    state           TEXT,
+    country         TEXT,
+    phone           TEXT,
+    num_employees   INTEGER,
+    annual_revenue  REAL,
+    lifecycle_stage TEXT,
+    type            TEXT,
+    owner_id        TEXT,
+    founded_year    TEXT,
+    linkedin_url    TEXT,
+    twitter_handle  TEXT,
+    hs_created_at   TEXT,
+    hs_updated_at   TEXT,
+    hs_url          TEXT,
+    properties_json TEXT,
+    fetched_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_hubspot_companies_domain ON hubspot_companies(domain);
+CREATE INDEX IF NOT EXISTS idx_hubspot_companies_updated ON hubspot_companies(hs_updated_at);
+
+CREATE TABLE IF NOT EXISTS hubspot_contacts (
+    id              TEXT PRIMARY KEY,
+    email           TEXT,
+    firstname       TEXT,
+    lastname        TEXT,
+    company_name    TEXT,
+    job_title       TEXT,
+    phone           TEXT,
+    city            TEXT,
+    state           TEXT,
+    country         TEXT,
+    address         TEXT,
+    lifecycle_stage TEXT,
+    lead_status     TEXT,
+    owner_id        TEXT,
+    twitter_handle  TEXT,
+    linkedin_url    TEXT,
+    website         TEXT,
+    industry        TEXT,
+    salutation      TEXT,
+    hs_created_at   TEXT,
+    hs_updated_at   TEXT,
+    hs_url          TEXT,
+    properties_json TEXT,
+    fetched_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_hubspot_contacts_email ON hubspot_contacts(email);
+CREATE INDEX IF NOT EXISTS idx_hubspot_contacts_updated ON hubspot_contacts(hs_updated_at);
+
+CREATE TABLE IF NOT EXISTS hubspot_company_contacts (
+    company_id      TEXT NOT NULL,
+    contact_id      TEXT NOT NULL,
+    PRIMARY KEY (company_id, contact_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hubspot_cc_contact ON hubspot_company_contacts(contact_id);
+
+CREATE TABLE IF NOT EXISTS hubspot_sync_state (
+    object_type     TEXT PRIMARY KEY,
+    last_sync_at    TEXT NOT NULL,
+    last_full_sync_at TEXT,
+    record_count    INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS hubspot_tasks (
+    id                      TEXT PRIMARY KEY,
+    subject                 TEXT,
+    body                    TEXT,
+    status                  TEXT,
+    type                    TEXT,
+    priority                TEXT,
+    due_date                TEXT,
+    completed_at            TEXT,
+    owner_id                TEXT,
+    associated_contact_ids  TEXT,
+    associated_company_ids  TEXT,
+    hs_url                  TEXT,
+    properties_json         TEXT,
+    fetched_at              TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_hubspot_tasks_status ON hubspot_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_hubspot_tasks_owner ON hubspot_tasks(owner_id);
+CREATE INDEX IF NOT EXISTS idx_hubspot_tasks_due ON hubspot_tasks(due_date);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id              INTEGER PRIMARY KEY,
+    canonical_name  TEXT,
+    canonical_domain TEXT,
+    notes           TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_organizations_domain ON organizations(canonical_domain);
+
+CREATE TABLE IF NOT EXISTS people (
+    id              INTEGER PRIMARY KEY,
+    canonical_name  TEXT,
+    canonical_email TEXT,
+    notes           TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_people_email ON people(canonical_email);
+
+CREATE TABLE IF NOT EXISTS organization_identities (
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    source          TEXT NOT NULL,
+    source_id       TEXT NOT NULL,
+    match_key       TEXT,
+    confidence      REAL DEFAULT 1.0,
+    is_manual       INTEGER DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (source, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_identities_org ON organization_identities(organization_id);
+CREATE INDEX IF NOT EXISTS idx_org_identities_match ON organization_identities(match_key);
+
+CREATE TABLE IF NOT EXISTS person_identities (
+    person_id       INTEGER NOT NULL REFERENCES people(id),
+    source          TEXT NOT NULL,
+    source_id       TEXT NOT NULL,
+    match_key       TEXT,
+    confidence      REAL DEFAULT 1.0,
+    is_manual       INTEGER DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (source, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_person_identities_person ON person_identities(person_id);
+CREATE INDEX IF NOT EXISTS idx_person_identities_match ON person_identities(match_key);
+
+CREATE TABLE IF NOT EXISTS field_overrides (
+    entity_type     TEXT NOT NULL,
+    entity_id       INTEGER NOT NULL,
+    field           TEXT NOT NULL,
+    value           TEXT,
+    set_by          TEXT,
+    set_at          TEXT NOT NULL,
+    PRIMARY KEY (entity_type, entity_id, field)
+);
+
+CREATE TABLE IF NOT EXISTS entity_merges (
+    id              INTEGER PRIMARY KEY,
+    entity_type     TEXT NOT NULL,
+    source_id       INTEGER NOT NULL,
+    target_id       INTEGER NOT NULL,
+    performed_at    TEXT NOT NULL,
+    performed_by    TEXT,
+    notes           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_merges_target ON entity_merges(entity_type, target_id);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -527,6 +697,541 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v23(conn)
     if current_version < 24:
         _migrate_to_v24(conn)
+    if current_version < 25:
+        _migrate_to_v25(conn)
+    if current_version < 26:
+        _migrate_to_v26(conn)
+    if current_version < 27:
+        _migrate_to_v27(conn)
+    if current_version < 28:
+        _migrate_to_v28(conn)
+    if current_version < 29:
+        _migrate_to_v29(conn)
+    if current_version < 30:
+        _migrate_to_v30(conn)
+    if current_version < 31:
+        _migrate_to_v31(conn)
+    if current_version < 32:
+        _migrate_to_v32(conn)
+    if current_version < 33:
+        _migrate_to_v33(conn)
+    if current_version < 34:
+        _migrate_to_v34(conn)
+    if current_version < 35:
+        _migrate_to_v35(conn)
+    if current_version < 36:
+        _migrate_to_v36(conn)
+    if current_version < 37:
+        _migrate_to_v37(conn)
+    if current_version < 38:
+        _migrate_to_v38(conn)
+
+
+def _migrate_to_v38(conn: sqlite3.Connection) -> None:
+    """Migration v37 -> v38: add hubspot_notes and discussion_notes tables."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hubspot_notes (
+            id                      TEXT PRIMARY KEY,
+            body                    TEXT,
+            created_at              TEXT,
+            updated_at              TEXT,
+            owner_id                TEXT,
+            associated_contact_ids  TEXT,
+            associated_company_ids  TEXT,
+            associated_deal_ids     TEXT,
+            hs_url                  TEXT,
+            properties_json         TEXT,
+            fetched_at              TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_notes_created ON hubspot_notes(created_at);
+        CREATE INDEX IF NOT EXISTS idx_hubspot_notes_owner   ON hubspot_notes(owner_id);
+
+        CREATE TABLE IF NOT EXISTS discussion_notes (
+            discussion_id  INTEGER NOT NULL REFERENCES discussions(id),
+            note_id        TEXT NOT NULL,
+            PRIMARY KEY (discussion_id, note_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_discussion_notes_note ON discussion_notes(note_id);
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v38] hubspot_notes and discussion_notes tables added")
+
+
+def _migrate_to_v37(conn: sqlite3.Connection) -> None:
+    """Migration v36 -> v37: add HubSpot email-deal association tables."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hubspot_email_id_map (
+            hs_id      TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_email_id_map_msg ON hubspot_email_id_map(message_id);
+
+        CREATE TABLE IF NOT EXISTS hubspot_email_deal_links (
+            hs_id   TEXT NOT NULL,
+            deal_id TEXT NOT NULL,
+            PRIMARY KEY (hs_id, deal_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_edl_deal ON hubspot_email_deal_links(deal_id);
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v37] hubspot_email_id_map and hubspot_email_deal_links tables added")
+
+
+def _migrate_to_v36(conn: sqlite3.Connection) -> None:
+    """Migration v35 -> v36: add hubspot_deals table and source_type/source_id to discussions."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hubspot_deals (
+            id              TEXT PRIMARY KEY,
+            name            TEXT,
+            stage           TEXT,
+            pipeline        TEXT,
+            amount          REAL,
+            close_date      TEXT,
+            hs_created_at   TEXT,
+            hs_updated_at   TEXT,
+            hs_url          TEXT,
+            properties_json TEXT,
+            fetched_at      TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_deals_stage ON hubspot_deals(stage);
+        CREATE INDEX IF NOT EXISTS idx_hubspot_deals_updated ON hubspot_deals(hs_updated_at);
+
+        CREATE TABLE IF NOT EXISTS hubspot_deal_companies (
+            deal_id         TEXT NOT NULL REFERENCES hubspot_deals(id),
+            company_id      TEXT NOT NULL,
+            PRIMARY KEY (deal_id, company_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_dc_company ON hubspot_deal_companies(company_id);
+    """)
+    # Add source_type / source_id to discussions for tracking deal-sourced rows
+    cols = _get_column_names(conn, "discussions")
+    if "source_type" not in cols:
+        conn.execute("ALTER TABLE discussions ADD COLUMN source_type TEXT")
+    if "source_id" not in cols:
+        conn.execute("ALTER TABLE discussions ADD COLUMN source_id TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v36] hubspot_deals table added; source_type/source_id added to discussions")
+
+
+def _migrate_to_v35(conn: sqlite3.Connection) -> None:
+    """Migration v34 -> v35: add hubspot_task_threads table for task-email enrichment."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hubspot_task_threads (
+            task_id         TEXT NOT NULL,
+            thread_id       TEXT NOT NULL,
+            contact_email   TEXT NOT NULL,
+            PRIMARY KEY (task_id, thread_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_task_threads_task   ON hubspot_task_threads(task_id);
+        CREATE INDEX IF NOT EXISTS idx_hubspot_task_threads_thread ON hubspot_task_threads(thread_id);
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v35] hubspot_task_threads table added")
+
+
+def _migrate_to_v34(conn: sqlite3.Connection) -> None:
+    """Migration v33 -> v34: add hubspot_tasks table for CRM task sync."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hubspot_tasks (
+            id                      TEXT PRIMARY KEY,
+            subject                 TEXT,
+            body                    TEXT,
+            status                  TEXT,
+            type                    TEXT,
+            priority                TEXT,
+            due_date                TEXT,
+            completed_at            TEXT,
+            owner_id                TEXT,
+            associated_contact_ids  TEXT,
+            associated_company_ids  TEXT,
+            hs_url                  TEXT,
+            properties_json         TEXT,
+            fetched_at              TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_tasks_status ON hubspot_tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_hubspot_tasks_owner ON hubspot_tasks(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_hubspot_tasks_due ON hubspot_tasks(due_date);
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v34] hubspot_tasks table added")
+
+
+def _migrate_to_v33(conn: sqlite3.Connection) -> None:
+    """Migration v32 -> v33: add from_domain column + index.
+
+    from_domain stores the part of from_address after '@', enabling fast equality
+    lookups by sender domain instead of a full-table LIKE '%@domain%' scan.
+    to_addresses/cc_addresses are not indexed: they are multi-value text fields
+    that exceed Postgres's B-tree size limit and cannot benefit from LIKE anyway.
+    """
+    cols = _get_column_names(conn, "emails")
+    if "from_domain" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN from_domain TEXT")
+        conn.commit()
+        conn.execute("""
+            UPDATE emails
+            SET from_domain = LOWER(SUBSTR(from_address, INSTR(from_address, '@') + 1))
+            WHERE from_address LIKE '%@%'
+        """)
+        conn.commit()
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_from_domain ON emails(from_domain)")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v33] from_domain column + email address indexes added")
+
+
+def _migrate_to_v32(conn: sqlite3.Connection) -> None:
+    """Migration v31 -> v32: add hs_url to hubspot_companies and hubspot_contacts.
+
+    HubSpot returns a per-record `url` field on each object. We now store it
+    so the UI can deep-link to the right portal. New columns only — sync
+    populates them on next run; existing rows are backfilled lazily by
+    `email_manager.integrations.hubspot.backfill_urls`, called automatically
+    from `hubspot sync`.
+    """
+    # NB: each iteration of `_get_column_names` does a `PRAGMA table_info`
+    # which raises on Postgres; PostgresConnection.execute rolls back on
+    # exception, killing any pending DDL. Commit between iterations so the
+    # first ALTER is durable before the second PRAGMA probes.
+    for table in ("hubspot_companies", "hubspot_contacts"):
+        cols = _get_column_names(conn, table)
+        if "hs_url" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN hs_url TEXT")
+            conn.commit()
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v32] hs_url columns added to hubspot_companies and hubspot_contacts")
+
+
+def _migrate_to_v31(conn: sqlite3.Connection) -> None:
+    """Migration v30 -> v31: add unified entity model.
+
+    Introduces `organizations` and `people` as abstract entity tables, plus
+    `organization_identities` and `person_identities` linking each entity to
+    one or more source rows (email, homepage, hubspot, future linkedin, ...).
+    `field_overrides` lets users hand-edit any field on the unified view;
+    `entity_merges` records manual merges for audit/undo.
+
+    Source tables (`companies`, `contacts`, `hubspot_companies`, etc.) are
+    left untouched — the unified view is computed from identities + overrides.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS organizations (
+            id              INTEGER PRIMARY KEY,
+            canonical_name  TEXT,
+            canonical_domain TEXT,
+            notes           TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_organizations_domain ON organizations(canonical_domain);
+
+        CREATE TABLE IF NOT EXISTS people (
+            id              INTEGER PRIMARY KEY,
+            canonical_name  TEXT,
+            canonical_email TEXT,
+            notes           TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_people_email ON people(canonical_email);
+
+        CREATE TABLE IF NOT EXISTS organization_identities (
+            organization_id INTEGER NOT NULL REFERENCES organizations(id),
+            source          TEXT NOT NULL,
+            source_id       TEXT NOT NULL,
+            match_key       TEXT,
+            confidence      REAL DEFAULT 1.0,
+            is_manual       INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            PRIMARY KEY (source, source_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_org_identities_org ON organization_identities(organization_id);
+        CREATE INDEX IF NOT EXISTS idx_org_identities_match ON organization_identities(match_key);
+
+        CREATE TABLE IF NOT EXISTS person_identities (
+            person_id       INTEGER NOT NULL REFERENCES people(id),
+            source          TEXT NOT NULL,
+            source_id       TEXT NOT NULL,
+            match_key       TEXT,
+            confidence      REAL DEFAULT 1.0,
+            is_manual       INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            PRIMARY KEY (source, source_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_person_identities_person ON person_identities(person_id);
+        CREATE INDEX IF NOT EXISTS idx_person_identities_match ON person_identities(match_key);
+
+        CREATE TABLE IF NOT EXISTS field_overrides (
+            entity_type     TEXT NOT NULL,
+            entity_id       INTEGER NOT NULL,
+            field           TEXT NOT NULL,
+            value           TEXT,
+            set_by          TEXT,
+            set_at          TEXT NOT NULL,
+            PRIMARY KEY (entity_type, entity_id, field)
+        );
+
+        CREATE TABLE IF NOT EXISTS entity_merges (
+            id              INTEGER PRIMARY KEY,
+            entity_type     TEXT NOT NULL,
+            source_id       INTEGER NOT NULL,
+            target_id       INTEGER NOT NULL,
+            performed_at    TEXT NOT NULL,
+            performed_by    TEXT,
+            notes           TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_merges_target ON entity_merges(entity_type, target_id);
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v31] entity model: organizations, people, *_identities, field_overrides, entity_merges")
+
+
+def _migrate_to_v30(conn: sqlite3.Connection) -> None:
+    """Migration v29 -> v30: add hubspot_* tables for CRM ingestion.
+
+    Companies and contacts from HubSpot land in dedicated tables (rather than
+    merging into the email-derived companies/contacts) so each source keeps
+    its own provenance and field semantics. Domain/email columns indexed for
+    later cross-source joins.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hubspot_companies (
+            id              TEXT PRIMARY KEY,
+            name            TEXT,
+            domain          TEXT,
+            website         TEXT,
+            industry        TEXT,
+            description     TEXT,
+            about_us        TEXT,
+            city            TEXT,
+            state           TEXT,
+            country         TEXT,
+            phone           TEXT,
+            num_employees   INTEGER,
+            annual_revenue  REAL,
+            lifecycle_stage TEXT,
+            type            TEXT,
+            owner_id        TEXT,
+            founded_year    TEXT,
+            linkedin_url    TEXT,
+            twitter_handle  TEXT,
+            hs_created_at   TEXT,
+            hs_updated_at   TEXT,
+            properties_json TEXT,
+            fetched_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_companies_domain ON hubspot_companies(domain);
+        CREATE INDEX IF NOT EXISTS idx_hubspot_companies_updated ON hubspot_companies(hs_updated_at);
+
+        CREATE TABLE IF NOT EXISTS hubspot_contacts (
+            id              TEXT PRIMARY KEY,
+            email           TEXT,
+            firstname       TEXT,
+            lastname        TEXT,
+            company_name    TEXT,
+            job_title       TEXT,
+            phone           TEXT,
+            city            TEXT,
+            state           TEXT,
+            country         TEXT,
+            address         TEXT,
+            lifecycle_stage TEXT,
+            lead_status     TEXT,
+            owner_id        TEXT,
+            twitter_handle  TEXT,
+            linkedin_url    TEXT,
+            website         TEXT,
+            industry        TEXT,
+            salutation      TEXT,
+            hs_created_at   TEXT,
+            hs_updated_at   TEXT,
+            properties_json TEXT,
+            fetched_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_contacts_email ON hubspot_contacts(email);
+        CREATE INDEX IF NOT EXISTS idx_hubspot_contacts_updated ON hubspot_contacts(hs_updated_at);
+
+        CREATE TABLE IF NOT EXISTS hubspot_company_contacts (
+            company_id      TEXT NOT NULL,
+            contact_id      TEXT NOT NULL,
+            PRIMARY KEY (company_id, contact_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hubspot_cc_contact ON hubspot_company_contacts(contact_id);
+
+        CREATE TABLE IF NOT EXISTS hubspot_sync_state (
+            object_type     TEXT PRIMARY KEY,
+            last_sync_at    TEXT NOT NULL,
+            last_full_sync_at TEXT,
+            record_count    INTEGER DEFAULT 0
+        );
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v30] hubspot_companies, hubspot_contacts, hubspot_company_contacts, hubspot_sync_state tables created")
+
+
+def _migrate_to_v29(conn: sqlite3.Connection) -> None:
+    """Migration v28 -> v29: add discussion_search_docs and discussion_embeddings.
+
+    Discussions become a first-class search primitive, separate from threads. This
+    means (a) thread embeddings no longer invalidate when a discussion summary
+    evolves, (b) discussions have their own retrieval path, (c) discussion
+    title/summary are removed from thread doc_text (invalidating existing thread
+    hashes — re-embed required on next build_search_index).
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS discussion_search_docs (
+            discussion_id   INTEGER PRIMARY KEY,
+            doc_text        TEXT NOT NULL,
+            doc_hash        TEXT,
+            company_domain  TEXT,
+            category        TEXT,
+            current_state   TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dsd_company ON discussion_search_docs(company_domain)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dsd_category ON discussion_search_docs(category)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS discussion_embeddings (
+            discussion_id   INTEGER NOT NULL,
+            model_name      TEXT NOT NULL,
+            doc_hash        TEXT,
+            created_at      TEXT NOT NULL,
+            PRIMARY KEY (discussion_id, model_name)
+        )
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v29] discussion_search_docs and discussion_embeddings tables created")
+
+
+def _migrate_to_v28(conn: sqlite3.Connection) -> None:
+    """Migration v27 -> v28: add doc_hash to thread_embeddings for freshness tracking.
+
+    Backfills existing rows from thread_search_docs so the existing embeddings
+    are treated as up to date. Rows added after migration (e.g. by an in-flight
+    embedding run using pre-migration code) will have NULL doc_hash and must be
+    re-backfilled with the same UPDATE afterwards.
+    """
+    cols = _get_column_names(conn, "thread_embeddings")
+    if "doc_hash" not in cols:
+        conn.execute("ALTER TABLE thread_embeddings ADD COLUMN doc_hash TEXT")
+    conn.execute(
+        """UPDATE thread_embeddings SET doc_hash = (
+               SELECT tsd.doc_hash FROM thread_search_docs tsd
+               WHERE tsd.thread_id = thread_embeddings.thread_id
+           )
+           WHERE doc_hash IS NULL"""
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v28] doc_hash column added to thread_embeddings; backfilled from thread_search_docs")
+
+
+def _migrate_to_v27(conn: sqlite3.Connection) -> None:
+    """Migration v26 -> v27: add outreach_score to thread_search_docs for personal-frequency ranking."""
+    cols = _get_column_names(conn, "thread_search_docs")
+    if "outreach_score" not in cols:
+        conn.execute("ALTER TABLE thread_search_docs ADD COLUMN outreach_score REAL DEFAULT 0")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v27] outreach_score column added to thread_search_docs")
+
+
+def _migrate_to_v26(conn: sqlite3.Connection) -> None:
+    """Migration v25 -> v26: add search index and embedding tables."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS thread_search_docs (
+            thread_id       TEXT PRIMARY KEY,
+            doc_text        TEXT NOT NULL,
+            company_domain  TEXT,
+            is_important    INTEGER DEFAULT 0,
+            outreach_score  REAL DEFAULT 0,
+            doc_hash        TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tsd_company ON thread_search_docs(company_domain)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS thread_embeddings (
+            thread_id       TEXT NOT NULL,
+            model_name      TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            PRIMARY KEY (thread_id, model_name)
+        )
+    """)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v26] thread_search_docs and thread_embeddings tables created")
+
+
+def _migrate_to_v25(conn: sqlite3.Connection) -> None:
+    """Migration v24 -> v25: add pipeline_jobs table for web-based job management."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pipeline_jobs (
+            id              INTEGER PRIMARY KEY,
+            job_type        TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'queued',
+            config_json     TEXT NOT NULL,
+            pid             INTEGER,
+            started_at      TEXT,
+            completed_at    TEXT,
+            created_at      TEXT NOT NULL,
+            exit_code       INTEGER,
+            error_message   TEXT,
+            current_stage   TEXT,
+            progress_done   INTEGER DEFAULT 0,
+            progress_total  INTEGER DEFAULT 0,
+            current_company TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status ON pipeline_jobs(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_created ON pipeline_jobs(created_at)")
+    # Add staleness_status column to companies for pre-computed staleness
+    cols = _get_column_names(conn, "companies")
+    if "staleness_status" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN staleness_status TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+    )
+    conn.commit()
+    _log("  [migration v25] pipeline_jobs table created, staleness_status column added")
 
 
 def _migrate_to_v24(conn: sqlite3.Connection) -> None:

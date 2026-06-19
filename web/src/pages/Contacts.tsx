@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
-import type { Contact } from '../types';
+import type { Person } from '../types';
 import SearchBar from '../components/SearchBar';
 import Pagination from '../components/Pagination';
 import EmptyState from '../components/EmptyState';
@@ -9,17 +9,40 @@ import { formatDate } from '../utils';
 
 const LIMIT = 25;
 
+const SOURCE_STYLES: Record<'email' | 'hubspot', string> = {
+  email: 'bg-blue-50 text-blue-700 border-blue-200',
+  hubspot: 'bg-orange-50 text-orange-700 border-orange-200',
+};
+
+function SourceBadges({ sources }: { sources: Array<'email' | 'hubspot'> }) {
+  if (!sources?.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {sources.map((s) => (
+        <span
+          key={s}
+          className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border uppercase tracking-wider ${SOURCE_STYLES[s]}`}
+          title={`Data from ${s}`}
+        >
+          {s}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export default function ContactsPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const [items, setItems] = useState<Contact[]>([]);
+  const [items, setItems] = useState<Person[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const q = searchParams.get('q') ?? '';
   const company = searchParams.get('company') ?? '';
+  const source = searchParams.get('source') ?? '';
   const sort = searchParams.get('sort') ?? 'email_count';
   const order = searchParams.get('order') ?? 'desc';
   const page = parseInt(searchParams.get('page') ?? '1', 10);
@@ -28,14 +51,14 @@ export default function ContactsPage() {
     setLoading(true);
     setError(null);
     api
-      .getContacts({ q, company, sort, order, page, limit: LIMIT })
+      .getPeople({ q, company, source, sort, order, page, limit: LIMIT })
       .then((data) => {
         setItems(data.items);
         setTotal(data.total);
       })
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [q, company, sort, order, page]);
+  }, [q, company, source, sort, order, page]);
 
   useEffect(() => {
     fetchData();
@@ -82,6 +105,17 @@ export default function ContactsPage() {
           spellCheck={false}
           autoComplete="off"
         />
+
+        <select
+          value={source}
+          onChange={(e) => updateParam('source', e.target.value)}
+          className="filter-input"
+        >
+          <option value="">All sources</option>
+          <option value="email_only">Email only</option>
+          <option value="hubspot_only">HubSpot only</option>
+          <option value="both">In both</option>
+        </select>
 
         <select
           value={`${sort}:${order}`}
@@ -136,8 +170,11 @@ export default function ContactsPage() {
                 <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Name / Email
                 </th>
+                <th className="hidden lg:table-cell text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  Sources
+                </th>
                 <th className="hidden sm:table-cell text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                  Company
+                  Company / Title
                 </th>
                 <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Emails
@@ -154,37 +191,50 @@ export default function ContactsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {items.map((contact) => (
-                <tr
-                  key={contact.id}
-                  onClick={() => navigate(`/contacts/${encodeURIComponent(contact.email)}`, { state: { breadcrumbs: [{ label: 'Contacts', path: '/contacts' }] } })}
-                  className="table-row-clickable"
-                >
-                  <td className="px-6 py-4">
-                    {contact.name && (
-                      <div className="font-medium text-slate-900">{contact.name}</div>
-                    )}
-                    <div className={`text-slate-500 ${contact.name ? 'text-xs mt-0.5' : 'font-medium'}`}>
-                      {contact.email}
-                    </div>
-                  </td>
-                  <td className="hidden sm:table-cell px-6 py-4 text-slate-600">
-                    {contact.company ?? <span className="text-slate-300">—</span>}
-                  </td>
-                  <td className="px-6 py-4 text-right font-medium text-slate-700">
-                    {contact.email_count.toLocaleString()}
-                  </td>
-                  <td className="hidden md:table-cell px-6 py-4 text-right text-slate-500">
-                    {contact.sent_count.toLocaleString()}
-                  </td>
-                  <td className="hidden md:table-cell px-6 py-4 text-right text-slate-500">
-                    {contact.received_count.toLocaleString()}
-                  </td>
-                  <td className="hidden sm:table-cell px-6 py-4 text-right text-slate-500">
-                    {formatDate(contact.last_seen)}
-                  </td>
-                </tr>
-              ))}
+              {items.map((person) => {
+                // Email-backed people route to legacy /contacts/:email; HubSpot-only
+                // people route to /people/:id (no email key to use).
+                const target = person.email
+                  ? `/contacts/${encodeURIComponent(person.email)}`
+                  : `/people/${person.person_id}`;
+                return (
+                  <tr
+                    key={person.person_id}
+                    onClick={() => navigate(target, { state: { breadcrumbs: [{ label: 'Contacts', path: '/contacts' }] } })}
+                    className="table-row-clickable"
+                  >
+                    <td className="px-6 py-4">
+                      {person.name && (
+                        <div className="font-medium text-slate-900">{person.name}</div>
+                      )}
+                      <div className={`text-slate-500 ${person.name ? 'text-xs mt-0.5' : 'font-medium'}`}>
+                        {person.email ?? <span className="text-slate-300 italic">no email</span>}
+                      </div>
+                    </td>
+                    <td className="hidden lg:table-cell px-6 py-4">
+                      <SourceBadges sources={person.sources} />
+                    </td>
+                    <td className="hidden sm:table-cell px-6 py-4 text-slate-600">
+                      {person.company_name ?? <span className="text-slate-300">—</span>}
+                      {person.job_title && (
+                        <div className="text-xs text-slate-400 mt-0.5">{person.job_title}</div>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 text-right font-medium text-slate-700">
+                      {person.email_count.toLocaleString()}
+                    </td>
+                    <td className="hidden md:table-cell px-6 py-4 text-right text-slate-500">
+                      {person.sent_count.toLocaleString()}
+                    </td>
+                    <td className="hidden md:table-cell px-6 py-4 text-right text-slate-500">
+                      {person.received_count.toLocaleString()}
+                    </td>
+                    <td className="hidden sm:table-cell px-6 py-4 text-right text-slate-500">
+                      {formatDate(person.last_seen)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
 

@@ -1,0 +1,61 @@
+# Prefect deployment configuration for the email-manager continuous pipeline.
+#
+# Deploy all flows:
+#   cd email-analyser
+#   prefect deploy --all
+#
+# Or deploy a single flow:
+#   prefect deploy --name ingest
+
+name: email-manager
+prefect-version: "3.0.0"
+
+# No build/push steps — the worker runs on the same host as the codebase.
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app/email-analyser
+
+deployments:
+  # ── Ingest: pull raw data from all sources ──────────────────────────────────
+  - name: ingest
+    entrypoint: src/email_manager/scheduler/flows.py:ingest_flow
+    description: "Pull emails, calendar events, and HubSpot data"
+    work_pool:
+      name: email-manager-pool
+    schedules:
+      - cron: "*/10 * * * *"
+        timezone: "UTC"
+        active: true
+
+  # ── Enrich: build threads, labels, search index ─────────────────────────────
+  - name: enrich
+    entrypoint: src/email_manager/scheduler/flows.py:enrich_flow
+    description: "Extract threads, enrich company data, rebuild search index"
+    work_pool:
+      name: email-manager-pool
+    schedules:
+      - cron: "*/30 * * * *"
+        timezone: "UTC"
+        active: true
+
+  # ── AI analysis: interpret dirty companies ───────────────────────────────────
+  - name: ai-analysis
+    entrypoint: src/email_manager/scheduler/flows.py:ai_flow
+    description: "Run AI pipeline stages for companies with new data"
+    work_pool:
+      name: email-manager-pool
+    schedules:
+      - cron: "5 * * * *"   # :05 past every hour, offset from enrich
+        timezone: "UTC"
+        active: true
+
+  # ── Full run: one-shot bootstrap / manual refresh ───────────────────────────
+  - name: full-run
+    entrypoint: src/email_manager/scheduler/flows.py:full_run_flow
+    description: "Ingest → Enrich → AI in sequence (manual trigger only)"
+    work_pool:
+      name: email-manager-pool
+    schedules: []   # No schedule — trigger manually

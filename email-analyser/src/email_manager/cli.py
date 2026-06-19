@@ -93,6 +93,9 @@ def auth(ctx: click.Context, account: str | None, remote: bool, calendar: bool) 
 
     for acct in gmail_accounts:
         label = acct.name or "gmail"
+        if acct.gmail_bearer_token:
+            console.print(f"\n[bold]{label}[/bold] — using external bearer token (no local auth needed)")
+            continue
         console.print(f"\n[bold]Authenticating: {label}[/bold]")
         if calendar:
             from email_manager.ingestion.calendar_client import _get_calendar_service
@@ -102,6 +105,94 @@ def auth(ctx: click.Context, account: str | None, remote: bool, calendar: bool) 
         else:
             email_addr = authenticate(acct, remote=remote)
             console.print(f"[green]Token saved for {label} ({email_addr})[/green]")
+
+
+@cli.command(name="prokura-setup")
+@click.pass_context
+def prokura_setup(ctx: click.Context) -> None:
+    """Discover Gmail accounts from Prokura proxy and write accounts.json."""
+    import json
+    import urllib.request
+    from pathlib import Path
+
+    config: Config = ctx.obj["config"]
+    console = Console()
+    accounts_file = config.accounts_path if config.accounts_path.is_absolute() else Path.cwd() / config.accounts_path
+
+    # Fetch resource info from the proxy
+    console.print("Querying Prokura proxy for Gmail resources...")
+    try:
+        req = urllib.request.Request("https://agent-proxy/functions/v1/agent-info")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        console.print(f"[red]Could not reach Prokura proxy: {e}[/red]")
+        raise SystemExit(1)
+
+    # Find Gmail API resources and resolve email addresses
+    from email_manager.ingestion.gmail_client import _build_bearer_token_service
+
+    gmail_accounts: list[dict] = []
+    seen_emails: set[str] = set()
+
+    for svc in data.get("services", []):
+        if svc.get("credential_type") != "oauth2" or "gmail" not in svc.get("domain_pattern", ""):
+            continue
+        bearer_key = svc.get("bearer_token_key", "")
+        if not bearer_key:
+            continue
+
+        # Resolve email from agent-info metadata or by calling the API
+        email = ""
+        for field in ("account_email", "connection_name"):
+            val = svc.get(field, "") or ""
+            if "@" in val:
+                email = val.lower()
+                break
+        if not email:
+            console.print(f"  Resolving email for {svc.get('service_name', bearer_key)}...")
+            try:
+                service = _build_bearer_token_service(bearer_key)
+                profile = service.users().getProfile(userId="me").execute()
+                email = profile["emailAddress"].lower()
+            except Exception as e:
+                console.print(f"  [yellow]Could not resolve email for {bearer_key}: {e} — skipping[/yellow]")
+                continue
+
+        if email in seen_emails:
+            console.print(f"  [dim]Skipping duplicate token for {email}[/dim]")
+            continue
+        seen_emails.add(email)
+
+        gmail_accounts.append({
+            "name": email,
+            "backend": "gmail",
+            "gmail_bearer_token": bearer_key,
+            "gmail_labels": [],
+        })
+        console.print(f"  [green]Found: {email} → {bearer_key}[/green]")
+
+    if not gmail_accounts:
+        console.print("[yellow]No Gmail API resources found in Prokura.[/yellow]")
+        raise SystemExit(1)
+
+    # Merge with existing accounts.json (preserve non-Gmail accounts)
+    existing: list[dict] = []
+    if accounts_file.exists():
+        try:
+            existing = json.loads(accounts_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    non_gmail = [a for a in existing if a.get("backend") != "gmail"]
+    merged = gmail_accounts + non_gmail
+
+    accounts_file.write_text(json.dumps(merged, indent=2) + "\n")
+    console.print(f"\n[bold green]Wrote {len(gmail_accounts)} Gmail account(s) to {accounts_file}[/bold green]")
+    for acct in gmail_accounts:
+        console.print(f"  {acct['name']} ({acct['gmail_bearer_token']})")
+    if non_gmail:
+        console.print(f"  [dim]+ {len(non_gmail)} non-Gmail account(s) preserved[/dim]")
 
 
 @cli.command()
@@ -163,7 +254,7 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
             if acct.backend == "gmail":
                 from email_manager.ingestion.gmail_client import sync_emails as gmail_sync
                 console.print(f"  Syncing via Gmail API...")
-                new_count = gmail_sync(conn, acct, remote=remote)
+                new_count, failed_count = gmail_sync(conn, acct, remote=remote)
             else:
                 from email_manager.ingestion.imap_client import sync_emails as imap_sync
                 if not acct.imap_host:
@@ -172,9 +263,12 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
                 from email_manager.ingestion.imap_client import _is_yahoo
                 host = "export.imap.mail.yahoo.com" if _is_yahoo(acct.imap_host) else acct.imap_host
                 console.print(f"  Connecting to {host}...")
-                new_count = imap_sync(conn, acct)
+                new_count, failed_count = imap_sync(conn, acct)
 
-            console.print(f"  [green]Fetched {new_count} new email(s)[/green]")
+            parts = [f"[green]{new_count} new[/green]"]
+            if failed_count:
+                parts.append(f"[yellow]{failed_count} failed[/yellow]")
+            console.print(f"  {', '.join(parts)} email(s)")
             total_new += new_count
 
         unthreaded = conn.execute(
@@ -195,6 +289,8 @@ def sync(ctx: click.Context, account: str | None, folders: tuple[str, ...], list
                 from email_manager.ingestion.calendar_client import sync_calendar_events, needs_calendar_auth
                 for acct in gmail_accounts:
                     label = acct.name or "gmail"
+                    if acct.gmail_bearer_token:
+                        continue  # calendar not supported with external bearer tokens
                     if needs_calendar_auth(acct):
                         console.print(f"\n[yellow]Calendar ({label}): needs authorization. Run 'auth --account {acct.name} --calendar' first to grant calendar access.[/yellow]")
                         continue
@@ -329,7 +425,7 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 
 
 @cli.command()
-@click.option("--stage", "-s", type=click.Choice(["extract_base", "fetch_homepages", "label_companies", "extract_events", "discover_discussions", "analyse_discussions", "propose_actions", "contact_memory"]), multiple=True, help="Run specific stage(s) only")
+@click.option("--stage", "-s", type=click.Choice(["extract_events", "discover_discussions", "analyse_discussions", "propose_actions", "contact_memory", "hubspot_task_enrichment"]), multiple=True, help="Run specific stage(s) only")
 @click.option("--limit", "-n", default=None, type=int, help="Only process the N most recent unprocessed emails/threads")
 @click.option("--force", "-f", is_flag=True, help="Force regeneration even if already processed")
 @click.option("--clean", is_flag=True, help="Delete previous output for the scoped stages before reprocessing")
@@ -351,22 +447,22 @@ def search(ctx: click.Context, query: str, limit: int) -> None:
 @click.option("--unprocessed", is_flag=True, help="Only process companies with no prior runs for the requested stages")
 @click.pass_context
 def analyse(ctx: click.Context, stage: tuple[str, ...], limit: int | None, force: bool, clean: bool, company: str | None, label: str | None, exclude: tuple[str, ...], exclude_file: str | None, company_file: str | None, contact: str | None, per_company: bool, stale_before: str | None, last_seen_after: str | None, last_seen_before: str | None, dry_run: bool, concurrency: int, new_emails: bool, stale_prompt: bool, stale_model: bool, unprocessed: bool) -> None:
-    """Run AI analysis pipeline on synced emails.
+    """Run the per-company AI analysis pipeline.
+
+    Run 'prep' first to ensure base data (contacts, companies, homepages,
+    labels) is up to date before running this.
 
     Pipeline stages (in order):
 
     \b
-      1. extract_base         Extract contacts, companies, domains (no AI)
-      2. fetch_homepages      Download company homepages (no AI)
-      3. label_companies      Classify company relationships (AI)
-      4. extract_events       Extract business events from threads (AI)
-      5. discover_discussions  Cluster events into discussions (AI)
-      6. analyse_discussions   Evaluate milestones, state & summary (AI)
-      7. propose_actions      Suggest next steps for active discussions (AI)
-      8. contact_memory       Generate contact relationship profiles (AI)
+      1. extract_events        Extract business events from threads (AI)
+      2. discover_discussions  Cluster events into discussions (AI)
+      3. analyse_discussions   Evaluate milestones, state & summary (AI)
+      4. propose_actions       Suggest next steps for active discussions (AI)
+      5. contact_memory        Generate contact relationship profiles (AI)
 
-    Use --stage/-s to run specific stages. Use --company/-c to scope to one
-    company. Use --clean to delete previous output before reprocessing.
+    Scope with --company, --label, --company-file, or staleness filters.
+    Use --stage/-s to run specific stages only.
 
     \b
     Staleness filters (combinable, any match includes the company):
@@ -3580,6 +3676,659 @@ def history(ctx: click.Context, company_domain: str, mode: str | None) -> None:
         )
 
     console.print(table)
+
+
+@cli.command()
+@click.pass_context
+def unify(ctx: click.Context) -> None:
+    """Backfill organizations and people from all source tables.
+
+    Reconciles email-derived companies/contacts, homepage data, and HubSpot
+    rows into the unified entity model. Idempotent — safe to re-run.
+    """
+    from email_manager.entities.reconcile import backfill_all
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    console.print("[bold]Reconciling source rows into entity model...[/bold]")
+    counts = backfill_all(conn)
+
+    org_total = fetchone(conn, "SELECT COUNT(*) AS n FROM organizations")["n"]
+    person_total = fetchone(conn, "SELECT COUNT(*) AS n FROM people")["n"]
+
+    table = Table(title="Reconciliation")
+    table.add_column("Source")
+    table.add_column("Rows linked", justify="right")
+    for src, n in counts.items():
+        table.add_row(src, str(n))
+    console.print(table)
+    console.print(f"  Organizations: [bold]{org_total}[/bold]   People: [bold]{person_total}[/bold]")
+
+
+@cli.command(name="merge-orgs")
+@click.argument("source_id", type=int)
+@click.argument("target_id", type=int)
+@click.option("--note", default=None, help="Optional note about why this merge was performed")
+@click.pass_context
+def merge_orgs_cmd(ctx: click.Context, source_id: int, target_id: int, note: str | None) -> None:
+    """Merge organization SOURCE_ID into TARGET_ID. Source is deleted."""
+    from email_manager.entities.reconcile import merge_orgs
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    moved = merge_orgs(conn, source_id=source_id, target_id=target_id, performed_by="cli", notes=note)
+    conn.commit()
+    console.print(f"[green]Merged org {source_id} into {target_id} ({moved} identities re-linked)[/green]")
+
+
+@cli.command(name="merge-people")
+@click.argument("source_id", type=int)
+@click.argument("target_id", type=int)
+@click.option("--note", default=None, help="Optional note about why this merge was performed")
+@click.pass_context
+def merge_people_cmd(ctx: click.Context, source_id: int, target_id: int, note: str | None) -> None:
+    """Merge person SOURCE_ID into TARGET_ID. Source is deleted."""
+    from email_manager.entities.reconcile import merge_people
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    moved = merge_people(conn, source_id=source_id, target_id=target_id, performed_by="cli", notes=note)
+    conn.commit()
+    console.print(f"[green]Merged person {source_id} into {target_id} ({moved} identities re-linked)[/green]")
+
+
+@cli.command(name="set-override")
+@click.argument("entity_type", type=click.Choice(["organization", "person"]))
+@click.argument("entity_id", type=int)
+@click.argument("field")
+@click.argument("value")
+@click.pass_context
+def set_override_cmd(
+    ctx: click.Context, entity_type: str, entity_id: int, field: str, value: str
+) -> None:
+    """Set a field override on an organization or person."""
+    from email_manager.entities.reconcile import set_field_override
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    set_field_override(
+        conn,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        field=field,
+        value=value,
+        set_by="cli",
+    )
+    conn.commit()
+    console.print(f"[green]{entity_type} {entity_id}: {field} = {value!r}[/green]")
+
+
+@cli.group()
+def hubspot() -> None:
+    """HubSpot CRM integration commands."""
+
+
+def _resolve_hubspot(
+    config: "Config",
+    token: str | None = None,
+    account_name: str | None = None,
+    console: "Console | None" = None,
+) -> "tuple":
+    """Return (HubSpotClient, account | None). Prints an error and raises SystemExit on bad account name."""
+    from email_manager.integrations.hubspot import DEFAULT_BEARER, HubSpotClient
+
+    hs_account = None
+    if account_name:
+        for acct in config.get_accounts():
+            if acct.name == account_name:
+                hs_account = acct
+                break
+        if not hs_account:
+            if console:
+                console.print(f"[red]Account {account_name!r} not found in accounts.json[/red]")
+            raise SystemExit(1)
+    else:
+        hs_account = config.get_hubspot_account()
+
+    bearer = token or (hs_account.hubspot_bearer_token if hs_account else DEFAULT_BEARER)
+    return HubSpotClient(bearer_token=bearer), hs_account
+
+
+@hubspot.command("companies")
+@click.option("--limit", "-n", type=int, default=None, help="Cap records (for testing)")
+@click.option("--token", default=None, help="Override bearer token")
+@click.pass_context
+def hubspot_companies_cmd(ctx: click.Context, limit: int | None, token: str | None) -> None:
+    """Sync HubSpot companies (and contact associations) into the local DB."""
+    from email_manager.integrations.hubspot import sync_companies
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    client, _ = _resolve_hubspot(config, token=token, console=console)
+    console.print("[bold]Syncing HubSpot companies...[/bold]")
+    n_co, n_links = sync_companies(conn, client, limit=limit, console=console)
+    console.print(f"  [green]{n_co} companies[/green], [green]{n_links} contact associations[/green]")
+
+
+@hubspot.command("contacts")
+@click.option("--limit", "-n", type=int, default=None, help="Cap records (for testing)")
+@click.option("--token", default=None, help="Override bearer token")
+@click.pass_context
+def hubspot_contacts_cmd(ctx: click.Context, limit: int | None, token: str | None) -> None:
+    """Sync HubSpot contacts into the local DB."""
+    from email_manager.integrations.hubspot import sync_contacts
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    client, _ = _resolve_hubspot(config, token=token, console=console)
+    console.print("[bold]Syncing HubSpot contacts...[/bold]")
+    n_ct = sync_contacts(conn, client, limit=limit, console=console)
+    console.print(f"  [green]{n_ct} contacts[/green]")
+
+
+@hubspot.command("sync")
+@click.option("--limit", "-n", type=int, default=None, help="Cap records per object type (for testing)")
+@click.option("--token", default=None, help="Override bearer token")
+@click.option("--account", default=None, help="Account name with HubSpot token (default: first configured)")
+@click.option("--skip-tasks", is_flag=True, help="Skip task sync (useful when no owner email is configured)")
+@click.option("--skip-enrich", is_flag=True, help="Skip task-thread enrichment step")
+@click.option("--skip-emails", is_flag=True, help="Skip email engagement sync")
+@click.option("--skip-deals", is_flag=True, help="Skip deal sync")
+@click.option("--skip-notes", is_flag=True, help="Skip note sync")
+@click.pass_context
+def hubspot_sync(
+    ctx: click.Context,
+    limit: int | None,
+    token: str | None,
+    account: str | None,
+    skip_tasks: bool,
+    skip_enrich: bool,
+    skip_emails: bool,
+    skip_deals: bool,
+    skip_notes: bool,
+) -> None:
+    """Sync all HubSpot types: companies, contacts, tasks, deals, email engagements, notes, and task-thread links."""
+    from email_manager.integrations.hubspot import (
+        enrich_tasks_with_threads,
+        sync_companies,
+        sync_contacts,
+        sync_tasks,
+        sync_email_engagements,
+        sync_deals,
+        sync_deal_discussions,
+        sync_deal_email_links,
+        sync_deal_email_events,
+        repair_deal_discussion_threads,
+        sync_notes,
+        link_notes_to_deal_discussions,
+    )
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    client, hs_account = _resolve_hubspot(config, token=token, account_name=account, console=console)
+
+    console.print("[bold]Syncing HubSpot companies...[/bold]")
+    n_co, n_links = sync_companies(conn, client, limit=limit, console=console)
+    console.print(f"  [green]{n_co} companies[/green], [green]{n_links} contact associations[/green]")
+
+    console.print("[bold]Syncing HubSpot contacts...[/bold]")
+    n_ct = sync_contacts(conn, client, limit=limit, console=console)
+    console.print(f"  [green]{n_ct} contacts[/green]")
+
+    owner_email = hs_account.hubspot_owner_email if hs_account else ""
+    if not skip_tasks:
+        if not owner_email:
+            console.print("  [yellow]Skipping tasks: no hubspot_owner_email configured in accounts.json[/yellow]")
+        else:
+            console.print("[bold]Syncing HubSpot tasks...[/bold]")
+            n_t = sync_tasks(conn, client, owner_email, limit=limit, console=console)
+            console.print(f"  [green]{n_t} tasks[/green]")
+
+    if not skip_deals:
+        console.print("[bold]Syncing HubSpot deals...[/bold]")
+        sync_deals(conn, client, limit=limit, console=console)
+        console.print("[bold]Syncing deal discussions...[/bold]")
+        sync_deal_discussions(conn, console=console)
+        console.print("[bold]Linking deal email associations...[/bold]")
+        sync_deal_email_links(conn, client, console=console)
+        console.print("[bold]Assigning deal-linked email events...[/bold]")
+        sync_deal_email_events(conn, console=console)
+        console.print("[bold]Repairing deal discussion thread links...[/bold]")
+        repair_deal_discussion_threads(conn, console=console)
+
+    if not skip_emails:
+        console.print("[bold]Syncing HubSpot email engagements...[/bold]")
+        sync_email_engagements(conn, client, limit=limit, console=console)
+        console.print("[bold]Assigning deal-linked email events...[/bold]")
+        sync_deal_email_events(conn, console=console)
+        console.print("[bold]Repairing deal discussion thread links...[/bold]")
+        repair_deal_discussion_threads(conn, console=console)
+
+    if not skip_notes:
+        console.print("[bold]Syncing HubSpot notes...[/bold]")
+        sync_notes(conn, client, limit=limit, console=console)
+        console.print("[bold]Linking notes to deal discussions...[/bold]")
+        link_notes_to_deal_discussions(conn, console=console)
+
+    if not skip_enrich:
+        console.print("[bold]Enriching tasks with email threads...[/bold]")
+        n_links_t = enrich_tasks_with_threads(conn, console=console)
+        console.print(f"  [green]{n_links_t} task-thread link(s)[/green]")
+
+
+@hubspot.command("tasks")
+@click.option("--sync", is_flag=True, help="Pull latest tasks from HubSpot before displaying")
+@click.option("--open", "open_only", is_flag=True, default=True, help="Show only incomplete tasks (default)")
+@click.option("--all", "show_all", is_flag=True, help="Show all tasks including completed")
+@click.option("--account", default=None, help="Account name with HubSpot token (default: first configured)")
+@click.option("--token", default=None, help="Override bearer token")
+@click.option("--limit", "-n", type=int, default=None, help="Cap number of tasks synced")
+@click.pass_context
+def hubspot_tasks_cmd(
+    ctx: click.Context,
+    sync: bool,
+    open_only: bool,
+    show_all: bool,
+    account: str | None,
+    token: str | None,
+    limit: int | None,
+) -> None:
+    """Sync and/or display HubSpot tasks for your account."""
+    from email_manager.integrations.hubspot import sync_tasks
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    client, hs_account = _resolve_hubspot(config, token=token, account_name=account, console=console)
+    owner_email = hs_account.hubspot_owner_email if hs_account else ""
+
+    if sync:
+        if not owner_email:
+            console.print("[red]No hubspot_owner_email configured. Set it in accounts.json.[/red]")
+            raise SystemExit(1)
+        console.print("[bold]Syncing HubSpot tasks...[/bold]")
+        n = sync_tasks(conn, client, owner_email, limit=limit, console=console)
+        console.print(f"  [green]{n} tasks synced[/green]")
+
+    # Display tasks from DB
+    where = "" if show_all else "WHERE status != 'COMPLETED' OR status IS NULL"
+    rows = fetchall(
+        conn,
+        f"""SELECT id, subject, status, type, priority, due_date, completed_at,
+                   associated_contact_ids, associated_company_ids, hs_url
+            FROM hubspot_tasks
+            {where}
+            ORDER BY
+                CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,
+                due_date ASC""",
+    )
+
+    if not rows:
+        msg = "No tasks found." if show_all else "No open tasks found. Run with --sync to pull from HubSpot, or --all to show completed."
+        console.print(f"  [dim]{msg}[/dim]")
+        return
+
+    STATUS_STYLE = {
+        "NOT_STARTED": "red",
+        "IN_PROGRESS": "yellow",
+        "WAITING": "blue",
+        "DEFERRED": "dim",
+        "COMPLETED": "green",
+    }
+
+    table = Table(title=f"HubSpot Tasks ({len(rows)})", show_lines=False)
+    table.add_column("Subject", max_width=45, no_wrap=False)
+    table.add_column("Type", width=6)
+    table.add_column("Priority", width=8)
+    table.add_column("Status", width=13)
+    table.add_column("Due", width=10)
+    table.add_column("Associated", max_width=30, no_wrap=False)
+
+    for r in rows:
+        status = r["status"] or "—"
+        style = STATUS_STYLE.get(status, "")
+
+        # Resolve contact/company names for the Associated column
+        assoc_parts: list[str] = []
+        for id_list_json, tbl, name_col in (
+            (r["associated_contact_ids"], "hubspot_contacts", "email"),
+            (r["associated_company_ids"], "hubspot_companies", "name"),
+        ):
+            try:
+                ids = json.loads(id_list_json or "[]")
+            except (ValueError, TypeError):
+                ids = []
+            for cid in ids[:2]:
+                row2 = fetchone(conn, f"SELECT {name_col} FROM {tbl} WHERE id = ?", (cid,))
+                if row2 and row2[name_col]:
+                    assoc_parts.append(row2[name_col])
+
+        due = (r["due_date"] or "")[:10] or "—"
+        subject = r["subject"] or "(no subject)"
+        task_type = (r["type"] or "—")[:4]
+
+        table.add_row(
+            subject,
+            task_type,
+            r["priority"] or "—",
+            f"[{style}]{status}[/{style}]" if style else status,
+            due,
+            ", ".join(assoc_parts) or "—",
+        )
+
+    console.print(table)
+
+    if not sync:
+        last = fetchone(conn, "SELECT last_sync_at FROM hubspot_sync_state WHERE object_type = 'tasks'")
+        if last and last["last_sync_at"]:
+            console.print(f"  [dim]Last synced: {last['last_sync_at']}. Run with --sync to refresh.[/dim]")
+        else:
+            console.print("  [dim]Not yet synced. Run with --sync to pull from HubSpot.[/dim]")
+
+
+@hubspot.command("emails")
+@click.option("--limit", "-n", type=int, default=None, help="Cap records (for testing)")
+@click.option("--token", default=None, help="Override bearer token")
+@click.pass_context
+def hubspot_emails_cmd(ctx: click.Context, limit: int | None, token: str | None) -> None:
+    """Sync HubSpot email engagements into the main emails table."""
+    from email_manager.integrations.hubspot import sync_email_engagements
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    client, _ = _resolve_hubspot(config, token=token, console=console)
+    console.print("[bold]Syncing HubSpot email engagements...[/bold]")
+    sync_email_engagements(conn, client, limit=limit, console=console)
+
+
+@hubspot.command("deals")
+@click.option("--limit", "-n", type=int, default=None, help="Cap records (for testing)")
+@click.option("--token", default=None, help="Override bearer token")
+@click.option("--skip-discussions", is_flag=True, help="Skip syncing deal discussions")
+@click.pass_context
+def hubspot_deals_cmd(
+    ctx: click.Context, limit: int | None, token: str | None, skip_discussions: bool
+) -> None:
+    """Sync HubSpot deals and create corresponding discussions."""
+    from email_manager.integrations.hubspot import (
+        sync_deals, sync_deal_discussions, sync_deal_email_links, sync_deal_email_events,
+        repair_deal_discussion_threads,
+    )
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    client, _ = _resolve_hubspot(config, token=token, console=console)
+    console.print("[bold]Syncing HubSpot deals...[/bold]")
+    sync_deals(conn, client, limit=limit, console=console)
+
+    if not skip_discussions:
+        console.print("[bold]Syncing deal discussions...[/bold]")
+        sync_deal_discussions(conn, console=console)
+        console.print("[bold]Linking deal email associations...[/bold]")
+        sync_deal_email_links(conn, client, console=console)
+        console.print("[bold]Assigning deal-linked email events...[/bold]")
+        sync_deal_email_events(conn, console=console)
+        console.print("[bold]Repairing deal discussion thread links...[/bold]")
+        repair_deal_discussion_threads(conn, console=console)
+
+
+@hubspot.command("notes")
+@click.option("--limit", "-n", type=int, default=None, help="Cap records (for testing)")
+@click.option("--token", default=None, help="Override bearer token")
+@click.option("--account", default=None, help="Account name with HubSpot token")
+@click.pass_context
+def hubspot_notes_cmd(ctx: click.Context, limit: int | None, token: str | None, account: str | None) -> None:
+    """Sync HubSpot notes and link them to deal discussions."""
+    from email_manager.integrations.hubspot import sync_notes, link_notes_to_deal_discussions
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    client, _ = _resolve_hubspot(config, token=token, account_name=account, console=console)
+    console.print("[bold]Syncing HubSpot notes...[/bold]")
+    sync_notes(conn, client, limit=limit, console=console)
+    console.print("[bold]Linking notes to deal discussions...[/bold]")
+    link_notes_to_deal_discussions(conn, console=console)
+
+
+@hubspot.command("enrich-tasks")
+@click.option("--force", is_flag=True, help="Delete existing links before re-enriching")
+@click.pass_context
+def hubspot_enrich_tasks(ctx: click.Context, force: bool) -> None:
+    """Link HubSpot tasks to email threads via associated contact email matching."""
+    from email_manager.integrations.hubspot import enrich_tasks_with_threads
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+    n = enrich_tasks_with_threads(conn, force=force, console=console)
+    console.print(f"  [green]{n} task-thread link(s) written[/green]")
+
+
+@hubspot.command("status")
+@click.pass_context
+def hubspot_status(ctx: click.Context) -> None:
+    """Show HubSpot sync state and record counts for all object types."""
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    sync_rows = fetchall(
+        conn,
+        "SELECT object_type, last_sync_at, record_count FROM hubspot_sync_state ORDER BY object_type",
+    )
+    last_by_type = {r["object_type"]: r for r in sync_rows}
+
+    co_count = fetchone(conn, "SELECT COUNT(*) AS n FROM hubspot_companies")["n"]
+    ct_count = fetchone(conn, "SELECT COUNT(*) AS n FROM hubspot_contacts")["n"]
+    task_count = fetchone(conn, "SELECT COUNT(*) AS n FROM hubspot_tasks")["n"]
+    co_ct_links = fetchone(conn, "SELECT COUNT(*) AS n FROM hubspot_company_contacts")["n"]
+    task_thread_links = fetchone(conn, "SELECT COUNT(*) AS n FROM hubspot_task_threads")["n"]
+
+    table = Table(title="HubSpot sync status", show_lines=False)
+    table.add_column("Object type")
+    table.add_column("Rows in DB", justify="right")
+    table.add_column("Last synced")
+    table.add_column("Last count", justify="right")
+
+    for obj_type, db_count in (
+        ("companies", co_count),
+        ("contacts", ct_count),
+        ("tasks", task_count),
+    ):
+        r = last_by_type.get(obj_type)
+        table.add_row(
+            obj_type,
+            str(db_count),
+            (r["last_sync_at"][:16] if r and r["last_sync_at"] else "[dim]never[/dim]"),
+            (str(r["record_count"]) if r else "—"),
+        )
+
+    console.print(table)
+    console.print(f"  Company↔contact links: [bold]{co_ct_links}[/bold]")
+    console.print(f"  Task↔thread links:     [bold]{task_thread_links}[/bold]")
+
+
+# ── ingest group ──────────────────────────────────────────────────────────
+
+
+@cli.group()
+def ingest() -> None:
+    """Pull raw data from external sources (emails, HubSpot, calendar)."""
+
+
+# emails: reuse the existing sync command
+ingest.add_command(sync, name="emails")
+
+# hubspot: reuse the existing hubspot group
+ingest.add_command(hubspot)
+
+
+@ingest.command("calendar")
+@click.option("--account", "-a", default=None, help="Sync only this account (by name)")
+@click.option("--months", type=int, default=6, show_default=True, help="How many months back to sync")
+@click.option("--remote", is_flag=True, help="Headless OAuth mode")
+@click.pass_context
+def ingest_calendar(ctx: click.Context, account: str | None, months: int, remote: bool) -> None:
+    """Sync calendar events from Gmail accounts."""
+    from email_manager.ingestion.calendar_client import sync_calendar_events, needs_calendar_auth
+
+    config: Config = ctx.obj["config"]
+    conn = get_db(config)
+    console = Console()
+
+    accounts = config.get_accounts()
+    if account:
+        accounts = [a for a in accounts if a.name == account]
+    gmail_accounts = [a for a in accounts if a.backend == "gmail"]
+    if not gmail_accounts:
+        console.print("[yellow]No Gmail accounts configured.[/yellow]")
+        conn.close()
+        return
+
+    total = 0
+    for acct in gmail_accounts:
+        label = acct.name or "gmail"
+        if acct.gmail_bearer_token:
+            console.print(f"  [dim]{label}: calendar not supported with bearer tokens[/dim]")
+            continue
+        if needs_calendar_auth(acct):
+            console.print(f"  [yellow]{label}: needs authorization — run 'auth --account {acct.name} --calendar' first[/yellow]")
+            continue
+        console.print(f"[bold]Syncing calendar: {label}[/bold]")
+        try:
+            n = sync_calendar_events(conn, acct, console=console, remote=remote, months_back=months)
+            console.print(f"  [green]{n} event(s) synced[/green]")
+            total += n
+        except Exception as e:
+            console.print(f"  [yellow]Failed: {e}[/yellow]")
+
+    console.print(f"\n[green]Total: {total} calendar event(s)[/green]")
+    conn.close()
+
+
+@ingest.command("all")
+@click.option("--account", "-a", default=None, help="Scope to a single account by name")
+@click.option("--remote", is_flag=True, help="Headless OAuth mode")
+@click.option("--skip-hubspot", is_flag=True, help="Skip HubSpot sync")
+@click.option("--skip-calendar", is_flag=True, help="Skip calendar sync")
+@click.pass_context
+def ingest_all(ctx: click.Context, account: str | None, remote: bool, skip_hubspot: bool, skip_calendar: bool) -> None:
+    """Sync emails, HubSpot, and calendar in one go."""
+    ctx.invoke(sync, account=account, folders=(), list_folders=False, remote=remote,
+               rebuild_threads=False, no_calendar=True, calendar_months=6)
+    if not skip_hubspot:
+        ctx.invoke(hubspot_sync, limit=None, token=None, account=None,
+                   skip_tasks=False, skip_enrich=False)
+    if not skip_calendar:
+        ctx.invoke(ingest_calendar, account=account, months=6, remote=remote)
+
+
+# ── prep group ────────────────────────────────────────────────────────────
+
+
+def _run_prep(ctx: click.Context, stages: list[str], *, force: bool = False,
+              limit: int | None = None, company: str | None = None,
+              label: str | None = None, concurrency: int = 1) -> None:
+    from email_manager.pipeline.runner import run_pipeline
+    config: Config = ctx.obj["config"]
+    console = Console()
+    run_pipeline(config, stages=stages, console=console, limit=limit, force=force,
+                 company=company, label=label, concurrency=concurrency)
+
+
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def prep(ctx: click.Context) -> None:
+    """Run global base-analysis stages that must complete before 'analyse'.
+
+    \b
+    Subcommands:
+      base       Extract contacts, companies, co-email stats (no AI)
+      homepages  Fetch company homepage content (no AI)
+      labels     Classify company relationships (AI)
+      index      Build full-text and vector search index (no AI)
+
+    Called without a subcommand, runs all four stages in sequence.
+    """
+    if ctx.invoked_subcommand is None:
+        _run_prep(ctx, ["extract_base", "fetch_homepages", "label_companies", "build_search_index"])
+
+
+@prep.command("base")
+@click.option("--force", "-f", is_flag=True, help="Reprocess even if already up to date")
+@click.option("--limit", "-n", default=None, type=int, help="Cap number of emails processed")
+@click.pass_context
+def prep_base(ctx: click.Context, force: bool, limit: int | None) -> None:
+    """Extract contacts, companies, and co-email stats from raw emails (no AI)."""
+    _run_prep(ctx, ["extract_base"], force=force, limit=limit)
+
+
+@prep.command("homepages")
+@click.option("--force", "-f", is_flag=True)
+@click.option("--limit", "-n", default=None, type=int)
+@click.option("--company", "-c", default=None, help="Scope to one company domain")
+@click.option("--label", "-l", default=None, help="Scope to companies with this label")
+@click.pass_context
+def prep_homepages(ctx: click.Context, force: bool, limit: int | None, company: str | None, label: str | None) -> None:
+    """Fetch company homepage content (no AI)."""
+    _run_prep(ctx, ["fetch_homepages"], force=force, limit=limit, company=company, label=label)
+
+
+@prep.command("labels")
+@click.option("--force", "-f", is_flag=True)
+@click.option("--limit", "-n", default=None, type=int)
+@click.option("--company", "-c", default=None)
+@click.option("--label", "-l", default=None)
+@click.option("--concurrency", type=int, default=1, show_default=True)
+@click.pass_context
+def prep_labels(ctx: click.Context, force: bool, limit: int | None, company: str | None, label: str | None, concurrency: int) -> None:
+    """Classify company relationships with AI."""
+    _run_prep(ctx, ["label_companies"], force=force, limit=limit, company=company, label=label, concurrency=concurrency)
+
+
+@prep.command("index")
+@click.option("--force", "-f", is_flag=True)
+@click.pass_context
+def prep_index(ctx: click.Context, force: bool) -> None:
+    """Build full-text and vector search index."""
+    _run_prep(ctx, ["build_search_index"], force=force)
+
+
+# ── admin group ───────────────────────────────────────────────────────────
+
+
+@cli.group()
+def admin() -> None:
+    """Administrative and maintenance commands."""
+
+
+admin.add_command(rollback)
+admin.add_command(migrate_db, name="migrate-db")
+admin.add_command(unify)
+admin.add_command(merge_orgs_cmd, name="merge-orgs")
+admin.add_command(merge_people_cmd, name="merge-people")
+admin.add_command(set_override_cmd, name="set-override")
 
 
 if __name__ == "__main__":

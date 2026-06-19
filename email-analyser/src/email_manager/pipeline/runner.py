@@ -466,8 +466,14 @@ def run_pipeline(
                     count += max(c, 0)
             results[stage_name] = count
     else:
-        # Single company or no filtering — original behavior
+        # Single company / label / no filtering
+        is_scoped = bool(company or label or exclude or contact)
         for stage_name in ordered:
+            if is_scoped and stage_name in STAGES and STAGES[stage_name].skip_when_scoped:
+                # Skip stages that operate on the full corpus (e.g. build_search_index)
+                # when scoped to a company/label. Run 'prep' separately to rebuild.
+                logger.debug("Skipping %s (skip_when_scoped, company-scoped run)", stage_name)
+                continue
             count = _run_stage(stage_name, conn, backend, config, console,
                                limit=limit, force=force, clean=clean,
                                company=company, label=label, exclude=exclude, contact=contact,

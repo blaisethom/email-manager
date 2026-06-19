@@ -173,15 +173,14 @@ def apply_changes(
         )
         parent_run_id = parent_row["id"] if parent_row else None
 
-        # Compute input boundary: latest email date for this company
+        # Compute input boundary: latest email date for this company.
+        # Use the indexed from_domain column — a LIKE scan on to_addresses has no index.
         email_cutoff = None
         if company_domain and company_domain != "all":
-            like = f"%@{company_domain}%"
             cutoff_row = fetchone(
                 conn,
-                """SELECT MAX(date) as cutoff FROM emails
-                   WHERE from_address LIKE ? OR to_addresses LIKE ?""",
-                (like, like),
+                "SELECT MAX(date) as cutoff FROM emails WHERE from_domain = ?",
+                (company_domain.lower(),),
             )
             if cutoff_row and cutoff_row["cutoff"]:
                 email_cutoff = cutoff_row["cutoff"]
@@ -495,17 +494,21 @@ def apply_changes(
     if token_tracker is not None:
         from email_manager.ai.base import TokenTracker
         if isinstance(token_tracker, TokenTracker):
-            total_input = token_tracker.total_input
-            total_output = token_tracker.total_output
-            total_calls = token_tracker.call_count
-            # Write individual call records
-            for usage in token_tracker.calls:
-                conn.execute(
-                    """INSERT INTO llm_calls (run_id, stage, model, input_tokens, output_tokens, duration_ms, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (run_id, mode, model or "unknown", usage.input_tokens, usage.output_tokens,
-                     usage.duration_ms, completed_at),
-                )
+            # Snapshot and reset BEFORE DB ops so accumulated calls from prior
+            # iterations (tracker is shared across companies) don't get re-inserted.
+            calls_snapshot = token_tracker.snapshot()
+            token_tracker.reset()
+            total_input = sum(u.input_tokens for u in calls_snapshot)
+            total_output = sum(u.output_tokens for u in calls_snapshot)
+            total_calls = len(calls_snapshot)
+            if run_id is not None:
+                for usage in calls_snapshot:
+                    conn.execute(
+                        """INSERT INTO llm_calls (run_id, stage, model, input_tokens, output_tokens, duration_ms, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (run_id, mode, model or "unknown", usage.input_tokens, usage.output_tokens,
+                         usage.duration_ms, completed_at),
+                    )
     conn.execute(
         """UPDATE processing_runs SET
            completed_at = ?, events_created = ?, discussions_created = ?,

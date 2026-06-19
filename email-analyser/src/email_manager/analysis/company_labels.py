@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ import yaml
 
 from email_manager.ai.base import LLMBackend
 from email_manager.db import fetchall, fetchone
+
+logger = logging.getLogger(__name__)
 
 
 # ── Label config loading ─────────────────────────────────────────────────────
@@ -172,29 +175,42 @@ def _get_email_summaries(
     company's actual role — e.g. an investor sends outreach emails, while a
     co-portfolio company just gets CC'd on group emails.
     """
-    like_pattern = f"%@{domain}%"
+    from datetime import datetime, timezone, timedelta
 
-    # Emails FROM the company (the company is the sender)
+    like_pattern = f"%@{domain}%"
+    domain_lower = domain.lower()
+
+    # Emails FROM the company — uses the indexed from_domain column (fast).
+    # Falls back to LIKE on from_address for rows ingested before migration v33.
+    # Truncate body_text in SQL so Python never allocates the full column value.
     from_rows = fetchall(
         conn,
-        """SELECT date, from_address, from_name, to_addresses, subject, body_text
+        """SELECT date, from_address, from_name, to_addresses, subject,
+                  SUBSTR(body_text, 1, 300) AS body_text
            FROM emails
-           WHERE from_address LIKE ?
+           WHERE (from_domain = ? OR (from_domain IS NULL AND from_address LIKE ?))
            ORDER BY date DESC
            LIMIT ?""",
-        (like_pattern, max_emails),
+        (domain_lower, like_pattern, max_emails),
     )
 
-    # Emails where company is in TO/CC but NOT the sender
+    # Emails where company is in TO/CC but NOT the sender.
+    # to_addresses/cc_addresses have no index — LIKE '%@domain%' scans the table.
+    # Cap to the last 2 years so Postgres can use the date index to reduce the
+    # scan to a smaller window before applying the LIKE filter.
+    recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=730)).strftime("%Y-%m-%d")
     to_cc_rows = fetchall(
         conn,
-        """SELECT date, from_address, from_name, to_addresses, cc_addresses, subject, body_text
+        """SELECT date, from_address, from_name, to_addresses, cc_addresses, subject,
+                  SUBSTR(body_text, 1, 300) AS body_text
            FROM emails
-           WHERE from_address NOT LIKE ?
+           WHERE (from_domain != ? OR from_domain IS NULL)
+             AND from_address NOT LIKE ?
              AND (to_addresses LIKE ? OR cc_addresses LIKE ?)
+             AND date >= ?
            ORDER BY date DESC
            LIMIT ?""",
-        (like_pattern, like_pattern, like_pattern, max_emails),
+        (domain_lower, like_pattern, like_pattern, like_pattern, recent_cutoff, max_emails),
     )
 
     def _format_email(r: dict, show_to: bool = False) -> str:
@@ -240,6 +256,7 @@ def label_companies(
     limit: int | None = None,
     force: bool = False,
     company_domain: str | None = None,
+    concurrency: int = 1,
 ) -> int:
     """Assign relationship labels to companies using AI."""
     from email_manager.ai.agent_backend import ProposedChanges, apply_changes
@@ -295,45 +312,21 @@ def label_companies(
         return 0
 
     account_owner = _detect_account_owner(conn)
-    labelled = 0
 
-    for i, company in enumerate(companies):
-        company_display = f"{company['name']} ({company['domain']})"
-        if on_progress:
-            on_progress(i, len(companies), company_display)
-
-        homepage_snippet = _get_homepage_snippet(company["domain"])
-        email_summaries = _get_email_summaries(conn, company["domain"])
-
-        if not email_summaries and not homepage_snippet:
-            continue
-
-        user_prompt = _build_user_prompt(
-            company["name"],
-            company["domain"],
-            homepage_snippet,
-            email_summaries,
-            account_owner,
-        )
-
-        _started = datetime.now(timezone.utc).isoformat()
-        try:
-            result = backend.complete_json(system_prompt, user_prompt)
-        except Exception:
-            continue
+    def _apply_result(company: dict, started_at: str, result: dict | None) -> bool:
+        """Write a single company's label result to the DB. Returns True if saved."""
+        if result is None:
+            return False
 
         assigned_labels = result.get("labels", [])
         company_description = result.get("company_description", "")
         company_name = result.get("company_name")
 
-        # Filter to valid labels
-        valid_labels = []
-        for entry in assigned_labels:
-            label_name = entry.get("label", "").strip()
-            if label_name in valid_label_names:
-                valid_labels.append(entry)
+        valid_labels = [
+            entry for entry in assigned_labels
+            if entry.get("label", "").strip() in valid_label_names
+        ]
 
-        # Build per-company ProposedChanges
         label_update: dict[str, Any] = {
             "company_id": company["id"],
             "labels": valid_labels,
@@ -344,14 +337,120 @@ def label_companies(
             label_update["company_description"] = company_description.strip()
 
         proposed = ProposedChanges({"label_updates": [label_update]})
-
         apply_changes(
             conn, proposed, company["id"], company["domain"],
             mode="staged:label_companies", model=backend.model_name,
-            prompt_hash=p_hash, started_at=_started,
+            prompt_hash=p_hash, started_at=started_at,
             token_tracker=getattr(backend, "token_tracker", None),
         )
-        labelled += 1
+        return True
+
+    # Single pass: load context + call LLM + write immediately.
+    # Concurrent mode uses a worker-pool (queue + N workers) so each worker
+    # handles one company at a time: context → LLM call → commit.  This keeps
+    # the event loop free during LLM I/O without pre-loading all contexts.
+    labelled = 0
+    if on_progress:
+        on_progress(0, len(companies), "starting...")
+
+    if concurrency > 1:
+        import asyncio
+
+        write_lock = asyncio.Lock()
+        done_count = 0
+        in_flight: set[str] = set()  # domains currently awaiting an LLM response
+
+        def _desc() -> str:
+            return " | ".join(sorted(in_flight)) if in_flight else ""
+
+        async def _label_one(company: dict) -> None:
+            nonlocal done_count, labelled
+            started_at = datetime.now(timezone.utc).isoformat()
+            # Mark active as soon as the worker picks this company up, so the
+            # list always shows concurrency entries (including during context load).
+            in_flight.add(company["domain"])
+            if on_progress:
+                on_progress(done_count, len(companies), _desc())
+            homepage_snippet = _get_homepage_snippet(company["domain"])
+            email_summaries = _get_email_summaries(conn, company["domain"])
+            if not email_summaries and not homepage_snippet:
+                in_flight.discard(company["domain"])
+                async with write_lock:
+                    done_count += 1
+                    if on_progress:
+                        on_progress(done_count, len(companies), _desc())
+                return
+            user_prompt = _build_user_prompt(
+                company["name"],
+                company["domain"],
+                homepage_snippet,
+                email_summaries,
+                account_owner,
+            )
+            try:
+                result = await backend.acomplete_json(system_prompt, user_prompt)
+            except Exception as e:
+                logger.error("Async LLM failed for company %s: %s", company["domain"], e)
+                result = None
+            in_flight.discard(company["domain"])
+            async with write_lock:
+                if _apply_result(company, started_at, result):
+                    labelled += 1
+                done_count += 1
+                # Checkpoint WAL every 100 commits so WAL scan overhead doesn't
+                # accumulate — especially important when the web UI reads concurrently.
+                if done_count % 100 == 0:
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    except Exception:
+                        pass  # no-op on Postgres
+                if on_progress:
+                    on_progress(done_count, len(companies), _desc())
+
+        async def _run() -> None:
+            queue: asyncio.Queue = asyncio.Queue()
+            for c in companies:
+                await queue.put(c)
+
+            async def _worker() -> None:
+                while True:
+                    try:
+                        company = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    await _label_one(company)
+
+            await asyncio.gather(*[_worker() for _ in range(concurrency)])
+
+        asyncio.run(_run())
+    else:
+        for i, company in enumerate(companies):
+            if on_progress:
+                on_progress(i, len(companies), f"{company['name']} ({company['domain']})")
+            started_at = datetime.now(timezone.utc).isoformat()
+            homepage_snippet = _get_homepage_snippet(company["domain"])
+            email_summaries = _get_email_summaries(conn, company["domain"])
+            if not email_summaries and not homepage_snippet:
+                continue
+            user_prompt = _build_user_prompt(
+                company["name"],
+                company["domain"],
+                homepage_snippet,
+                email_summaries,
+                account_owner,
+            )
+            try:
+                result = backend.complete_json(system_prompt, user_prompt)
+            except Exception as e:
+                logger.error("LLM call failed for company %s: %s", company["domain"], e)
+                result = None
+            if _apply_result(company, started_at, result):
+                labelled += 1
+                if labelled % 100 == 0:
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    except Exception:
+                        pass  # no-op on Postgres
 
     if on_progress:
         on_progress(len(companies), len(companies), "done")
