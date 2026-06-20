@@ -2,6 +2,7 @@ import type { Express, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
 import yaml from 'js-yaml';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -166,6 +167,37 @@ export function registerConfigRoutes(app: Express): void {
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
+  });
+
+  // GET /api/config/prokura-resources — shells out to `prokura resources list --json`
+  app.get('/api/config/prokura-resources', (_req: Request, res: Response) => {
+    execFile('prokura', ['resources', 'list', '--json'], { timeout: 8000 }, (err, stdout) => {
+      if (err) {
+        // prokura not installed or failed — return empty rather than 500
+        res.json({ available: false, services: [], error: err.message });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout) as {
+          agent_name?: string;
+          services?: Array<{
+            service_name: string;
+            service_slug: string;
+            provider: string;
+            credential_type: string;
+            auth_scheme?: string;
+            bearer_token_key?: string;
+            account_email?: string;
+            domain_pattern?: string;
+            token_expires_at?: string | null;
+            description?: string;
+          }>;
+        };
+        res.json({ available: true, agent_name: parsed.agent_name, services: parsed.services ?? [] });
+      } catch (parseErr) {
+        res.json({ available: false, services: [], error: String(parseErr) });
+      }
+    });
   });
 
   // GET /api/config/labels

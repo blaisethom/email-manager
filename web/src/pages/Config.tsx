@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '../api';
-import type { LabelDef, CategoryDef, EventTypeDef, MilestoneDef, EmailAccount } from '../types';
+import type { LabelDef, CategoryDef, EventTypeDef, MilestoneDef, EmailAccount, ProkuraService } from '../types';
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -530,11 +530,85 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 const INPUT = 'w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none';
 const INPUT_MONO = INPUT + ' font-mono';
 
-function AccountEditor({ account, onChange, onRemove, isNew }: {
+function expiryLabel(isoOrNull?: string | null): string {
+  if (!isoOrNull || isoOrNull.startsWith('1970')) return 'no expiry';
+  const d = new Date(isoOrNull);
+  const now = new Date();
+  const diffDays = Math.round((d.getTime() - now.getTime()) / 86_400_000);
+  if (diffDays < 0) return 'expired';
+  if (diffDays === 0) return 'expires today';
+  if (diffDays === 1) return 'expires tomorrow';
+  return `expires ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+}
+
+function ProkuraResourcePicker({ services, filterFn, onSelect, currentKey, label }: {
+  services: ProkuraService[];
+  filterFn: (s: ProkuraService) => boolean;
+  onSelect: (s: ProkuraService) => void;
+  currentKey?: string;
+  label: string;
+}) {
+  const matches = services.filter(filterFn);
+  if (matches.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-purple-200 bg-purple-50 p-3">
+      <div className="flex items-center gap-1.5 mb-2">
+        <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider">Prokura</span>
+        <span className="text-xs text-purple-600">{label}</span>
+      </div>
+      <div className="space-y-1.5">
+        {matches.map(s => {
+          const isActive = s.bearer_token_key && s.bearer_token_key === currentKey;
+          return (
+            <div
+              key={s.service_slug}
+              className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border transition-colors ${
+                isActive
+                  ? 'bg-purple-100 border-purple-300'
+                  : 'bg-white border-slate-200 hover:border-purple-300'
+              }`}
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-slate-800 truncate">
+                    {s.account_email && s.account_email !== 'API Key' ? s.account_email : s.service_name}
+                  </span>
+                  {isActive && (
+                    <span className="text-[10px] font-semibold text-purple-700 bg-purple-200 px-1.5 py-0.5 rounded flex-shrink-0">active</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <code className="text-[10px] text-slate-500 font-mono">{s.bearer_token_key}</code>
+                  <span className={`text-[10px] ${
+                    s.token_expires_at?.startsWith('1970') || !s.token_expires_at ? 'text-slate-400' :
+                    new Date(s.token_expires_at) < new Date() ? 'text-red-500' : 'text-green-600'
+                  }`}>{expiryLabel(s.token_expires_at)}</span>
+                </div>
+              </div>
+              {!isActive && (
+                <button
+                  type="button"
+                  onClick={() => onSelect(s)}
+                  className="flex-shrink-0 px-2.5 py-1 text-xs font-medium text-purple-700 bg-purple-100 hover:bg-purple-200 rounded-md transition-colors"
+                >
+                  Use
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AccountEditor({ account, onChange, onRemove, isNew, prokuraServices }: {
   account: EmailAccount;
   onChange: (a: EmailAccount) => void;
   onRemove: () => void;
   isNew: boolean;
+  prokuraServices: ProkuraService[];
 }) {
   const [open, setOpen] = useState(isNew);
   const [showPassword, setShowPassword] = useState(false);
@@ -609,7 +683,18 @@ function AccountEditor({ account, onChange, onRemove, isNew }: {
 
           {isGmail ? (
             <>
-              <Field label="Bearer token" hint="(proxy-managed token reference, or leave blank for local OAuth)">
+              <ProkuraResourcePicker
+                services={prokuraServices}
+                filterFn={s => s.domain_pattern === 'gmail.googleapis.com' && !!s.bearer_token_key}
+                currentKey={account.gmail_bearer_token}
+                label="— select a Gmail credential"
+                onSelect={s => onChange({
+                  ...account,
+                  gmail_bearer_token: s.bearer_token_key ?? '',
+                  name: account.name || s.account_email || '',
+                })}
+              />
+              <Field label="Bearer token" hint="(proxy-managed token key, or leave blank for local OAuth)">
                 <input value={account.gmail_bearer_token ?? ''} onChange={e => set('gmail_bearer_token', e.target.value)} placeholder="GMAIL_TOKEN_EXAMPLE" className={INPUT_MONO} />
               </Field>
               <Field label="Credentials path" hint="(local OAuth — path to credentials.json)">
@@ -678,7 +763,14 @@ function AccountEditor({ account, onChange, onRemove, isNew }: {
             </button>
             {hubspotExpanded && (
               <div className="mt-2 space-y-3">
-                <Field label="HubSpot bearer token" hint="(proxy-managed or direct private app token)">
+                <ProkuraResourcePicker
+                  services={prokuraServices}
+                  filterFn={s => s.domain_pattern === 'api.hubapi.com' && !!s.bearer_token_key}
+                  currentKey={account.hubspot_bearer_token}
+                  label="— select a HubSpot credential"
+                  onSelect={s => set('hubspot_bearer_token', s.bearer_token_key ?? '')}
+                />
+                <Field label="HubSpot bearer token" hint="(proxy-managed token key or direct private app token)">
                   <input value={account.hubspot_bearer_token ?? ''} onChange={e => set('hubspot_bearer_token', e.target.value)} placeholder="HUBSPOT_TOKEN" className={INPUT_MONO} />
                 </Field>
                 <Field label="Owner email" hint="(filter tasks/assignments to this user)">
@@ -700,12 +792,18 @@ function ConnectionsConfig() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newCount, setNewCount] = useState(0);
+  const [prokuraServices, setProkuraServices] = useState<ProkuraService[]>([]);
 
   const load = useCallback(() => {
     setLoading(true);
-    api.getConfigAccounts()
-      .then(({ accounts: a }) => { setAccounts(a); setOriginal(a); })
-      .catch(e => setError(e.message))
+    Promise.all([
+      api.getConfigAccounts(),
+      api.getProkuraResources().catch(() => ({ available: false, services: [] as ProkuraService[] })),
+    ]).then(([{ accounts: a }, prokura]) => {
+      setAccounts(a);
+      setOriginal(a);
+      setProkuraServices(prokura.services ?? []);
+    }).catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
 
@@ -748,10 +846,18 @@ function ConnectionsConfig() {
 
   return (
     <div>
-      <p className="text-sm text-slate-500 mb-4">
-        Manage email accounts, calendar sync, and HubSpot connections.
-        Changes are written to <code className="text-xs bg-slate-100 px-1 rounded">accounts.json</code> and take effect on the next sync run.
-      </p>
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <p className="text-sm text-slate-500">
+          Manage email accounts, calendar sync, and HubSpot connections.
+          Changes are written to <code className="text-xs bg-slate-100 px-1 rounded">accounts.json</code> and take effect on the next sync run.
+        </p>
+        {prokuraServices.length > 0 && (
+          <div className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700 whitespace-nowrap">
+            <span className="font-bold uppercase tracking-wider text-[10px]">Prokura</span>
+            <span>{prokuraServices.filter(s => !!s.bearer_token_key).length} credentials available</span>
+          </div>
+        )}
+      </div>
       <SaveBar dirty={dirty} saving={saving} error={error} onSave={save} onReset={() => { setAccounts(original); setError(null); setNewCount(0); }} />
 
       <div className="space-y-2">
@@ -762,6 +868,7 @@ function ConnectionsConfig() {
             onChange={a => update(i, a)}
             onRemove={() => remove(i)}
             isNew={i >= newIdxStart}
+            prokuraServices={prokuraServices}
           />
         ))}
       </div>

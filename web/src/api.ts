@@ -25,6 +25,7 @@ import type {
   LabelDef,
   CategoryDef,
   EmailAccount,
+  ProkuraResourcesResponse,
   PrefectDeployment,
   PrefectFlowRun,
   PrefectLog,
@@ -450,6 +451,10 @@ export const api = {
   },
 
   // ── Config (YAML/JSON file editors) ──────────────────────────────────────
+
+  getProkuraResources(): Promise<ProkuraResourcesResponse> {
+    return fetchJson(`${BASE}/config/prokura-resources`);
+  },
 
   async getConfigAccounts(): Promise<{ accounts: EmailAccount[]; filePath: string }> {
     const res = await fetch(`${BASE}/config/accounts`);

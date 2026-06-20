@@ -457,6 +457,26 @@ export type Granularity = 'fewer' | 'balanced' | 'more';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
+export interface ProkuraService {
+  service_name: string;
+  service_slug: string;
+  provider: string;
+  credential_type: string;
+  auth_scheme?: string;
+  bearer_token_key?: string;
+  account_email?: string;
+  domain_pattern?: string;
+  token_expires_at?: string | null;
+  description?: string;
+}
+
+export interface ProkuraResourcesResponse {
+  available: boolean;
+  agent_name?: string;
+  services: ProkuraService[];
+  error?: string;
+}
+
 export interface EmailAccount {
   name: string;
   backend: 'gmail' | 'imap';
