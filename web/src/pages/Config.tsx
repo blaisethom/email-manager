@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '../api';
-import type { LabelDef, CategoryDef } from '../types';
+import type { LabelDef, CategoryDef, EventTypeDef, MilestoneDef } from '../types';
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -33,6 +33,62 @@ function SaveBar({ dirty, saving, error, onSave, onReset }: {
   );
 }
 
+// Generic list editor for {name, description} pairs (used for event_types and milestones)
+function NameDescList({ items, onChange, namePlaceholder, descPlaceholder }: {
+  items: Array<{ name: string; description: string }>;
+  onChange: (items: Array<{ name: string; description: string }>) => void;
+  namePlaceholder?: string;
+  descPlaceholder?: string;
+}) {
+  const update = (i: number, field: 'name' | 'description', value: string) =>
+    onChange(items.map((item, idx) => idx === i ? { ...item, [field]: value } : item));
+
+  const remove = (i: number) => onChange(items.filter((_, idx) => idx !== i));
+
+  const add = () => onChange([...items, { name: '', description: '' }]);
+
+  return (
+    <div className="space-y-1.5">
+      {items.map((item, i) => (
+        <div key={i} className="flex gap-2 group">
+          <input
+            value={item.name}
+            onChange={e => update(i, 'name', e.target.value)}
+            placeholder={namePlaceholder ?? 'name'}
+            className="w-44 flex-shrink-0 px-2 py-1.5 text-xs font-mono border border-slate-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
+          />
+          <input
+            value={item.description}
+            onChange={e => update(i, 'description', e.target.value)}
+            placeholder={descPlaceholder ?? 'Description'}
+            className="flex-1 px-2 py-1.5 text-xs border border-slate-200 rounded focus:ring-1 focus:ring-blue-500 outline-none"
+          />
+          <button
+            onClick={() => remove(i)}
+            className="text-slate-300 hover:text-red-500 text-base leading-none opacity-0 group-hover:opacity-100 transition-opacity"
+          >×</button>
+        </div>
+      ))}
+      <button
+        onClick={add}
+        className="text-xs text-blue-600 hover:text-blue-700 mt-1"
+      >
+        + Add
+      </button>
+    </div>
+  );
+}
+
+function SectionHeader({ label, count }: { label: string; count?: number }) {
+  return (
+    <div className="flex items-center gap-2 mt-4 mb-2">
+      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{label}</span>
+      {count !== undefined && <span className="text-xs text-slate-400">({count})</span>}
+      <div className="flex-1 h-px bg-slate-100" />
+    </div>
+  );
+}
+
 // ── Label editor ──────────────────────────────────────────────────────────────
 
 function LabelsConfig() {
@@ -60,38 +116,27 @@ function LabelsConfig() {
   };
 
   const add = () => setLabels(prev => [...prev, { name: '', description: '' }]);
-
   const remove = (i: number) => setLabels(prev => prev.filter((_, idx) => idx !== i));
 
   const moveUp = (i: number) => {
     if (i === 0) return;
-    setLabels(prev => {
-      const next = [...prev];
-      [next[i - 1], next[i]] = [next[i], next[i - 1]];
-      return next;
-    });
+    setLabels(prev => { const n = [...prev]; [n[i-1], n[i]] = [n[i], n[i-1]]; return n; });
   };
-
   const moveDown = (i: number) => {
     setLabels(prev => {
       if (i >= prev.length - 1) return prev;
-      const next = [...prev];
-      [next[i], next[i + 1]] = [next[i + 1], next[i]];
-      return next;
+      const n = [...prev]; [n[i], n[i+1]] = [n[i+1], n[i]]; return n;
     });
   };
 
   const save = async () => {
-    setSaving(true);
-    setError(null);
+    setSaving(true); setError(null);
     try {
       await api.saveConfigLabels(labels);
       setOriginal(labels);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed');
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   };
 
   if (loading) return <div className="animate-pulse space-y-3"><div className="h-10 bg-slate-100 rounded" /><div className="h-10 bg-slate-100 rounded" /></div>;
@@ -103,42 +148,41 @@ function LabelsConfig() {
       </p>
       <SaveBar dirty={dirty} saving={saving} error={error} onSave={save} onReset={() => { setLabels(original); setError(null); }} />
 
-      <div className="space-y-2">
+      <div className="mb-2 grid grid-cols-[28px_180px_1fr_24px] gap-2 px-1">
+        <div />
+        <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Name</div>
+        <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Description (shown to AI)</div>
+        <div />
+      </div>
+
+      <div className="space-y-1.5">
         {labels.map((label, i) => (
-          <div key={i} className="flex items-start gap-2 group">
-            <div className="flex flex-col gap-0.5 pt-2 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button onClick={() => moveUp(i)} disabled={i === 0} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-xs">▲</button>
-              <button onClick={() => moveDown(i)} disabled={i === labels.length - 1} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-xs">▼</button>
+          <div key={i} className="flex items-center gap-2 group">
+            <div className="flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity w-6">
+              <button onClick={() => moveUp(i)} disabled={i === 0} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-[10px]">▲</button>
+              <button onClick={() => moveDown(i)} disabled={i === labels.length - 1} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-[10px]">▼</button>
             </div>
-            <div className="flex-1 grid grid-cols-[180px_1fr] gap-2">
-              <input
-                value={label.name}
-                onChange={e => update(i, 'name', e.target.value)}
-                placeholder="label-name"
-                className="px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
-              />
-              <input
-                value={label.description}
-                onChange={e => update(i, 'description', e.target.value)}
-                placeholder="Description shown to the AI when classifying companies"
-                className="px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-              />
-            </div>
+            <input
+              value={label.name}
+              onChange={e => update(i, 'name', e.target.value)}
+              placeholder="label-name"
+              className="w-44 flex-shrink-0 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
+            />
+            <input
+              value={label.description}
+              onChange={e => update(i, 'description', e.target.value)}
+              placeholder="Description…"
+              className="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            />
             <button
               onClick={() => remove(i)}
-              className="mt-2 text-slate-300 hover:text-red-500 transition-colors text-lg leading-none opacity-0 group-hover:opacity-100"
-              title="Remove"
-            >
-              ×
-            </button>
+              className="text-slate-300 hover:text-red-500 transition-colors text-lg leading-none opacity-0 group-hover:opacity-100 w-6"
+            >×</button>
           </div>
         ))}
       </div>
 
-      <button
-        onClick={add}
-        className="mt-4 px-4 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors"
-      >
+      <button onClick={add} className="mt-4 px-4 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors">
         + Add label
       </button>
     </div>
@@ -152,20 +196,16 @@ function StateTagInput({ states, onChange }: { states: string[]; onChange: (s: s
 
   const commit = () => {
     const val = input.trim().toLowerCase().replace(/\s+/g, '_');
-    if (val && !states.includes(val)) {
-      onChange([...states, val]);
-    }
+    if (val && !states.includes(val)) onChange([...states, val]);
     setInput('');
   };
-
-  const remove = (s: string) => onChange(states.filter(x => x !== s));
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border border-slate-200 rounded-lg min-h-[38px] focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500">
       {states.map(s => (
         <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 rounded text-xs font-mono text-slate-700">
           {s}
-          <button onClick={() => remove(s)} className="text-slate-400 hover:text-red-500 ml-0.5">×</button>
+          <button onClick={() => onChange(states.filter(x => x !== s))} className="text-slate-400 hover:text-red-500 ml-0.5">×</button>
         </span>
       ))}
       <input
@@ -173,14 +213,34 @@ function StateTagInput({ states, onChange }: { states: string[]; onChange: (s: s
         onChange={e => setInput(e.target.value)}
         onKeyDown={e => {
           if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); }
-          if (e.key === 'Backspace' && !input && states.length) {
-            onChange(states.slice(0, -1));
-          }
+          if (e.key === 'Backspace' && !input && states.length) onChange(states.slice(0, -1));
         }}
         onBlur={commit}
         placeholder={states.length === 0 ? 'Type a state, press Enter' : ''}
         className="flex-1 min-w-[120px] text-xs outline-none bg-transparent"
       />
+    </div>
+  );
+}
+
+function CheckboxList({ options, selected, onChange }: {
+  options: string[];
+  selected: string[];
+  onChange: (s: string[]) => void;
+}) {
+  const toggle = (v: string) =>
+    onChange(selected.includes(v) ? selected.filter(s => s !== v) : [...selected, v]);
+
+  if (options.length === 0) return <p className="text-xs text-slate-400 italic">Add states above first</p>;
+
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+      {options.map(s => (
+        <label key={s} className="flex items-center gap-1.5 text-xs cursor-pointer">
+          <input type="checkbox" checked={selected.includes(s)} onChange={() => toggle(s)} className="rounded" />
+          <span className="font-mono text-slate-700">{s}</span>
+        </label>
+      ))}
     </div>
   );
 }
@@ -196,100 +256,137 @@ function CategoryEditor({ cat, onChange, onRemove, onMoveUp, onMoveDown, isFirst
 }) {
   const [open, setOpen] = useState(false);
 
-  const set = <K extends keyof CategoryDef>(k: K, v: CategoryDef[K]) =>
-    onChange({ ...cat, [k]: v });
+  const set = <K extends keyof CategoryDef>(k: K, v: CategoryDef[K]) => onChange({ ...cat, [k]: v });
 
-  const toggleTerminal = (state: string) => {
-    const next = cat.terminal_states.includes(state)
-      ? cat.terminal_states.filter(s => s !== state)
-      : [...cat.terminal_states, state];
-    set('terminal_states', next);
-  };
+  const setWorkflowStates = (states: string[]) => onChange({
+    ...cat,
+    workflow_states: states,
+    terminal_states: cat.terminal_states.filter(s => states.includes(s)),
+  });
+
+  const setEventTypes = (et: EventTypeDef[]) => onChange({
+    ...cat,
+    event_types: et,
+    terminal_event_types: (cat.terminal_event_types ?? []).filter(n => et.some(e => e.name === n)),
+  });
+
+  const eventNames = (cat.event_types ?? []).map(e => e.name).filter(Boolean);
 
   return (
     <div className="border border-slate-200 rounded-lg overflow-hidden group">
-      <div className="flex items-center gap-2 px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors">
+      {/* Header row */}
+      <div className="flex items-center gap-2 px-3 py-2.5 bg-slate-50 hover:bg-slate-100 transition-colors">
         <div className="flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button onClick={onMoveUp} disabled={isFirst} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-xs">▲</button>
-          <button onClick={onMoveDown} disabled={isLast} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-xs">▼</button>
+          <button onClick={onMoveUp} disabled={isFirst} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-[10px]">▲</button>
+          <button onClick={onMoveDown} disabled={isLast} className="text-slate-300 hover:text-slate-600 disabled:opacity-0 leading-none text-[10px]">▼</button>
         </div>
-        <button
-          onClick={() => setOpen(!open)}
-          className="flex-1 flex items-center gap-3 text-left"
-        >
-          <span className="font-mono text-sm font-medium text-slate-800">{cat.name || '(unnamed)'}</span>
+        <button onClick={() => setOpen(!open)} className="flex-1 flex items-center gap-3 text-left min-w-0">
+          <span className="font-mono text-sm font-semibold text-slate-800 flex-shrink-0">{cat.name || '(unnamed)'}</span>
           {cat.sub_discussion && (
-            <span className="px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 text-purple-700 rounded uppercase tracking-wider">sub</span>
+            <span className="px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 text-purple-700 rounded uppercase tracking-wider flex-shrink-0">sub</span>
           )}
           <span className="text-xs text-slate-400 truncate">{cat.description}</span>
-          <span className="ml-auto text-xs text-slate-400 flex-shrink-0">
-            {cat.workflow_states.length} states
+          <span className="ml-auto text-xs text-slate-400 flex-shrink-0 pl-2">
+            {cat.workflow_states.length} states{cat.event_types?.length ? `, ${cat.event_types.length} events` : ''}
           </span>
-          <span className="text-slate-400 text-xs">{open ? '▲' : '▼'}</span>
+          <span className="text-slate-400 text-xs flex-shrink-0">{open ? '▲' : '▼'}</span>
         </button>
         <button
           onClick={onRemove}
-          className="text-slate-300 hover:text-red-500 transition-colors text-lg leading-none opacity-0 group-hover:opacity-100 ml-1"
-        >
-          ×
-        </button>
+          className="text-slate-300 hover:text-red-500 transition-colors text-lg leading-none opacity-0 group-hover:opacity-100 ml-1 flex-shrink-0"
+          title="Remove category"
+        >×</button>
       </div>
 
       {open && (
         <div className="p-4 border-t border-slate-200 space-y-4">
+
+          {/* Name + description */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">Name (ID)</label>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Name (ID)</label>
               <input
                 value={cat.name}
                 onChange={e => set('name', e.target.value.toLowerCase().replace(/\s+/g, '-'))}
-                className="w-full px-3 py-1.5 text-sm font-mono border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                className="w-full px-3 py-1.5 text-sm font-mono border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">Description (shown to AI)</label>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Description (shown to AI)</label>
               <input
                 value={cat.description}
                 onChange={e => set('description', e.target.value)}
-                className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
               />
             </div>
           </div>
 
+          {/* Sub-discussion flag */}
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!cat.sub_discussion}
+              onChange={e => set('sub_discussion', e.target.checked || undefined)}
+              className="rounded"
+            />
+            <span className="text-slate-700">Sub-discussion</span>
+            <span className="text-xs text-slate-400">(nested inside another discussion)</span>
+          </label>
+
+          {/* Workflow states */}
           <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">
-              Workflow states <span className="font-normal text-slate-400">(type then Enter to add)</span>
+            <SectionHeader label="Workflow States" count={cat.workflow_states.length} />
+            <StateTagInput states={cat.workflow_states} onChange={setWorkflowStates} />
+          </div>
+
+          {/* Terminal states */}
+          <div>
+            <label className="block text-xs font-medium text-slate-500 mb-1.5">
+              Terminal States <span className="font-normal text-slate-400">(discussions in these states are considered closed)</span>
             </label>
-            <StateTagInput
-              states={cat.workflow_states}
-              onChange={s => {
-                // Remove any terminal_states that no longer exist
-                set('workflow_states', s);
-                onChange({ ...cat, workflow_states: s, terminal_states: cat.terminal_states.filter(t => s.includes(t)) });
-              }}
+            <CheckboxList
+              options={cat.workflow_states}
+              selected={cat.terminal_states}
+              onChange={s => set('terminal_states', s)}
             />
           </div>
 
-          {cat.workflow_states.length > 0 && (
+          {/* Event types */}
+          <div>
+            <SectionHeader label="Event Types" count={cat.event_types?.length ?? 0} />
+            <NameDescList
+              items={cat.event_types ?? []}
+              onChange={setEventTypes}
+              namePlaceholder="event_name"
+              descPlaceholder="What this event represents"
+            />
+          </div>
+
+          {/* Terminal event types */}
+          {(cat.event_types?.length ?? 0) > 0 && (
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-2">
-                Terminal states <span className="font-normal text-slate-400">(discussions in these states are considered closed)</span>
+              <label className="block text-xs font-medium text-slate-500 mb-1.5">
+                Terminal Event Types <span className="font-normal text-slate-400">(events that close the discussion)</span>
               </label>
-              <div className="flex flex-wrap gap-2">
-                {cat.workflow_states.map(s => (
-                  <label key={s} className="flex items-center gap-1.5 text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={cat.terminal_states.includes(s)}
-                      onChange={() => toggleTerminal(s)}
-                      className="rounded"
-                    />
-                    <span className="font-mono text-xs text-slate-700">{s}</span>
-                  </label>
-                ))}
-              </div>
+              <CheckboxList
+                options={eventNames}
+                selected={cat.terminal_event_types ?? []}
+                onChange={s => set('terminal_event_types', s)}
+              />
             </div>
           )}
+
+          {/* Milestones */}
+          <div>
+            <SectionHeader label="Milestones" count={cat.milestones?.length ?? 0} />
+            <NameDescList
+              items={cat.milestones ?? []}
+              onChange={m => set('milestones', m)}
+              namePlaceholder="milestone_name"
+              descPlaceholder="What reaching this milestone means"
+            />
+          </div>
+
         </div>
       )}
     </div>
@@ -322,19 +419,12 @@ function WorkflowsConfig() {
 
   const moveUp = (i: number) => {
     if (i === 0) return;
-    setCategories(prev => {
-      const next = [...prev];
-      [next[i - 1], next[i]] = [next[i], next[i - 1]];
-      return next;
-    });
+    setCategories(prev => { const n = [...prev]; [n[i-1], n[i]] = [n[i], n[i-1]]; return n; });
   };
-
   const moveDown = (i: number) => {
     setCategories(prev => {
       if (i >= prev.length - 1) return prev;
-      const next = [...prev];
-      [next[i], next[i + 1]] = [next[i + 1], next[i]];
-      return next;
+      const n = [...prev]; [n[i], n[i+1]] = [n[i+1], n[i]]; return n;
     });
   };
 
@@ -343,19 +433,18 @@ function WorkflowsConfig() {
     description: '',
     workflow_states: ['active', 'resolved', 'stale'],
     terminal_states: ['resolved', 'stale'],
+    event_types: [],
+    milestones: [],
   }]);
 
   const save = async () => {
-    setSaving(true);
-    setError(null);
+    setSaving(true); setError(null);
     try {
       await api.saveConfigCategories(categories);
       setOriginal(categories);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed');
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   };
 
   if (loading) return <div className="animate-pulse space-y-2"><div className="h-12 bg-slate-100 rounded-lg" /><div className="h-12 bg-slate-100 rounded-lg" /></div>;
@@ -363,8 +452,8 @@ function WorkflowsConfig() {
   return (
     <div>
       <p className="text-sm text-slate-500 mb-4">
-        Define discussion categories and their workflow states. The AI uses these to classify and track discussions.
-        Event types and milestones (defined in the YAML) are preserved when saving.
+        Define discussion categories, their workflow states, event types, and milestones.
+        All fields are written directly to <code className="text-xs bg-slate-100 px-1 rounded">discussion_categories.yaml</code>.
       </p>
       <SaveBar dirty={dirty} saving={saving} error={error} onSave={save} onReset={() => { setCategories(original); setError(null); }} />
 
@@ -383,10 +472,7 @@ function WorkflowsConfig() {
         ))}
       </div>
 
-      <button
-        onClick={add}
-        className="mt-4 px-4 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors"
-      >
+      <button onClick={add} className="mt-4 px-4 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors">
         + Add workflow category
       </button>
     </div>
@@ -410,7 +496,7 @@ export default function ConfigPage() {
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors capitalize ${
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               tab === t
                 ? 'border-blue-600 text-blue-600'
                 : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'

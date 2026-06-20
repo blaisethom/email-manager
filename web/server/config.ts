@@ -24,15 +24,17 @@ const CATEGORY_FILE = resolveConfigFile(['discussion_categories.yaml']);
 
 interface LabelDef { name: string; description: string; }
 
+interface NameDesc { name: string; description: string; }
+
 interface CategoryDef {
   name: string;
   description: string;
   workflow_states: string[];
   terminal_states: string[];
-  event_types?: Array<{ name: string; description: string }>;
-  terminal_event_types?: string[];
-  milestones?: Array<{ name: string; description: string }>;
   sub_discussion?: boolean;
+  event_types?: NameDesc[];
+  terminal_event_types?: string[];
+  milestones?: NameDesc[];
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -61,6 +63,26 @@ function writeCategories(categories: CategoryDef[]): void {
   fs.writeFileSync(CATEGORY_FILE, content, 'utf8');
 }
 
+function cleanCategory(c: Partial<CategoryDef>): CategoryDef {
+  const out: CategoryDef = {
+    name: (c.name ?? '').trim(),
+    description: (c.description ?? '').trim(),
+    workflow_states: c.workflow_states ?? [],
+    terminal_states: (c.terminal_states ?? []).filter(s => (c.workflow_states ?? []).includes(s)),
+  };
+  if (c.sub_discussion) out.sub_discussion = true;
+  if (c.event_types?.length) {
+    out.event_types = c.event_types.map(e => ({ name: e.name.trim(), description: e.description.trim() }));
+    const eventNames = new Set(out.event_types.map(e => e.name));
+    const termEvents = (c.terminal_event_types ?? []).filter(n => eventNames.has(n));
+    if (termEvents.length) out.terminal_event_types = termEvents;
+  }
+  if (c.milestones?.length) {
+    out.milestones = c.milestones.map(m => ({ name: m.name.trim(), description: m.description.trim() }));
+  }
+  return out;
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 export function registerConfigRoutes(app: Express): void {
@@ -74,8 +96,7 @@ export function registerConfigRoutes(app: Express): void {
     }
   });
 
-  // PUT /api/config/labels
-  // body: { labels: [{name, description}] }
+  // PUT /api/config/labels — body: { labels: [{name, description}] }
   app.put('/api/config/labels', (req: Request, res: Response) => {
     const { labels } = req.body as { labels?: LabelDef[] };
     if (!Array.isArray(labels)) {
@@ -101,9 +122,8 @@ export function registerConfigRoutes(app: Express): void {
     }
   });
 
-  // PUT /api/config/categories
-  // body: { categories: [{name, description, workflow_states, terminal_states, ...rest}] }
-  // Merges with existing to preserve event_types, milestones, etc. that the UI doesn't edit.
+  // PUT /api/config/categories — body: { categories: [CategoryDef] }
+  // The client sends the full structure (including event_types, milestones, sub_discussion).
   app.put('/api/config/categories', (req: Request, res: Response) => {
     const { categories } = req.body as { categories?: Partial<CategoryDef>[] };
     if (!Array.isArray(categories)) {
@@ -113,27 +133,8 @@ export function registerConfigRoutes(app: Express): void {
       if (!c.name?.trim()) { res.status(400).json({ error: 'Each category must have a name' }); return; }
     }
     try {
-      // Read existing to preserve fields the UI doesn't edit
-      const existing = readCategories();
-      const existingByName = new Map(existing.map(c => [c.name, c]));
-
-      const merged: CategoryDef[] = categories.map(patch => {
-        const old = existingByName.get(patch.name ?? '') ?? {};
-        return {
-          name: (patch.name ?? '').trim(),
-          description: (patch.description ?? '').trim(),
-          workflow_states: patch.workflow_states ?? (old as CategoryDef).workflow_states ?? [],
-          terminal_states: patch.terminal_states ?? (old as CategoryDef).terminal_states ?? [],
-          // Preserve fields the UI doesn't touch
-          ...((old as CategoryDef).event_types ? { event_types: (old as CategoryDef).event_types } : {}),
-          ...((old as CategoryDef).terminal_event_types ? { terminal_event_types: (old as CategoryDef).terminal_event_types } : {}),
-          ...((old as CategoryDef).milestones ? { milestones: (old as CategoryDef).milestones } : {}),
-          ...((old as CategoryDef).sub_discussion ? { sub_discussion: (old as CategoryDef).sub_discussion } : {}),
-        };
-      });
-
-      writeCategories(merged);
-      res.json({ ok: true, count: merged.length });
+      writeCategories(categories.map(cleanCategory));
+      res.json({ ok: true, count: categories.length });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }

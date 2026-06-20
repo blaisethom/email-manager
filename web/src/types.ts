@@ -462,12 +462,25 @@ export interface LabelDef {
   description: string;
 }
 
+export interface EventTypeDef {
+  name: string;
+  description: string;
+}
+
+export interface MilestoneDef {
+  name: string;
+  description: string;
+}
+
 export interface CategoryDef {
   name: string;
   description: string;
   workflow_states: string[];
   terminal_states: string[];
   sub_discussion?: boolean;
+  event_types?: EventTypeDef[];
+  terminal_event_types?: string[];
+  milestones?: MilestoneDef[];
 }
 
 // ── Unified entity model ───────────────────────────────────────────────────
