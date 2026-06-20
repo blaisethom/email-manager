@@ -649,6 +649,39 @@ export interface PipelineJob {
   progress_done: number;
   progress_total: number;
   current_company: string | null;
+  prefect_flow_run_id: string | null;
+  prefect_deployment_name: string | null;
+}
+
+// ── Prefect ──────────────────────────────────────────────────────────────────
+
+export interface PrefectDeployment {
+  id: string;
+  name: string;
+  flow_name: string;
+  paused: boolean;
+  schedules: Array<{ schedule: { cron?: string }; active: boolean }>;
+  last_polled: string | null;
+  next_scheduled_start_time: string | null;
+}
+
+export interface PrefectFlowRun {
+  id: string;
+  name: string;
+  deployment_id: string | null;
+  state_type: string;
+  state_name: string;
+  start_time: string | null;
+  end_time: string | null;
+  total_run_time: number;
+  parameters: Record<string, unknown>;
+}
+
+export interface PrefectLog {
+  id: string;
+  timestamp: string;
+  level: number;
+  message: string;
 }
 
 export interface PipelineStage {

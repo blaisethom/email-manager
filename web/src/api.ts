@@ -24,6 +24,9 @@ import type {
   HubSpotTaskDetail,
   LabelDef,
   CategoryDef,
+  PrefectDeployment,
+  PrefectFlowRun,
+  PrefectLog,
 } from './types';
 
 const BASE = '/api';
@@ -481,5 +484,47 @@ export const api = {
       const text = await res.text().catch(() => res.statusText);
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
+  },
+
+  // ── Prefect ───────────────────────────────────────────────────────────────
+
+  getPrefectStatus(): Promise<{ enabled: boolean; url: string | null }> {
+    return fetchJson(`${BASE}/prefect/status`);
+  },
+
+  getPrefectDeployments(): Promise<PrefectDeployment[]> {
+    return fetchJson(`${BASE}/prefect/deployments`);
+  },
+
+  async triggerPrefectDeployment(deploymentId: string, parameters: Record<string, unknown> = {}): Promise<PrefectFlowRun> {
+    const res = await fetch(`${BASE}/prefect/deployments/${deploymentId}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parameters }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    return res.json();
+  },
+
+  getPrefectRuns(deploymentId?: string, limit = 25): Promise<PrefectFlowRun[]> {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (deploymentId) qs.set('deployment_id', deploymentId);
+    return fetchJson(`${BASE}/prefect/runs?${qs}`);
+  },
+
+  getPrefectRun(runId: string): Promise<PrefectFlowRun> {
+    return fetchJson(`${BASE}/prefect/runs/${runId}`);
+  },
+
+  getPrefectLogs(runId: string, offset = 0): Promise<PrefectLog[]> {
+    return fetchJson(`${BASE}/prefect/runs/${runId}/logs?offset=${offset}&limit=500`);
+  },
+
+  async cancelPrefectRun(runId: string): Promise<void> {
+    const res = await fetch(`${BASE}/prefect/runs/${runId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
   },
 };

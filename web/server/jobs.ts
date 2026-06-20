@@ -13,6 +13,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import type { Response } from 'express';
 import type { Database, DbRow } from './db.js';
+import {
+  prefectEnabled, triggerDeployment, getDeploymentByName,
+  getFlowRun, cancelFlowRun, prefectStateToJobStatus,
+} from './prefect.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,6 +52,8 @@ export interface PipelineJob extends DbRow {
   progress_done: number;
   progress_total: number;
   current_company: string | null;
+  prefect_flow_run_id: string | null;
+  prefect_deployment_name: string | null;
 }
 
 export interface StageInfo {
@@ -99,37 +105,41 @@ const MAX_FINISHED_BUFFERS = 5;
 // ── DDL ──────────��─────────────────────────────────��───────────────────────
 
 const DDL_SQLITE = `CREATE TABLE IF NOT EXISTS pipeline_jobs (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_type        TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'queued',
-    config_json     TEXT NOT NULL,
-    pid             INTEGER,
-    started_at      TEXT,
-    completed_at    TEXT,
-    created_at      TEXT NOT NULL,
-    exit_code       INTEGER,
-    error_message   TEXT,
-    current_stage   TEXT,
-    progress_done   INTEGER DEFAULT 0,
-    progress_total  INTEGER DEFAULT 0,
-    current_company TEXT
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type                TEXT NOT NULL,
+    status                  TEXT NOT NULL DEFAULT 'queued',
+    config_json             TEXT NOT NULL,
+    pid                     INTEGER,
+    started_at              TEXT,
+    completed_at            TEXT,
+    created_at              TEXT NOT NULL,
+    exit_code               INTEGER,
+    error_message           TEXT,
+    current_stage           TEXT,
+    progress_done           INTEGER DEFAULT 0,
+    progress_total          INTEGER DEFAULT 0,
+    current_company         TEXT,
+    prefect_flow_run_id     TEXT,
+    prefect_deployment_name TEXT
 )`;
 
 const DDL_POSTGRES = `CREATE TABLE IF NOT EXISTS pipeline_jobs (
-    id              SERIAL PRIMARY KEY,
-    job_type        TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'queued',
-    config_json     TEXT NOT NULL,
-    pid             INTEGER,
-    started_at      TEXT,
-    completed_at    TEXT,
-    created_at      TEXT NOT NULL,
-    exit_code       INTEGER,
-    error_message   TEXT,
-    current_stage   TEXT,
-    progress_done   INTEGER DEFAULT 0,
-    progress_total  INTEGER DEFAULT 0,
-    current_company TEXT
+    id                      SERIAL PRIMARY KEY,
+    job_type                TEXT NOT NULL,
+    status                  TEXT NOT NULL DEFAULT 'queued',
+    config_json             TEXT NOT NULL,
+    pid                     INTEGER,
+    started_at              TEXT,
+    completed_at            TEXT,
+    created_at              TEXT NOT NULL,
+    exit_code               INTEGER,
+    error_message           TEXT,
+    current_stage           TEXT,
+    progress_done           INTEGER DEFAULT 0,
+    progress_total          INTEGER DEFAULT 0,
+    current_company         TEXT,
+    prefect_flow_run_id     TEXT,
+    prefect_deployment_name TEXT
 )`;
 
 const DDL_INDEXES = `
@@ -153,10 +163,19 @@ export async function initJobs(database: Database): Promise<void> {
   }
   await db.exec(DDL_INDEXES);
 
-  // Crash recovery: mark orphaned running jobs as failed
+  // Add new columns if missing (idempotent)
+  const alterCmds = [
+    `ALTER TABLE pipeline_jobs ADD COLUMN IF NOT EXISTS prefect_flow_run_id TEXT`,
+    `ALTER TABLE pipeline_jobs ADD COLUMN IF NOT EXISTS prefect_deployment_name TEXT`,
+  ];
+  for (const cmd of alterCmds) {
+    await db.exec(cmd).catch(() => { /* SQLite: column may already exist */ });
+  }
+
+  // Crash recovery: mark orphaned LOCAL running jobs as failed
   const now = new Date().toISOString();
   const orphaned = await db.query<PipelineJob>(
-    "SELECT id FROM pipeline_jobs WHERE status = 'running'"
+    "SELECT id FROM pipeline_jobs WHERE status = 'running' AND prefect_flow_run_id IS NULL"
   );
   for (const job of orphaned) {
     await db.query(
@@ -166,13 +185,19 @@ export async function initJobs(database: Database): Promise<void> {
     console.log(`[jobs] Marked orphaned job #${job.id} as failed`);
   }
 
-  // Start processing queued jobs
   // Add staleness_status column if missing
   await db.exec(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS staleness_status TEXT`).catch(() => {
     // SQLite doesn't support IF NOT EXISTS on ALTER TABLE; ignore if column exists
   });
 
   await processQueue();
+
+  // Start Prefect status poller if configured
+  if (prefectEnabled()) {
+    console.log('[jobs] Prefect integration enabled, starting status poller');
+    startPrefectPoller();
+  }
+
   console.log('[jobs] Job manager initialized');
 }
 
@@ -242,10 +267,48 @@ function scheduleStaleRefresh(): void {
 
 // ── Job creation ──────────��────────────────────────────────────────────────
 
+// Maps local job configs to Prefect deployment names.
+// Returns null if the job should run locally.
+function resolvePrefectDeployment(config: JobConfig): string | null {
+  if (!prefectEnabled()) return null;
+  // Single-company targeted runs always stay local — no Prefect equivalent
+  if (config.company) return null;
+  if (config.job_type === 'sync') return 'ingest';
+  if (config.job_type === 'analyse') return 'ai-analysis';
+  return null;
+}
+
 export async function createJob(config: JobConfig): Promise<PipelineJob> {
   const now = new Date().toISOString();
   const configJson = JSON.stringify(config);
 
+  const deploymentName = resolvePrefectDeployment(config);
+
+  if (deploymentName) {
+    // ── Prefect path ────────────────────────────────────────────────────────
+    const deployment = await getDeploymentByName(deploymentName);
+    if (!deployment) {
+      throw new Error(`Prefect deployment "${deploymentName}" not found on ${process.env.PREFECT_API_URL}`);
+    }
+
+    const parameters: Record<string, unknown> = {};
+    if (config.stages?.length) parameters.stages = config.stages;
+    if (config.force) parameters.force = true;
+
+    const flowRun = await triggerDeployment(deployment.id, parameters);
+    console.log(`[jobs] Dispatched to Prefect: deployment=${deploymentName} flow_run=${flowRun.id}`);
+
+    const row = await db.queryOne<PipelineJob>(
+      `INSERT INTO pipeline_jobs
+         (job_type, status, config_json, created_at, prefect_flow_run_id, prefect_deployment_name)
+       VALUES (?, 'queued', ?, ?, ?, ?) RETURNING *`,
+      config.job_type, configJson, now, flowRun.id, deploymentName,
+    );
+    if (!row) throw new Error('Failed to create job record');
+    return row;
+  }
+
+  // ── Local path ─────────────────────────────────────────────────────────────
   const row = await db.queryOne<PipelineJob>(
     `INSERT INTO pipeline_jobs (job_type, status, config_json, created_at)
      VALUES (?, 'queued', ?, ?) RETURNING *`,
@@ -262,6 +325,56 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
   await processQueue();
 
   return row;
+}
+
+// ── Prefect status poller ─────────────────────────────────────────────────────
+
+let prefectPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function startPrefectPoller(): void {
+  if (prefectPollTimer) return;
+  prefectPollTimer = setInterval(pollPrefectJobs, 10_000);
+}
+
+async function pollPrefectJobs(): Promise<void> {
+  try {
+    const active = await db.query<{ id: number; prefect_flow_run_id: string }>(
+      `SELECT id, prefect_flow_run_id FROM pipeline_jobs
+       WHERE prefect_flow_run_id IS NOT NULL AND status IN ('queued', 'running')`,
+    );
+    if (active.length === 0) return;
+
+    for (const job of active) {
+      try {
+        const run = await getFlowRun(job.prefect_flow_run_id);
+        const newStatus = prefectStateToJobStatus(run.state_type);
+        const now = new Date().toISOString();
+        const isTerminal = ['completed', 'failed', 'cancelled'].includes(newStatus);
+
+        await db.query(
+          `UPDATE pipeline_jobs SET
+             status       = ?,
+             started_at   = COALESCE(started_at, ?),
+             completed_at = ?,
+             current_stage = ?
+           WHERE id = ?`,
+          newStatus,
+          run.start_time ?? null,
+          isTerminal ? (run.end_time ?? now) : null,
+          run.state_name,
+          job.id,
+        );
+
+        if (isTerminal) {
+          scheduleStaleRefresh();
+        }
+      } catch (err) {
+        console.error(`[prefect] Failed to poll flow run ${job.prefect_flow_run_id}:`, err);
+      }
+    }
+  } catch (err) {
+    console.error('[prefect] Poll error:', err);
+  }
 }
 
 // ── Job queries ────────────────���───────────────────────────────────────────
@@ -315,6 +428,20 @@ export async function cancelJob(id: number): Promise<boolean> {
   if (!job) return false;
 
   const now = new Date().toISOString();
+
+  // Prefect-backed job — cancel via Prefect API
+  if (job.prefect_flow_run_id && ['queued', 'running'].includes(job.status)) {
+    try {
+      await cancelFlowRun(job.prefect_flow_run_id);
+    } catch (err) {
+      console.error(`[prefect] Cancel flow run ${job.prefect_flow_run_id} failed:`, err);
+    }
+    await db.query(
+      "UPDATE pipeline_jobs SET status = 'cancelled', completed_at = ? WHERE id = ?",
+      now, id
+    );
+    return true;
+  }
 
   if (job.status === 'queued') {
     await db.query(

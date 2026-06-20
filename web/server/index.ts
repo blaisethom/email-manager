@@ -16,6 +16,10 @@ import {
 } from './entities.js';
 import { registerReviewRoutes } from './review.js';
 import { registerConfigRoutes } from './config.js';
+import {
+  prefectEnabled, listDeployments, triggerDeployment, getDeploymentByName,
+  listFlowRuns, getFlowRun, getFlowRunLogs, cancelFlowRun,
+} from './prefect.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1985,6 +1989,81 @@ if (process.env.NODE_ENV === 'production') {
 
 registerReviewRoutes(app, db);
 registerConfigRoutes(app);
+
+// ── Prefect proxy routes ────────────────────────────────────────────────────
+
+app.get('/api/prefect/status', (_req: Request, res: Response) => {
+  res.json({
+    enabled: prefectEnabled(),
+    url: process.env.PREFECT_API_URL ?? null,
+  });
+});
+
+app.get('/api/prefect/deployments', async (_req: Request, res: Response) => {
+  try {
+    const deps = await listDeployments();
+    res.json(deps);
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
+app.post('/api/prefect/deployments/:id/run', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { parameters = {} } = req.body as { parameters?: Record<string, unknown> };
+    const run = await triggerDeployment(id, parameters);
+    res.status(201).json(run);
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
+app.get('/api/prefect/runs', async (req: Request, res: Response) => {
+  try {
+    const { deployment_id, limit, offset } = req.query as Record<string, string>;
+    const runs = await listFlowRuns({
+      deploymentId: deployment_id,
+      limit: limit ? parseInt(limit, 10) : 25,
+      offset: offset ? parseInt(offset, 10) : 0,
+    });
+    res.json(runs);
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
+app.get('/api/prefect/runs/:id', async (req: Request, res: Response) => {
+  try {
+    const run = await getFlowRun(req.params.id);
+    res.json(run);
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
+app.get('/api/prefect/runs/:id/logs', async (req: Request, res: Response) => {
+  try {
+    const { offset, limit } = req.query as Record<string, string>;
+    const logs = await getFlowRunLogs(
+      req.params.id,
+      offset ? parseInt(offset, 10) : 0,
+      limit ? parseInt(limit, 10) : 200,
+    );
+    res.json(logs);
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
+
+app.delete('/api/prefect/runs/:id', async (req: Request, res: Response) => {
+  try {
+    await cancelFlowRun(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(502).json({ error: String(err) });
+  }
+});
 
 initJobs(db).then(() => {
   app.listen(PORT, () => {
