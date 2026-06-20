@@ -1641,8 +1641,14 @@ app.post('/api/jobs', async (req: Request, res: Response) => {
     stale_prompt: !!body.stale_prompt,
   };
 
-  const job = await createJob(config);
-  res.status(201).json(job);
+  try {
+    const job = await createJob(config);
+    res.status(201).json(job);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[jobs] createJob failed:', msg);
+    res.status(500).json({ error: msg });
+  }
 });
 
 app.get('/api/jobs/:id', async (req: Request, res: Response) => {

@@ -286,27 +286,34 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
 
   if (deploymentName) {
     // ── Prefect path ────────────────────────────────────────────────────────
-    const deployment = await getDeploymentByName(deploymentName);
-    if (!deployment) {
-      throw new Error(`Prefect deployment "${deploymentName}" not found on ${process.env.PREFECT_API_URL}`);
+    let deployment = null;
+    try {
+      deployment = await getDeploymentByName(deploymentName);
+    } catch (err) {
+      console.warn(`[jobs] Prefect lookup failed (falling back to local): ${err}`);
     }
 
-    const parameters: Record<string, unknown> = {};
-    if (config.company) parameters.domain = config.company;
-    if (config.stages?.length) parameters.stages = config.stages;
-    if (config.force) parameters.force = true;
+    if (deployment) {
+      const parameters: Record<string, unknown> = {};
+      if (config.company) parameters.domain = config.company;
+      if (config.stages?.length) parameters.stages = config.stages;
+      if (config.force) parameters.force = true;
 
-    const flowRun = await triggerDeployment(deployment.id, parameters);
-    console.log(`[jobs] Dispatched to Prefect: deployment=${deploymentName} flow_run=${flowRun.id}`);
+      const flowRun = await triggerDeployment(deployment.id, parameters);
+      console.log(`[jobs] Dispatched to Prefect: deployment=${deploymentName} flow_run=${flowRun.id}`);
 
-    const row = await db.queryOne<PipelineJob>(
-      `INSERT INTO pipeline_jobs
-         (job_type, status, config_json, created_at, prefect_flow_run_id, prefect_deployment_name)
-       VALUES (?, 'queued', ?, ?, ?, ?) RETURNING *`,
-      config.job_type, configJson, now, flowRun.id, deploymentName,
-    );
-    if (!row) throw new Error('Failed to create job record');
-    return row;
+      const row = await db.queryOne<PipelineJob>(
+        `INSERT INTO pipeline_jobs
+           (job_type, status, config_json, created_at, prefect_flow_run_id, prefect_deployment_name)
+         VALUES (?, 'queued', ?, ?, ?, ?) RETURNING *`,
+        config.job_type, configJson, now, flowRun.id, deploymentName,
+      );
+      if (!row) throw new Error('Failed to create job record');
+      return row;
+    }
+
+    console.warn(`[jobs] Prefect deployment "${deploymentName}" not found — running locally`);
+    // Fall through to local execution
   }
 
   // ── Local path ─────────────────────────────────────────────────────────────
