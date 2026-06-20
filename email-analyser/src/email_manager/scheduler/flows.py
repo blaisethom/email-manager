@@ -168,6 +168,24 @@ def ai_flow(batch_size: int | None = None) -> dict:
     return summary
 
 
+# ── Single-company flow ───────────────────────────────────────────────────────
+
+
+@flow(name="email-manager-company-ai", log_prints=True)
+def company_flow(domain: str, stages: list[str] | None = None) -> dict:
+    """Run the AI interpretation pipeline for a single company.
+
+    Triggered on demand from the web UI (e.g. after discussion feedback or
+    from the company detail page). The optional ``stages`` list restricts
+    which pipeline stages run; omit it to run all AI stages.
+    """
+    log = get_run_logger()
+    log.info("Running company AI flow for %s (stages=%s)", domain, stages or "all")
+    result = process_company_ai(domain, stages=stages or None)
+    log.info("Company AI flow complete for %s: %s", domain, result)
+    return result
+
+
 # ── Convenience: run all three flows sequentially ────────────────────────────
 
 

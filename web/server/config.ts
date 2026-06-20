@@ -17,10 +17,32 @@ function resolveConfigFile(names: string[]): string | null {
   return null;
 }
 
+const ACCOUNTS_FILE = path.resolve(__dirname, '../../email-analyser/accounts.json');
+
 const LABEL_FILE = resolveConfigFile(['company_labels.yaml']);
 const CATEGORY_FILE = resolveConfigFile(['discussion_categories.yaml']);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+interface EmailAccount {
+  name: string;
+  backend: 'gmail' | 'imap';
+  // Gmail
+  gmail_credentials_path?: string;
+  gmail_token_path?: string;
+  gmail_labels?: string[];
+  gmail_bearer_token?: string;
+  // IMAP
+  imap_host?: string;
+  imap_user?: string;
+  imap_password?: string;
+  imap_port?: number;
+  imap_use_ssl?: boolean;
+  imap_folders?: string[];
+  // HubSpot (any backend)
+  hubspot_bearer_token?: string;
+  hubspot_owner_email?: string;
+}
 
 interface LabelDef { name: string; description: string; }
 
@@ -38,6 +60,39 @@ interface CategoryDef {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function readAccounts(): EmailAccount[] {
+  if (!fs.existsSync(ACCOUNTS_FILE)) return [];
+  return JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')) as EmailAccount[];
+}
+
+function writeAccounts(accounts: EmailAccount[]): void {
+  fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2) + '\n', 'utf8');
+}
+
+function cleanAccount(a: Partial<EmailAccount>): EmailAccount {
+  const out: EmailAccount = {
+    name: (a.name ?? '').trim(),
+    backend: a.backend === 'imap' ? 'imap' : 'gmail',
+  };
+  if (out.backend === 'gmail') {
+    if (a.gmail_bearer_token?.trim()) out.gmail_bearer_token = a.gmail_bearer_token.trim();
+    if (a.gmail_credentials_path?.trim()) out.gmail_credentials_path = a.gmail_credentials_path.trim();
+    if (a.gmail_token_path?.trim()) out.gmail_token_path = a.gmail_token_path.trim();
+    if (a.gmail_labels?.length) out.gmail_labels = a.gmail_labels.filter(Boolean);
+    else out.gmail_labels = [];
+  } else {
+    if (a.imap_host?.trim()) out.imap_host = a.imap_host.trim();
+    if (a.imap_user?.trim()) out.imap_user = a.imap_user.trim();
+    if (a.imap_password?.trim()) out.imap_password = a.imap_password.trim();
+    out.imap_port = a.imap_port ?? 993;
+    out.imap_use_ssl = a.imap_use_ssl !== false;
+    out.imap_folders = a.imap_folders?.length ? a.imap_folders.filter(Boolean) : ['INBOX', 'Sent'];
+  }
+  if (a.hubspot_bearer_token?.trim()) out.hubspot_bearer_token = a.hubspot_bearer_token.trim();
+  if (a.hubspot_owner_email?.trim()) out.hubspot_owner_email = a.hubspot_owner_email.trim();
+  return out;
+}
 
 function readLabels(): LabelDef[] {
   if (!LABEL_FILE) return [];
@@ -86,6 +141,32 @@ function cleanCategory(c: Partial<CategoryDef>): CategoryDef {
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 export function registerConfigRoutes(app: Express): void {
+
+  // GET /api/config/accounts
+  app.get('/api/config/accounts', (_req: Request, res: Response) => {
+    try {
+      res.json({ accounts: readAccounts(), filePath: ACCOUNTS_FILE });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // PUT /api/config/accounts — body: { accounts: EmailAccount[] }
+  app.put('/api/config/accounts', (req: Request, res: Response) => {
+    const { accounts } = req.body as { accounts?: Partial<EmailAccount>[] };
+    if (!Array.isArray(accounts)) {
+      res.status(400).json({ error: 'accounts must be an array' }); return;
+    }
+    for (const a of accounts) {
+      if (!a.name?.trim()) { res.status(400).json({ error: 'Each account must have a name' }); return; }
+    }
+    try {
+      writeAccounts(accounts.map(cleanAccount));
+      res.json({ ok: true, count: accounts.length });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
 
   // GET /api/config/labels
   app.get('/api/config/labels', (_req: Request, res: Response) => {

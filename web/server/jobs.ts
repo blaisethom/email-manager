@@ -271,10 +271,10 @@ function scheduleStaleRefresh(): void {
 // Returns null if the job should run locally.
 function resolvePrefectDeployment(config: JobConfig): string | null {
   if (!prefectEnabled()) return null;
-  // Single-company targeted runs always stay local — no Prefect equivalent
-  if (config.company) return null;
   if (config.job_type === 'sync') return 'ingest';
-  if (config.job_type === 'analyse') return 'ai-analysis';
+  if (config.job_type === 'analyse') {
+    return config.company ? 'company-ai' : 'ai-analysis';
+  }
   return null;
 }
 
@@ -292,6 +292,7 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
     }
 
     const parameters: Record<string, unknown> = {};
+    if (config.company) parameters.domain = config.company;
     if (config.stages?.length) parameters.stages = config.stages;
     if (config.force) parameters.force = true;
 

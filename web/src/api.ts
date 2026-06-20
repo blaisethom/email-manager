@@ -24,6 +24,7 @@ import type {
   HubSpotTaskDetail,
   LabelDef,
   CategoryDef,
+  EmailAccount,
   PrefectDeployment,
   PrefectFlowRun,
   PrefectLog,
@@ -448,7 +449,25 @@ export const api = {
     return res.json();
   },
 
-  // ── Config (YAML file editors) ────────────────────────────────────────────
+  // ── Config (YAML/JSON file editors) ──────────────────────────────────────
+
+  async getConfigAccounts(): Promise<{ accounts: EmailAccount[]; filePath: string }> {
+    const res = await fetch(`${BASE}/config/accounts`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async saveConfigAccounts(accounts: EmailAccount[]): Promise<void> {
+    const res = await fetch(`${BASE}/config/accounts`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accounts }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+  },
 
   async getConfigLabels(): Promise<{ labels: LabelDef[]; filePath: string | null }> {
     const res = await fetch(`${BASE}/config/labels`);

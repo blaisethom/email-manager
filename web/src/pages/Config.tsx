@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '../api';
-import type { LabelDef, CategoryDef, EventTypeDef, MilestoneDef } from '../types';
+import type { LabelDef, CategoryDef, EventTypeDef, MilestoneDef, EmailAccount } from '../types';
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -479,20 +479,347 @@ function WorkflowsConfig() {
   );
 }
 
+// ── Connections (accounts.json) ────────────────────────────────────────────────
+
+function TagInput({ tags, onChange, placeholder }: {
+  tags: string[];
+  onChange: (t: string[]) => void;
+  placeholder?: string;
+}) {
+  const [input, setInput] = useState('');
+  const commit = () => {
+    const v = input.trim();
+    if (v && !tags.includes(v)) onChange([...tags, v]);
+    setInput('');
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border border-slate-200 rounded-lg min-h-[36px] focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500">
+      {tags.map(t => (
+        <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 rounded text-xs font-mono text-slate-700">
+          {t}
+          <button type="button" onClick={() => onChange(tags.filter(x => x !== t))} className="text-slate-400 hover:text-red-500 ml-0.5">×</button>
+        </span>
+      ))}
+      <input
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); }
+          if (e.key === 'Backspace' && !input && tags.length) onChange(tags.slice(0, -1));
+        }}
+        onBlur={commit}
+        placeholder={tags.length === 0 ? (placeholder ?? 'Type and press Enter') : ''}
+        className="flex-1 min-w-[100px] text-xs outline-none bg-transparent"
+      />
+    </div>
+  );
+}
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-500 mb-1">
+        {label}
+        {hint && <span className="ml-1 font-normal text-slate-400">{hint}</span>}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+const INPUT = 'w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none';
+const INPUT_MONO = INPUT + ' font-mono';
+
+function AccountEditor({ account, onChange, onRemove, isNew }: {
+  account: EmailAccount;
+  onChange: (a: EmailAccount) => void;
+  onRemove: () => void;
+  isNew: boolean;
+}) {
+  const [open, setOpen] = useState(isNew);
+  const [showPassword, setShowPassword] = useState(false);
+  const set = <K extends keyof EmailAccount>(k: K, v: EmailAccount[K]) => onChange({ ...account, [k]: v });
+
+  const isGmail = account.backend === 'gmail';
+  const hasHubSpot = !!(account.hubspot_bearer_token || account.hubspot_owner_email);
+  const [hubspotExpanded, setHubspotExpanded] = useState(hasHubSpot);
+
+  return (
+    <div className="border border-slate-200 rounded-lg overflow-hidden group">
+      <div className="flex items-center gap-2.5 px-3 py-2.5 bg-slate-50 hover:bg-slate-100 transition-colors">
+        <button onClick={() => setOpen(!open)} className="flex-1 flex items-center gap-2.5 text-left min-w-0">
+          <span className={`px-2 py-0.5 text-[10px] font-semibold rounded uppercase tracking-wider flex-shrink-0 ${
+            isGmail ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'
+          }`}>
+            {isGmail ? 'Gmail' : 'IMAP'}
+          </span>
+          <span className="text-sm font-mono text-slate-800 font-medium truncate">
+            {account.name || '(new account)'}
+          </span>
+          {isGmail && (
+            <span className="px-1.5 py-0.5 text-[10px] bg-green-50 text-green-700 border border-green-200 rounded flex-shrink-0">
+              + Calendar
+            </span>
+          )}
+          {account.hubspot_bearer_token && (
+            <span className="px-1.5 py-0.5 text-[10px] bg-orange-50 text-orange-700 border border-orange-200 rounded flex-shrink-0">
+              HubSpot
+            </span>
+          )}
+          <span className="ml-auto text-slate-400 text-xs flex-shrink-0">{open ? '▲' : '▼'}</span>
+        </button>
+        <button
+          onClick={onRemove}
+          className="text-slate-300 hover:text-red-500 transition-colors text-lg leading-none opacity-0 group-hover:opacity-100 ml-1 flex-shrink-0"
+          title="Remove account"
+        >×</button>
+      </div>
+
+      {open && (
+        <div className="p-4 border-t border-slate-200 space-y-3">
+          {/* Backend toggle */}
+          <Field label="Backend">
+            <div className="flex gap-2">
+              {(['gmail', 'imap'] as const).map(b => (
+                <button
+                  key={b}
+                  type="button"
+                  onClick={() => set('backend', b)}
+                  className={`px-4 py-1.5 text-sm rounded-lg border transition-colors font-medium ${
+                    account.backend === b
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'
+                  }`}
+                >
+                  {b === 'gmail' ? 'Gmail' : 'IMAP'}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          {/* Name */}
+          <Field label="Account name" hint="(used internally to identify this account)">
+            <input
+              value={account.name}
+              onChange={e => set('name', e.target.value)}
+              placeholder={isGmail ? 'you@gmail.com' : 'work-imap'}
+              className={INPUT_MONO}
+            />
+          </Field>
+
+          {isGmail ? (
+            <>
+              <Field label="Bearer token" hint="(proxy-managed token reference, or leave blank for local OAuth)">
+                <input value={account.gmail_bearer_token ?? ''} onChange={e => set('gmail_bearer_token', e.target.value)} placeholder="GMAIL_TOKEN_EXAMPLE" className={INPUT_MONO} />
+              </Field>
+              <Field label="Credentials path" hint="(local OAuth — path to credentials.json)">
+                <input value={account.gmail_credentials_path ?? ''} onChange={e => set('gmail_credentials_path', e.target.value)} placeholder="../data/gmail_credentials.json" className={INPUT} />
+              </Field>
+              <Field label="Token path" hint="(local OAuth — path to token.json)">
+                <input value={account.gmail_token_path ?? ''} onChange={e => set('gmail_token_path', e.target.value)} placeholder="../data/gmail_token.json" className={INPUT} />
+              </Field>
+              <Field label="Gmail label IDs" hint="(leave empty to sync all mail; enter label IDs and press Enter)">
+                <TagInput tags={account.gmail_labels ?? []} onChange={v => set('gmail_labels', v)} placeholder="Label/INBOX (empty = all mail)" />
+              </Field>
+            </>
+          ) : (
+            <>
+              <Field label="IMAP host">
+                <input value={account.imap_host ?? ''} onChange={e => set('imap_host', e.target.value)} placeholder="imap.example.com" className={INPUT_MONO} />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="IMAP user">
+                  <input value={account.imap_user ?? ''} onChange={e => set('imap_user', e.target.value)} placeholder="you@example.com" className={INPUT_MONO} />
+                </Field>
+                <Field label="Password">
+                  <div className="relative">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={account.imap_password ?? ''}
+                      onChange={e => set('imap_password', e.target.value)}
+                      placeholder="••••••••"
+                      className={INPUT_MONO + ' pr-16'}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-700"
+                    >{showPassword ? 'Hide' : 'Show'}</button>
+                  </div>
+                </Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Port">
+                  <input type="number" value={account.imap_port ?? 993} onChange={e => set('imap_port', Number(e.target.value))} className={INPUT} />
+                </Field>
+                <Field label="SSL">
+                  <label className="flex items-center gap-2 h-[34px] cursor-pointer">
+                    <input type="checkbox" checked={account.imap_use_ssl !== false} onChange={e => set('imap_use_ssl', e.target.checked)} className="rounded" />
+                    <span className="text-sm text-slate-700">Use SSL/TLS</span>
+                  </label>
+                </Field>
+              </div>
+              <Field label="Folders" hint='(* = all folders; press Enter after each)'>
+                <TagInput tags={account.imap_folders ?? ['INBOX', 'Sent']} onChange={v => set('imap_folders', v)} placeholder="INBOX" />
+              </Field>
+            </>
+          )}
+
+          {/* HubSpot section */}
+          <div className="pt-1 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={() => setHubspotExpanded(h => !h)}
+              className="flex items-center gap-2 text-xs font-medium text-slate-500 hover:text-slate-700 py-1"
+            >
+              <span className="px-1.5 py-0.5 bg-orange-50 text-orange-700 border border-orange-200 rounded text-[10px]">HubSpot</span>
+              <span>CRM integration</span>
+              <span className="text-slate-400">{hubspotExpanded ? '▲' : '▼'}</span>
+            </button>
+            {hubspotExpanded && (
+              <div className="mt-2 space-y-3">
+                <Field label="HubSpot bearer token" hint="(proxy-managed or direct private app token)">
+                  <input value={account.hubspot_bearer_token ?? ''} onChange={e => set('hubspot_bearer_token', e.target.value)} placeholder="HUBSPOT_TOKEN" className={INPUT_MONO} />
+                </Field>
+                <Field label="Owner email" hint="(filter tasks/assignments to this user)">
+                  <input value={account.hubspot_owner_email ?? ''} onChange={e => set('hubspot_owner_email', e.target.value)} placeholder="you@company.com" className={INPUT} />
+                </Field>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConnectionsConfig() {
+  const [accounts, setAccounts] = useState<EmailAccount[]>([]);
+  const [original, setOriginal] = useState<EmailAccount[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [newCount, setNewCount] = useState(0);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.getConfigAccounts()
+      .then(({ accounts: a }) => { setAccounts(a); setOriginal(a); })
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const dirty = JSON.stringify(accounts) !== JSON.stringify(original);
+
+  const update = (i: number, a: EmailAccount) =>
+    setAccounts(prev => prev.map((x, idx) => idx === i ? a : x));
+
+  const remove = (i: number) => setAccounts(prev => prev.filter((_, idx) => idx !== i));
+
+  const addAccount = (backend: 'gmail' | 'imap') => {
+    setNewCount(n => n + 1);
+    setAccounts(prev => [...prev, {
+      name: '',
+      backend,
+      ...(backend === 'gmail' ? { gmail_labels: [] } : {
+        imap_port: 993,
+        imap_use_ssl: true,
+        imap_folders: ['INBOX', 'Sent'],
+      }),
+    }]);
+  };
+
+  const save = async () => {
+    setSaving(true); setError(null);
+    try {
+      await api.saveConfigAccounts(accounts);
+      setOriginal(accounts);
+      setNewCount(0);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    } finally { setSaving(false); }
+  };
+
+  if (loading) return <div className="animate-pulse space-y-3"><div className="h-12 bg-slate-100 rounded-lg" /><div className="h-12 bg-slate-100 rounded-lg" /></div>;
+
+  const newIdxStart = original.length;
+
+  return (
+    <div>
+      <p className="text-sm text-slate-500 mb-4">
+        Manage email accounts, calendar sync, and HubSpot connections.
+        Changes are written to <code className="text-xs bg-slate-100 px-1 rounded">accounts.json</code> and take effect on the next sync run.
+      </p>
+      <SaveBar dirty={dirty} saving={saving} error={error} onSave={save} onReset={() => { setAccounts(original); setError(null); setNewCount(0); }} />
+
+      <div className="space-y-2">
+        {accounts.map((account, i) => (
+          <AccountEditor
+            key={`${i}-${account.name}-${account.backend}`}
+            account={account}
+            onChange={a => update(i, a)}
+            onRemove={() => remove(i)}
+            isNew={i >= newIdxStart}
+          />
+        ))}
+      </div>
+
+      {accounts.length === 0 && (
+        <div className="py-10 text-center text-slate-400 border border-dashed border-slate-200 rounded-lg">
+          No accounts configured. Add one below.
+        </div>
+      )}
+
+      <div className="flex gap-2 mt-4">
+        <button
+          onClick={() => addAccount('gmail')}
+          className="px-4 py-2 text-sm text-red-700 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
+        >
+          + Add Gmail account
+        </button>
+        <button
+          onClick={() => addAccount('imap')}
+          className="px-4 py-2 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors"
+        >
+          + Add IMAP account
+        </button>
+      </div>
+
+      <div className="mt-6 p-3 bg-slate-50 rounded-lg border border-slate-200">
+        <p className="text-xs text-slate-500 font-medium mb-1">Notes</p>
+        <ul className="text-xs text-slate-400 space-y-1 list-disc list-inside">
+          <li>Gmail accounts automatically sync Google Calendar events.</li>
+          <li>For Gmail OAuth, run <code className="bg-slate-100 px-1 rounded">email-analyser auth &lt;account-name&gt;</code> to authenticate.</li>
+          <li>Bearer tokens (e.g. <code className="bg-slate-100 px-1 rounded">GMAIL_TOKEN_EXAMPLE</code>) are resolved by an auth proxy at runtime.</li>
+          <li>HubSpot can be added to any account — typically your primary work email.</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-type Tab = 'labels' | 'workflows';
+type Tab = 'connections' | 'labels' | 'workflows';
+
+const TAB_LABELS: Record<Tab, string> = {
+  connections: 'Connections',
+  labels: 'Labels',
+  workflows: 'Workflow Categories',
+};
 
 export default function ConfigPage() {
-  const [tab, setTab] = useState<Tab>('labels');
+  const [tab, setTab] = useState<Tab>('connections');
 
   return (
     <div className="p-4 sm:p-8 max-w-4xl">
       <h1 className="text-2xl font-bold text-slate-900 mb-1">Configuration</h1>
-      <p className="text-slate-500 text-sm mb-6">Edit label definitions and discussion workflow categories.</p>
+      <p className="text-slate-500 text-sm mb-6">Manage accounts, label definitions, and discussion workflow categories.</p>
 
       <div className="flex border-b border-slate-200 mb-6">
-        {(['labels', 'workflows'] as Tab[]).map(t => (
+        {(Object.keys(TAB_LABELS) as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -502,12 +829,13 @@ export default function ConfigPage() {
                 : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
             }`}
           >
-            {t === 'labels' ? 'Labels' : 'Workflow Categories'}
+            {TAB_LABELS[t]}
           </button>
         ))}
       </div>
 
       <div className="card p-6">
+        {tab === 'connections' && <ConnectionsConfig />}
         {tab === 'labels' && <LabelsConfig />}
         {tab === 'workflows' && <WorkflowsConfig />}
       </div>

@@ -457,6 +457,23 @@ export type Granularity = 'fewer' | 'balanced' | 'more';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
+export interface EmailAccount {
+  name: string;
+  backend: 'gmail' | 'imap';
+  gmail_credentials_path?: string;
+  gmail_token_path?: string;
+  gmail_labels?: string[];
+  gmail_bearer_token?: string;
+  imap_host?: string;
+  imap_user?: string;
+  imap_password?: string;
+  imap_port?: number;
+  imap_use_ssl?: boolean;
+  imap_folders?: string[];
+  hubspot_bearer_token?: string;
+  hubspot_owner_email?: string;
+}
+
 export interface LabelDef {
   name: string;
   description: string;

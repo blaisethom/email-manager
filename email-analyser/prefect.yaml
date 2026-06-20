@@ -52,6 +52,17 @@ deployments:
         timezone: "UTC"
         active: true
 
+  # ── Single company: on-demand targeted AI run ────────────────────────────────
+  - name: company-ai
+    entrypoint: src/email_manager/scheduler/flows.py:company_flow
+    description: "Run AI pipeline stages for a single company (triggered from the web UI)"
+    work_pool:
+      name: email-manager-pool
+    schedules: []   # No schedule — triggered on demand
+    parameters:
+      domain: ""
+      stages: null
+
   # ── Full run: one-shot bootstrap / manual refresh ───────────────────────────
   - name: full-run
     entrypoint: src/email_manager/scheduler/flows.py:full_run_flow
