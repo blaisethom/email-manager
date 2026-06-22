@@ -1,32 +1,38 @@
 #!/usr/bin/env python3
-"""Bootstrap pip (if missing) then install email-manager for the Prefect worker.
+"""Install email-manager for the Prefect worker.
 
-Runs as part of the Prefect deployment pull step before each flow run.
-Uses sys.executable so it always targets the same Python the worker uses.
+ensurepip has pip bundled but can only install it into the Python
+environment's site-packages, which is read-only for the worker process.
+Instead we use the bundled pip wheel directly with --target to install
+into a user-writable directory exposed via PYTHONPATH.
 """
+import os
 import subprocess
 import sys
 
+HOME = os.path.expanduser("~")
+DEPS = os.path.join(HOME, ".email-manager-deps")
+# This script lives at email-analyser/scripts/worker_bootstrap.py
+SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def _pip_works() -> bool:
-    r = subprocess.run([sys.executable, "-m", "pip", "--version"], capture_output=True)
-    return r.returncode == 0
+os.makedirs(DEPS, exist_ok=True)
 
+# Locate ensurepip's bundled pip wheel — it ships with every CPython 3.4+
+import ensurepip
+bundled = os.path.join(os.path.dirname(ensurepip.__file__), "_bundled")
+pip_whl = next(f for f in os.listdir(bundled) if f.startswith("pip-"))
+pip_whl_path = os.path.join(bundled, pip_whl)
 
-if not _pip_works():
-    print("pip not available — trying ensurepip")
-    r = subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"], capture_output=True)
-    if r.returncode != 0:
-        print(r.stderr.decode(), file=sys.stderr)
-    if not _pip_works():
-        print("ERROR: pip unavailable and ensurepip failed to install it", file=sys.stderr)
-        sys.exit(1)
-    print("pip bootstrapped via ensurepip")
+# Augment PYTHONPATH so the subprocess python can import pip from the wheel
+env = {**os.environ, "PYTHONPATH": pip_whl_path + os.pathsep + os.environ.get("PYTHONPATH", "")}
 
-# Install the package (editable so imports resolve from the cloned source tree)
-subprocess.check_call([
-    sys.executable, "-m", "pip", "install",
-    "-e", ".[scheduler,postgres]",
-    "--quiet",
-])
-print(f"email-manager installed into {sys.executable}")
+def run_pip(*args):
+    subprocess.check_call([sys.executable, "-W", "ignore", "-m", "pip", *args], env=env)
+
+# Install all dependencies (psycopg2-binary, anthropic, etc.) — skip if present
+run_pip("install", SRC + "[scheduler,postgres]", "--target", DEPS, "--quiet")
+
+# Force-reinstall our package only to pick up code changes without re-downloading deps
+run_pip("install", SRC, "--target", DEPS, "--force-reinstall", "--no-deps", "--quiet")
+
+print(f"email-manager installed to {DEPS}")
