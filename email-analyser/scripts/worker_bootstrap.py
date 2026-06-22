@@ -28,11 +28,14 @@ PIP_CANDIDATES = [
 
 pip_cmd = None
 for candidate in PIP_CANDIDATES:
-    r = subprocess.run([*candidate, "--version"], capture_output=True, text=True)
-    if r.returncode == 0:
-        pip_cmd = candidate
-        print(f"Found pip: {' '.join(candidate)} → {r.stdout.strip()}")
-        break
+    try:
+        r = subprocess.run([*candidate, "--version"], capture_output=True, text=True)
+        if r.returncode == 0:
+            pip_cmd = candidate
+            print(f"Found pip: {' '.join(candidate)} → {r.stdout.strip()}")
+            break
+    except (FileNotFoundError, OSError):
+        continue
 
 if pip_cmd is None:
     for d in ["/opt/prefect/bin/", "/usr/bin/", "/usr/local/bin/"]:
