@@ -10,13 +10,21 @@
 name: email-manager
 prefect-version: "3.0.0"
 
-# No build/push steps — the worker runs on the same host as the codebase.
+# No build/push steps — worker clones the repo on each run.
 build: null
 push: null
 
 pull:
+  - prefect.deployments.steps.git_clone:
+      id: clone_step
+      repository: https://github.com/blaisethom/email-manager.git
+      branch: main
+  - prefect.deployments.steps.pip_install_requirements:
+      requirements_file: requirements-worker.txt
+      directory: "{{ clone_step.directory }}/email-analyser"
+      stream_output: false
   - prefect.deployments.steps.set_working_directory:
-      directory: /app/email-analyser
+      directory: "{{ clone_step.directory }}/email-analyser"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
