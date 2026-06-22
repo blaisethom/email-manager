@@ -24,7 +24,7 @@ deployments:
     entrypoint: src/email_manager/scheduler/flows.py:ingest_flow
     description: "Pull emails, calendar events, and HubSpot data"
     work_pool:
-      name: email-manager-pool
+      name: default-process
     schedules:
       - cron: "*/10 * * * *"
         timezone: "UTC"
@@ -35,7 +35,7 @@ deployments:
     entrypoint: src/email_manager/scheduler/flows.py:enrich_flow
     description: "Extract threads, enrich company data, rebuild search index"
     work_pool:
-      name: email-manager-pool
+      name: default-process
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -46,7 +46,7 @@ deployments:
     entrypoint: src/email_manager/scheduler/flows.py:ai_flow
     description: "Run AI pipeline stages for companies with new data"
     work_pool:
-      name: email-manager-pool
+      name: default-process
     schedules:
       - cron: "5 * * * *"   # :05 past every hour, offset from enrich
         timezone: "UTC"
@@ -57,7 +57,7 @@ deployments:
     entrypoint: src/email_manager/scheduler/flows.py:company_flow
     description: "Run AI pipeline stages for a single company (triggered from the web UI)"
     work_pool:
-      name: email-manager-pool
+      name: default-process
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
@@ -68,5 +68,5 @@ deployments:
     entrypoint: src/email_manager/scheduler/flows.py:full_run_flow
     description: "Ingest → Enrich → AI in sequence (manual trigger only)"
     work_pool:
-      name: email-manager-pool
+      name: default-process
     schedules: []   # No schedule — trigger manually
