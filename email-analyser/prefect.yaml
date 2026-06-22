@@ -20,9 +20,7 @@ pull:
       repository: https://github.com/blaisethom/email-manager.git
       branch: main
   - prefect.deployments.steps.run_shell_script:
-      script: |
-        /opt/prefect/bin/python -m ensurepip --upgrade 2>/dev/null || true
-        /opt/prefect/bin/python -m pip install -e ".[scheduler,postgres]" --quiet
+      script: "/opt/prefect/bin/python scripts/worker_bootstrap.py"
       directory: "{{ clone_step.directory }}/email-analyser"
   - prefect.deployments.steps.set_working_directory:
       directory: "{{ clone_step.directory }}/email-analyser"
