@@ -21,29 +21,27 @@ pull:
   #
   # Each flow run clones to its own /tmp/em-clone-<run-id> directory so concurrent
   # flows (ingest + enrich firing at :00) don't race on the same path.
+  #
+  # Prefect 3.7.5: helper_command was removed; use shell: true instead.
+  # shell: true runs each non-empty line as a separate `sh -c "line"`, so the git
+  # clone is on a single line (no \ continuation) and $PREFECT_FLOW_RUN_ID is
+  # expanded by the shell from the inherited environment.
   - prefect.deployments.steps.run_shell_script:
       id: clone_step
       stream_output: true
-      helper_command: bash
+      shell: true
       script: |
-        # Prune stale per-run clone dirs older than 1 day
         find /tmp -maxdepth 1 -name 'em-clone-*' -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-        CLONE_DIR="/tmp/em-clone-${PREFECT_FLOW_RUN_ID:-$$}"
-        rm -rf "$CLONE_DIR"
-        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true git \
-          -c credential.helper= \
-          -c http.https://github.com/.extraheader= \
-          clone --depth 1 --branch main \
-          https://github.com/blaisethom/email-manager.git "$CLONE_DIR"
+        rm -rf /tmp/em-clone-${PREFECT_FLOW_RUN_ID}
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true git -c credential.helper= -c http.https://github.com/.extraheader= clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git /tmp/em-clone-${PREFECT_FLOW_RUN_ID}
   # Install vendored wheels (vendor/ dir in the repo) to /tmp/em-deps.
   # No internet required — all deps are bundled as .whl files.
   # A flock inside the script serialises concurrent bootstraps from parallel flow runs.
   - prefect.deployments.steps.run_shell_script:
       id: bootstrap_step
       stream_output: true
-      script: |
-        CLONE_DIR="/tmp/em-clone-${PREFECT_FLOW_RUN_ID:-$$}"
-        /opt/prefect/bin/python3 "$CLONE_DIR/email-analyser/scripts/worker_bootstrap.py"
+      shell: true
+      script: /opt/prefect/bin/python3 /tmp/em-clone-${PREFECT_FLOW_RUN_ID}/email-analyser/scripts/worker_bootstrap.py
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
