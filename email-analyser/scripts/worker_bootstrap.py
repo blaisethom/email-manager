@@ -12,8 +12,7 @@ import shutil
 import subprocess
 import sys
 
-HOME = os.path.expanduser("~")
-DEPS = os.path.join(HOME, ".email-manager-deps")
+DEPS = "/tmp/em-deps"
 # script is at email-analyser/scripts/worker_bootstrap.py
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENDOR = os.path.join(SRC, "vendor")

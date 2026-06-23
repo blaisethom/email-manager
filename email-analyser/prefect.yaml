@@ -15,15 +15,29 @@ build: null
 push: null
 
 pull:
-  - prefect.deployments.steps.git_clone:
-      id: clone_step
-      repository: https://github.com/blaisethom/email-manager.git
-      branch: main
+  # Clone from GitHub. Prokura proxy (http://[::1]:8080) does TLS MITM and injects
+  # GitHub App credentials automatically — no auth header needed on our side.
+  # We clear credential.helper and any stale extraheader so Prokura handles auth cleanly.
   - prefect.deployments.steps.run_shell_script:
-      script: "/opt/prefect/bin/python scripts/worker_bootstrap.py"
-      directory: "{{ clone_step.directory }}/email-analyser"
+      id: clone_step
+      stream_output: true
+      helper_command: bash
+      script: |
+        rm -rf /tmp/em-clone
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true git \
+          -c credential.helper= \
+          -c http.https://github.com/.extraheader= \
+          clone --depth 1 --branch main \
+          https://github.com/blaisethom/email-manager.git /tmp/em-clone
+  # Install vendored wheels (vendor/ dir in the repo) to /tmp/em-deps.
+  # No internet required — all deps are bundled as .whl files.
+  - prefect.deployments.steps.run_shell_script:
+      id: bootstrap_step
+      stream_output: true
+      script: /opt/prefect/bin/python3 scripts/worker_bootstrap.py
+      directory: /tmp/em-clone/email-analyser
   - prefect.deployments.steps.set_working_directory:
-      directory: "{{ clone_step.directory }}/email-analyser"
+      directory: /tmp/em-clone/email-analyser
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
@@ -34,7 +48,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /home/node/.email-manager-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-clone/email-analyser/src:/opt/prefect/lib/python3.11/site-packages
     schedules:
       - cron: "*/10 * * * *"
         timezone: "UTC"
@@ -48,7 +62,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /home/node/.email-manager-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-clone/email-analyser/src:/opt/prefect/lib/python3.11/site-packages
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -62,7 +76,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /home/node/.email-manager-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-clone/email-analyser/src:/opt/prefect/lib/python3.11/site-packages
     schedules:
       - cron: "5 * * * *"   # :05 past every hour, offset from enrich
         timezone: "UTC"
@@ -76,7 +90,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /home/node/.email-manager-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-clone/email-analyser/src:/opt/prefect/lib/python3.11/site-packages
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
@@ -90,5 +104,5 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /home/node/.email-manager-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-clone/email-analyser/src:/opt/prefect/lib/python3.11/site-packages
     schedules: []   # No schedule — trigger manually
