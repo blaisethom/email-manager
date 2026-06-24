@@ -43,9 +43,7 @@ services:
 
   # ── Prefect worker (runs flow tasks as subprocesses) ─────────────────────────
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
+    image: ghcr.io/blaisethom/email-manager/worker:latest
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
       # Inherit all app env vars from .env (DB_URL, ANTHROPIC_API_KEY, etc.)
@@ -55,8 +53,6 @@ services:
       prefect-server:
         condition: service_healthy
     volumes:
-      # Mount codebase read-only so hot-reload works in dev
-      - ./src:/app/src:ro
       # Persist OAuth tokens and local DB between restarts
       - ../data:/app/data
 

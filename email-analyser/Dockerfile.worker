@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml .
 COPY src/ src/
+COPY prefect.yaml .
 
 RUN pip install --no-cache-dir -e ".[postgres,scheduler]"
 

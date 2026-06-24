@@ -7,14 +7,14 @@ until prefect work-pool ls > /dev/null 2>&1; do
 done
 
 echo "Creating work pool (idempotent)..."
-prefect work-pool create email-manager-pool --type process --overwrite 2>/dev/null || true
+prefect work-pool create default-process --type process --overwrite 2>/dev/null || true
 
 echo "Creating AI concurrency limit (idempotent)..."
 prefect concurrency-limit create ai-llm 3 2>/dev/null || true
 
 echo "Deploying flows..."
-cd /app/email-analyser
+cd /app
 prefect deploy --all
 
 echo "Starting worker..."
-exec prefect worker start --pool email-manager-pool
+exec prefect worker start --pool default-process

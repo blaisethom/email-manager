@@ -15,33 +15,13 @@ build: null
 push: null
 
 pull:
-  # Clone from GitHub. Prokura proxy (http://[::1]:8080) does TLS MITM and injects
-  # GitHub App credentials automatically — no auth header needed on our side.
-  # We clear credential.helper and any stale extraheader so Prokura handles auth cleanly.
-  #
-  # Each flow run clones to its own /tmp/em-clone-<run-id> directory so concurrent
-  # flows (ingest + enrich firing at :00) don't race on the same path.
-  #
-  # Prefect 3.7.5: helper_command was removed; use shell: true instead.
-  # shell: true runs each non-empty line as a separate `sh -c "line"`, so the git
-  # clone is on a single line (no \ continuation) and $PREFECT_FLOW_RUN_ID is
-  # expanded by the shell from the inherited environment.
+  # Local worker: code is already present at /app (the Docker container working dir).
+  # No clone or vendored-wheel bootstrap needed — the image has all dependencies.
   - prefect.deployments.steps.run_shell_script:
-      id: clone_step
-      stream_output: true
+      id: verify_step
+      stream_output: false
       shell: true
-      script: |
-        find /tmp -maxdepth 1 -name 'em-clone-*' -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-        rm -rf /tmp/em-clone-${PREFECT_FLOW_RUN_ID}
-        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true git -c credential.helper= -c http.https://github.com/.extraheader= clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git /tmp/em-clone-${PREFECT_FLOW_RUN_ID}
-  # Install vendored wheels (vendor/ dir in the repo) to /tmp/em-deps.
-  # No internet required — all deps are bundled as .whl files.
-  # A flock inside the script serialises concurrent bootstraps from parallel flow runs.
-  - prefect.deployments.steps.run_shell_script:
-      id: bootstrap_step
-      stream_output: true
-      shell: true
-      script: /opt/prefect/bin/python3 /tmp/em-clone-${PREFECT_FLOW_RUN_ID}/email-analyser/scripts/worker_bootstrap.py
+      script: "test -f /app/src/email_manager/__init__.py && echo 'local source ok'"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
@@ -51,8 +31,9 @@ deployments:
     work_pool:
       name: default-process
       job_variables:
+        working_dir: /app
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /app/src
     schedules:
       - cron: "*/10 * * * *"
         timezone: "UTC"
@@ -65,8 +46,9 @@ deployments:
     work_pool:
       name: default-process
       job_variables:
+        working_dir: /app
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /app/src
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -79,8 +61,9 @@ deployments:
     work_pool:
       name: default-process
       job_variables:
+        working_dir: /app
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /app/src
     schedules:
       - cron: "5 * * * *"   # :05 past every hour, offset from enrich
         timezone: "UTC"
@@ -93,8 +76,9 @@ deployments:
     work_pool:
       name: default-process
       job_variables:
+        working_dir: /app
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /app/src
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
@@ -107,6 +91,7 @@ deployments:
     work_pool:
       name: default-process
       job_variables:
+        working_dir: /app
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /app/src
     schedules: []   # No schedule — trigger manually
