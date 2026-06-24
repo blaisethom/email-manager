@@ -115,6 +115,20 @@ class Config(BaseSettings):
             data = json.loads(accounts_file.read_text())
             return [EmailAccount(**acct) for acct in data]
 
+        # Try reading from Prefect Variable (works when running in a Prefect worker)
+        import os
+        api_url = os.environ.get("PREFECT_API_URL", "")
+        if api_url:
+            try:
+                import urllib.request
+                req = urllib.request.urlopen(f"{api_url}/variables/name/email_accounts", timeout=5)
+                payload = json.loads(req.read())
+                value = payload.get("value", "")
+                if value:
+                    return [EmailAccount(**acct) for acct in json.loads(value)]
+            except Exception:
+                pass
+
         # Fall back to legacy single-account config
         return [
             EmailAccount(
