@@ -32,6 +32,7 @@ deployments:
   - name: ingest
     entrypoint: email_manager.scheduler.flows:ingest_flow
     description: "Pull emails, calendar events, and HubSpot data"
+    concurrency_limit: 1
     work_pool:
       name: default-process
       job_variables:
@@ -60,6 +61,7 @@ deployments:
   - name: label
     entrypoint: email_manager.scheduler.flows:label_flow
     description: "AI company labelling and search index rebuild (runs after enrich)"
+    concurrency_limit: 1
     work_pool:
       name: default-process
       job_variables:
