@@ -15,6 +15,7 @@ services:
   prefect-server:
     image: prefecthq/prefect:3-latest
     command: prefect server start --host 0.0.0.0
+    restart: unless-stopped
     ports:
       - "4200:4200"
     environment:
@@ -32,6 +33,7 @@ services:
   # ── Prefect metadata database (separate from the app DB) ────────────────────
   prefect-db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: prefect
       POSTGRES_PASSWORD: prefect
