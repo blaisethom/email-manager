@@ -6,8 +6,35 @@ import logging
 import subprocess
 import threading
 import time
+from contextlib import contextmanager, asynccontextmanager
 
 from email_manager.ai.base import TokenTracker, TokenUsage
+
+# Name of the Prefect global concurrency limit slot.
+# Create it once with: prefect gcl create claude-calls --limit 5
+_CONCURRENCY_SLOT = "claude-calls"
+
+
+@contextmanager
+def _sync_concurrency():
+    """Acquire a Prefect concurrency slot, or no-op if Prefect isn't available."""
+    try:
+        from prefect.concurrency.sync import concurrency
+        with concurrency(_CONCURRENCY_SLOT, occupy=1):
+            yield
+    except Exception:
+        yield
+
+
+@asynccontextmanager
+async def _async_concurrency():
+    """Acquire a Prefect concurrency slot (async), or no-op if Prefect isn't available."""
+    try:
+        from prefect.concurrency.asyncio import concurrency
+        async with concurrency(_CONCURRENCY_SLOT, occupy=1):
+            yield
+    except Exception:
+        yield
 
 logger = logging.getLogger("email_manager.ai.claude_cli")
 
@@ -128,6 +155,10 @@ class ClaudeCLIBackend:
     def _run_claude_sync(self, system: str, user: str) -> str:
         cmd = self._build_cmd(system)
 
+        with _sync_concurrency():
+            return self._spawn_claude_sync(cmd, user)
+
+    def _spawn_claude_sync(self, cmd: list[str], user: str) -> str:
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -191,6 +222,10 @@ class ClaudeCLIBackend:
     async def _run_claude_async(self, system: str, user: str) -> str:
         cmd = self._build_cmd(system)
 
+        async with _async_concurrency():
+            return await self._spawn_claude_async(cmd, user)
+
+    async def _spawn_claude_async(self, cmd: list[str], user: str) -> str:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
