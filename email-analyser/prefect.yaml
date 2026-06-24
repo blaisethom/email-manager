@@ -17,20 +17,17 @@ push: null
 pull:
   # Stock Prefect worker clones fresh code from GitHub on each run.
   # Public repo — no credentials needed.
-  # Per-run clone dir prevents races when concurrent runs fire at the same time.
+  # mktemp -d gives a unique clone dir per run so concurrent runs don't race.
+  # Both clone and bootstrap run in one shell so CLONE_DIR stays consistent.
   - prefect.deployments.steps.run_shell_script:
-      id: clone_step
+      id: clone_and_bootstrap
       stream_output: true
       shell: true
       script: |
-        rm -rf /tmp/em-clone-${PREFECT_FLOW_RUN_ID}
-        git clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git /tmp/em-clone-${PREFECT_FLOW_RUN_ID}
-  # Install vendored wheels to /tmp/em-deps (serialised against concurrent runs).
-  - prefect.deployments.steps.run_shell_script:
-      id: bootstrap_step
-      stream_output: true
-      shell: true
-      script: /opt/prefect/bin/python3 /tmp/em-clone-${PREFECT_FLOW_RUN_ID}/email-analyser/scripts/worker_bootstrap.py
+        set -e
+        CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX)
+        git clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git "$CLONE_DIR"
+        /opt/prefect/bin/python3 "$CLONE_DIR/email-analyser/scripts/worker_bootstrap.py"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
