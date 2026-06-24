@@ -1,10 +1,45 @@
 from __future__ import annotations
 
 import json
+import os
+import urllib.request
 from pathlib import Path
+from typing import Any, Tuple, Type
 
 from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+
+def _prefect_variable(name: str) -> str | None:
+    """Fetch a Prefect Variable value by name, or None if unavailable."""
+    api_url = os.environ.get("PREFECT_API_URL", "")
+    if not api_url:
+        return None
+    try:
+        req = urllib.request.urlopen(f"{api_url}/variables/name/{name}", timeout=5)
+        return json.loads(req.read()).get("value")
+    except Exception:
+        return None
+
+
+class _PrefectVariableSource(PydanticBaseSettingsSource):
+    """Settings source that reads from the 'worker_config' Prefect Variable.
+
+    Loaded once per Config() instantiation and treated as a lower-priority
+    alternative to env vars and dotenv files (i.e. only fills gaps).
+    """
+
+    def __init__(self, settings_cls: Type[BaseSettings]) -> None:
+        super().__init__(settings_cls)
+        raw = _prefect_variable("worker_config")
+        self._data: dict[str, Any] = {k.lower(): v for k, v in json.loads(raw).items()} if raw else {}
+
+    def get_field_value(self, field: Any, field_name: str) -> Tuple[Any, str, bool]:
+        value = self._data.get(field_name)
+        return value, field_name, self.field_is_complex(field)
+
+    def __call__(self) -> dict[str, Any]:
+        return {k: v for k, v in self._data.items() if v is not None}
 
 
 class EmailAccount(BaseModel):
@@ -90,6 +125,24 @@ class Config(BaseSettings):
 
     # Accounts config file
     accounts_path: Path = Path("accounts.json")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: Type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> Tuple[PydanticBaseSettingsSource, ...]:
+        # Priority: init > env > dotenv > prefect_variable > secrets/defaults
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            _PrefectVariableSource(settings_cls),
+            file_secret_settings,
+        )
 
     def get_hubspot_account(self) -> "EmailAccount | None":
         """Return the first account that has a hubspot_bearer_token configured."""
