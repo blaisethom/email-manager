@@ -11,6 +11,8 @@ Deploy with:
 """
 from __future__ import annotations
 
+import random
+
 from prefect import flow, get_run_logger
 
 from .config import SETTINGS
@@ -118,12 +120,16 @@ def enrich_flow() -> dict:
 
 
 @flow(name="email-manager-ai", log_prints=True)
-def ai_flow(batch_size: int | None = None) -> dict:
+def ai_flow(batch_size: int | None = None, random_sample: bool = True) -> dict:
     """Run AI interpretation for companies with unprocessed changes.
 
     Fans out one task per company. Tasks compete for the 'ai-llm' Prefect
     concurrency limit (default 3 slots), ensuring we never saturate the
     Claude API regardless of how many companies are queued.
+
+    When random_sample=True (default), selects a random subset each run so
+    the backlog is worked through evenly rather than always picking the same
+    head-of-queue companies. Set random_sample=False to process in DB order.
 
     Set up the limit before first run:
         prefect concurrency-limit create ai-llm 3
@@ -136,12 +142,15 @@ def ai_flow(batch_size: int | None = None) -> dict:
         log.info("No dirty companies — nothing to do")
         return {"processed": 0, "total_dirty": 0}
 
-    batch = dirty[:limit]
-    skipped = len(dirty) - len(batch)
-    if skipped:
-        log.info("Queuing %d companies (%d deferred to next run)", len(batch), skipped)
+    skipped = 0
+    if random_sample and len(dirty) > limit:
+        batch = random.sample(dirty, limit)
+        log.info("Randomly sampled %d of %d dirty companies", len(batch), len(dirty))
     else:
-        log.info("Queuing %d companies", len(batch))
+        batch = dirty[:limit]
+        skipped = len(dirty) - len(batch)
+        if skipped:
+            log.info("Queuing %d companies (%d deferred to next run)", len(batch), skipped)
 
     # Fan out — concurrency is capped by the 'ai-llm' limit inside each task
     futures = {domain: process_company_ai.submit(domain) for domain in batch}

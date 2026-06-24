@@ -69,6 +69,9 @@ deployments:
       - cron: "5 * * * *"   # :05 past every hour, offset from enrich
         timezone: "UTC"
         active: true
+    parameters:
+      batch_size: 5
+      random_sample: true
 
   # ── Single company: on-demand targeted AI run ────────────────────────────────
   - name: company-ai
