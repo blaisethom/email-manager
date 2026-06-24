@@ -177,7 +177,7 @@ def run_fetch_homepages() -> int:
 
 
 @task(name="run-label-companies", retries=1, retry_delay_seconds=60)
-def run_label_companies() -> int:
+def run_label_companies(limit: int | None = None, random_sample: bool = False) -> int:
     """Classify unlabelled companies using AI."""
     log = get_run_logger()
     config, conn = _cfg_and_conn()
@@ -187,7 +187,10 @@ def run_label_companies() -> int:
 
         backend = get_backend(config)
         labels_config = load_label_config(getattr(config, "company_labels_path", None))
-        count = label_companies(conn, backend, labels_config=labels_config)
+        count = label_companies(
+            conn, backend, labels_config=labels_config,
+            limit=limit, random_sample=random_sample,
+        )
         conn.commit()
         log.info("label_companies: %d companies labelled", count)
         return count

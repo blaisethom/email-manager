@@ -69,6 +69,9 @@ deployments:
       - cron: "15,45 * * * *"   # :15 and :45, offset 15 min after enrich (:00 and :30)
         timezone: "UTC"
         active: true
+    parameters:
+      batch_size: 100
+      random_sample: true
 
   # ── AI analysis: interpret dirty companies ───────────────────────────────────
   - name: ai-analysis

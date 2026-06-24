@@ -257,6 +257,7 @@ def label_companies(
     force: bool = False,
     company_domain: str | None = None,
     concurrency: int = 1,
+    random_sample: bool = False,
 ) -> int:
     """Assign relationship labels to companies using AI."""
     from email_manager.ai.agent_backend import ProposedChanges, apply_changes
@@ -296,15 +297,17 @@ def label_companies(
                 return 0
         companies = [row] if row else []
     elif force:
-        sql = "SELECT id, name, domain FROM companies ORDER BY email_count DESC"
+        order = "RANDOM()" if random_sample else "email_count DESC"
+        sql = f"SELECT id, name, domain FROM companies ORDER BY {order}"
         if limit:
             sql += f" LIMIT {int(limit)}"
         companies = fetchall(conn, sql)
     else:
-        sql = """SELECT c.id, c.name, c.domain FROM companies c
+        order = "RANDOM()" if random_sample else "c.email_count DESC"
+        sql = f"""SELECT c.id, c.name, c.domain FROM companies c
                  LEFT JOIN company_labels cl ON c.id = cl.company_id
                  WHERE cl.company_id IS NULL
-                 ORDER BY c.email_count DESC"""
+                 ORDER BY {order}"""
         if limit:
             sql += f" LIMIT {int(limit)}"
         companies = fetchall(conn, sql)
