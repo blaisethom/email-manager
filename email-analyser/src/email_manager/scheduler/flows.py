@@ -1,10 +1,14 @@
-"""Three Prefect flows for continuous pipeline operation.
+"""Four Prefect flows for continuous pipeline operation.
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ ingest_flow   every 10 min  Pull raw data from all sources      │
-│ enrich_flow   every 30 min  Build threads, labels, search index │
+│ enrich_flow   every 30 min  Parse emails, fetch homepages       │
+│ label_flow    every 30 min  AI company labelling + search index │
 │ ai_flow       every 60 min  AI interpretation of dirty companies │
 └─────────────────────────────────────────────────────────────────┘
+
+enrich_flow and label_flow are offset by 15 min so labelling starts
+after enrichment finishes (enrich at :00/:30, label at :15/:45).
 
 Deploy with:
     prefect deploy --all  # from the email-analyser directory
@@ -81,38 +85,52 @@ def ingest_flow() -> dict:
 
 @flow(name="email-manager-enrich", log_prints=True)
 def enrich_flow() -> dict:
-    """Run global enrichment pipeline stages.
+    """Parse emails and fetch non-AI enrichment data.
 
     Stage order:
-      1. extract_base  — must complete first; threads need raw emails parsed
-      2. hubspot_task_enrichment, fetch_homepages, label_companies — parallel
-      3. build_search_index — after threads and labels are current
+      1. extract_base  — parse raw emails into threads/contacts/companies
+      2. hubspot_task_enrichment + fetch_homepages — parallel, no AI calls
     """
     log = get_run_logger()
 
-    # Step 1: extract_base (sequential dependency for everything else)
     base_count = run_extract_base()
 
-    # Step 2: parallel enrichment (these are independent of each other)
     hs_future = run_hubspot_task_enrichment.submit()
     hp_future = run_fetch_homepages.submit()
-    lc_future = run_label_companies.submit()
 
     hs_result = hs_future.result(raise_on_failure=False)
     hp_result = hp_future.result(raise_on_failure=False)
-    lc_result = lc_future.result(raise_on_failure=False)
-
-    # Step 3: rebuild search index now that threads and labels are current
-    si_count = run_build_search_index()
 
     result = {
         "extract_base": base_count,
         "hubspot_task_enrichment": hs_result,
         "fetch_homepages": hp_result,
+    }
+    log.info("Enrich complete: %s", result)
+    return result
+
+
+# ── Label flow (AI model calls) ──────────────────────────────────────────────
+
+
+@flow(name="email-manager-label", log_prints=True)
+def label_flow() -> dict:
+    """Label companies with AI and rebuild the search index.
+
+    Runs after enrich_flow completes (offset by 15 min in schedule).
+    Separated from enrich because label_companies and generate_embeddings
+    make AI model calls that can run for many minutes.
+    """
+    log = get_run_logger()
+
+    lc_result = run_label_companies()
+    si_count = run_build_search_index()
+
+    result = {
         "label_companies": lc_result,
         "build_search_index": si_count,
     }
-    log.info("Enrich complete: %s", result)
+    log.info("Label complete: %s", result)
     return result
 
 
@@ -200,7 +218,7 @@ def company_flow(domain: str, stages: list[str] | None = None) -> dict:
 
 @flow(name="email-manager-full-run", log_prints=True)
 def full_run_flow() -> dict:
-    """One-shot flow that runs ingest → enrich → AI in sequence.
+    """One-shot flow that runs ingest → enrich → label → AI in sequence.
 
     Useful for initial bootstrapping or ad-hoc full refreshes.
     Not scheduled; trigger manually from the Prefect UI or CLI.
@@ -210,11 +228,13 @@ def full_run_flow() -> dict:
 
     ingest_result = ingest_flow()
     enrich_result = enrich_flow()
+    label_result = label_flow()
     ai_result = ai_flow()
 
     return {
         "ingest": ingest_result,
         "enrich": enrich_result,
+        "label": label_result,
         "ai": ai_result,
     }
 

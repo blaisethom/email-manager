@@ -56,6 +56,20 @@ deployments:
         timezone: "UTC"
         active: true
 
+  # ── Label: AI company labelling + search index rebuild ──────────────────────
+  - name: label
+    entrypoint: email_manager.scheduler.flows:label_flow
+    description: "AI company labelling and search index rebuild (runs after enrich)"
+    work_pool:
+      name: default-process
+      job_variables:
+        env:
+          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+    schedules:
+      - cron: "15,45 * * * *"   # :15 and :45, offset 15 min after enrich (:00 and :30)
+        timezone: "UTC"
+        active: true
+
   # ── AI analysis: interpret dirty companies ───────────────────────────────────
   - name: ai-analysis
     entrypoint: email_manager.scheduler.flows:ai_flow
