@@ -1,10 +1,13 @@
-# Docker Compose overlay for the Prefect scheduler stack.
+# Docker Compose for the Prefect orchestration backend (server + metadata DB).
 #
-# Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.prefect.yml up
+# The worker runs directly on the host — NOT in Docker — so that the
+# Prokura transparent proxy can intercept and rewrite outbound HTTPS requests.
 #
-# Or, if you only want the scheduler alongside an already-running app:
-#   docker compose -f docker-compose.prefect.yml up
+# Start the server:
+#   docker compose -f docker-compose.prefect.yml up -d
+#
+# Start the worker (on the host, separately):
+#   prefect worker start --pool default-process
 
 services:
 
@@ -40,40 +43,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
-  # ── Prefect worker (runs flow tasks as subprocesses) ─────────────────────────
-  # Uses the stock Prefect image. Code is cloned from GitHub by the pull steps
-  # defined in prefect.yaml — no custom image needed.
-  #
-  # network_mode: host so that the Prokura transparent proxy (running on the
-  # host) can intercept and rewrite Bearer tokens in outbound HTTPS requests.
-  # With bridge networking the proxy's iptables rules don't reach the container.
-  worker:
-    image: prefecthq/prefect:3-latest
-    network_mode: host
-    command: >
-      bash -c "
-        until prefect work-pool ls >/dev/null 2>&1; do sleep 3; done &&
-        (prefect work-pool create default-process --type process --overwrite 2>/dev/null || true) &&
-        (prefect concurrency-limit create ai-llm 3 2>/dev/null || true) &&
-        prefect worker start --pool default-process
-      "
-    environment:
-      # localhost:4200 because the server publishes its port to the host and
-      # network_mode:host means we can't use Docker service DNS.
-      PREFECT_API_URL: http://localhost:4200/api
-      # Absolute paths — overrides the relative paths in .env
-      GMAIL_TOKEN_PATH: /data/gmail_token.json
-      GMAIL_CREDENTIALS_PATH: /data/gmail_credentials.json
-      ACCOUNTS_PATH: /data/accounts.json
-    env_file:
-      - .env
-    depends_on:
-      prefect-server:
-        condition: service_healthy
-    volumes:
-      # Persist OAuth tokens between restarts
-      - ../data:/data
 
 volumes:
   prefect-db-data:
