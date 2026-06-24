@@ -127,7 +127,7 @@ def label_flow(batch_size: int = 100, random_sample: bool = True) -> dict:
     log = get_run_logger()
 
     lc_result = run_label_companies(limit=batch_size, random_sample=random_sample)
-    si_count = run_build_search_index()
+    si_count = run_build_search_index(skip_embeddings=True)
 
     result = {
         "label_companies": lc_result,

@@ -26,7 +26,7 @@ def _cfg_and_conn():
 # ── Ingestion tasks ──────────────────────────────────────────────────────────
 
 
-@task(name="sync-email-account", retries=2, retry_delay_seconds=120)
+@task(name="sync-email-account", retries=2, retry_delay_seconds=120, timeout_seconds=600)
 def sync_email_account(account_name: str) -> dict[str, Any]:
     """Sync one email account (Gmail or IMAP)."""
     log = get_run_logger()
@@ -199,8 +199,8 @@ def run_label_companies(limit: int | None = None, random_sample: bool = False) -
 
 
 @task(name="run-build-search-index", retries=1, retry_delay_seconds=60)
-def run_build_search_index(force: bool = False) -> int:
-    """Rebuild the thread and discussion search index and embeddings."""
+def run_build_search_index(force: bool = False, skip_embeddings: bool = False) -> int:
+    """Rebuild the thread and discussion search index and optionally embeddings."""
     log = get_run_logger()
     config, conn = _cfg_and_conn()
     try:
@@ -214,11 +214,14 @@ def run_build_search_index(force: bool = False) -> int:
         count = build_search_index(conn, force=force)
         count += build_discussion_search_index(conn, force=force)
 
-        try:
-            count += generate_embeddings(conn, config, force=force)
-            count += generate_discussion_embeddings(conn, config, force=force)
-        except Exception as exc:
-            log.warning("Embedding generation skipped: %s", exc)
+        if not skip_embeddings:
+            try:
+                count += generate_embeddings(conn, config, force=force)
+                count += generate_discussion_embeddings(conn, config, force=force)
+            except Exception as exc:
+                log.warning("Embedding generation skipped: %s", exc)
+        else:
+            log.info("Embedding generation skipped (skip_embeddings=True)")
 
         conn.commit()
         log.info("build_search_index: %d items indexed", count)
