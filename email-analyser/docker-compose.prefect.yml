@@ -42,19 +42,30 @@ services:
       retries: 5
 
   # ── Prefect worker (runs flow tasks as subprocesses) ─────────────────────────
+  # Uses the stock Prefect image. Code is cloned from GitHub by the pull steps
+  # defined in prefect.yaml — no custom image needed.
   worker:
-    image: ghcr.io/blaisethom/email-manager/worker:latest
+    image: prefecthq/prefect:3-latest
+    command: >
+      bash -c "
+        until prefect work-pool ls >/dev/null 2>&1; do sleep 3; done &&
+        (prefect work-pool create default-process --type process --overwrite 2>/dev/null || true) &&
+        (prefect concurrency-limit create ai-llm 3 2>/dev/null || true) &&
+        prefect worker start --pool default-process
+      "
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
-      # Inherit all app env vars from .env (DB_URL, ANTHROPIC_API_KEY, etc.)
+      # Absolute paths for OAuth tokens — overrides the relative paths in .env
+      GMAIL_TOKEN_PATH: /data/gmail_token.json
+      GMAIL_CREDENTIALS_PATH: /data/gmail_credentials.json
     env_file:
       - .env
     depends_on:
       prefect-server:
         condition: service_healthy
     volumes:
-      # Persist OAuth tokens and local DB between restarts
-      - ../data:/app/data
+      # Persist OAuth tokens between restarts
+      - ../data:/data
 
 volumes:
   prefect-db-data:
