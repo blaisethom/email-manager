@@ -44,7 +44,7 @@ with open(LOCK_FILE, "w") as _lock:
         if not os.path.basename(w).startswith("pip-")
     )
     print(f"Installing {len(wheels)} vendored packages to {DEPS}...")
-    run_pip("install", "--target", DEPS, "--no-deps", "--quiet", *wheels)
+    run_pip("install", "--target", DEPS, "--no-deps", "--upgrade", "--quiet", *wheels)
 
     # Copy email_manager source from the cloned repo (always gets latest code).
     # Atomic: copy to temp name, then rename, so a concurrent reader never sees a
