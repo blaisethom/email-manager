@@ -23,11 +23,9 @@ pull:
       id: clone_and_bootstrap
       stream_output: true
       shell: true
-      script: |
-        set -e
-        CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX)
-        git clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git "$CLONE_DIR"
-        /opt/prefect/bin/python3 "$CLONE_DIR/email-analyser/scripts/worker_bootstrap.py"
+      # Single line: shell: true runs each line in a separate sh -c, so variables
+      # set in one line are gone by the next. Chain with && to keep CLONE_DIR in scope.
+      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX) && git clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && /opt/prefect/bin/python3 \"$CLONE_DIR/email-analyser/scripts/worker_bootstrap.py\""
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
