@@ -37,7 +37,6 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
-          ACCOUNTS_PATH: /home/node/workspace/email-manager/email-analyser/accounts.json
     schedules:
       - cron: "*/10 * * * *"
         timezone: "UTC"
@@ -52,7 +51,6 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
-          ACCOUNTS_PATH: /home/node/workspace/email-manager/email-analyser/accounts.json
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -67,7 +65,6 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
-          ACCOUNTS_PATH: /home/node/workspace/email-manager/email-analyser/accounts.json
     schedules:
       - cron: "5 * * * *"   # :05 past every hour, offset from enrich
         timezone: "UTC"
@@ -82,7 +79,6 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
-          ACCOUNTS_PATH: /home/node/workspace/email-manager/email-analyser/accounts.json
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
@@ -97,5 +93,4 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
-          ACCOUNTS_PATH: /home/node/workspace/email-manager/email-analyser/accounts.json
     schedules: []   # No schedule — trigger manually
