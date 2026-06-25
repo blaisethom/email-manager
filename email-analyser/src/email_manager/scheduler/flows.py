@@ -3,7 +3,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │ ingest_flow   every 10 min  Pull raw data from all sources      │
 │ enrich_flow   every 30 min  Parse emails, fetch homepages       │
-│ label_flow    every 30 min  AI company labelling + search index │
+│ label_flow    every 30 min  AI company labelling                 │
 │ ai_flow       every 60 min  AI interpretation of dirty companies │
 └─────────────────────────────────────────────────────────────────┘
 
@@ -85,11 +85,12 @@ def ingest_flow() -> dict:
 
 @flow(name="email-manager-enrich", log_prints=True)
 def enrich_flow() -> dict:
-    """Parse emails and fetch non-AI enrichment data.
+    """Parse emails, fetch non-AI enrichment data, and rebuild the search index.
 
     Stage order:
       1. extract_base  — parse raw emails into threads/contacts/companies
       2. hubspot_task_enrichment + fetch_homepages — parallel, no AI calls
+      3. build_search_index — incremental text index (no embeddings)
     """
     log = get_run_logger()
 
@@ -101,10 +102,13 @@ def enrich_flow() -> dict:
     hs_result = hs_future.result(raise_on_failure=False)
     hp_result = hp_future.result(raise_on_failure=False)
 
+    si_count = run_build_search_index(skip_embeddings=True)
+
     result = {
         "extract_base": base_count,
         "hubspot_task_enrichment": hs_result,
         "fetch_homepages": hp_result,
+        "build_search_index": si_count,
     }
     log.info("Enrich complete: %s", result)
     return result
@@ -113,26 +117,21 @@ def enrich_flow() -> dict:
 # ── Label flow (AI model calls) ──────────────────────────────────────────────
 
 
-@flow(name="email-manager-label", log_prints=True, timeout_seconds=1200)
+@flow(name="email-manager-label", log_prints=True)
 def label_flow(batch_size: int = 50, random_sample: bool = True) -> dict:
-    """Label companies with AI and rebuild the search index.
+    """Label companies with AI.
 
     Runs after enrich_flow completes (offset by 15 min in schedule).
-    Separated from enrich because label_companies and generate_embeddings
-    make AI model calls that can run for many minutes.
+    Search index is built in enrich_flow; this flow only does AI labelling.
 
-    batch_size: max companies to label per run (default 100)
+    batch_size: max companies to label per run (default 50)
     random_sample: pick randomly from unlabelled set (default True)
     """
     log = get_run_logger()
 
     lc_result = run_label_companies(limit=batch_size, random_sample=random_sample)
-    si_count = run_build_search_index(skip_embeddings=True)
 
-    result = {
-        "label_companies": lc_result,
-        "build_search_index": si_count,
-    }
+    result = {"label_companies": lc_result}
     log.info("Label complete: %s", result)
     return result
 
