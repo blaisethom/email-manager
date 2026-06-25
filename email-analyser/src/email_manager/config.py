@@ -32,7 +32,9 @@ class _PrefectVariableSource(PydanticBaseSettingsSource):
     def __init__(self, settings_cls: Type[BaseSettings]) -> None:
         super().__init__(settings_cls)
         raw = _prefect_variable("worker_config")
-        self._data: dict[str, Any] = {k.lower(): v for k, v in json.loads(raw).items()} if raw else {}
+        # Prefect may return value as an already-parsed dict or as a JSON string
+        parsed = raw if isinstance(raw, dict) else (json.loads(raw) if raw else {})
+        self._data: dict[str, Any] = {k.lower(): v for k, v in parsed.items()}
 
     def get_field_value(self, field: Any, field_name: str) -> Tuple[Any, str, bool]:
         value = self._data.get(field_name)
