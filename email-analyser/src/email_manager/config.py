@@ -93,6 +93,7 @@ class Config(BaseSettings):
     # AI
     ai_backend: str = "claude"  # "claude", "claude-cli", or "ollama"
     anthropic_api_key: str = ""
+    claude_code_oauth_token: str = ""  # OAuth token placeholder; set to CLAUDE_CODE_OAUTH_TOKEN, proxy fills the real value
     claude_model: str = ""
     extract_events_model: str = ""  # model override for extract_events stage (e.g. claude-sonnet-4-6)
     ollama_model: str = "llama3.1:8b"

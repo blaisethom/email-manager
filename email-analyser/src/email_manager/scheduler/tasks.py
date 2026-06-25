@@ -234,15 +234,44 @@ def run_build_search_index(force: bool = False, skip_embeddings: bool = False) -
 
 
 @task(name="get-dirty-companies", retries=1, retry_delay_seconds=30)
-def get_dirty_companies() -> list[str]:
-    """Return company domains that have unprocessed changes in the journal."""
+def get_dirty_companies(label_filter: list[str] | None = None) -> list[str]:
+    """Return company domains that have unprocessed changes in the journal.
+
+    If label_filter is given, only returns domains whose top label (highest
+    confidence) is one of the specified labels (case-insensitive).
+    """
     log = get_run_logger()
     _, conn = _cfg_and_conn()
     try:
         from email_manager.change_journal import get_dirty_company_domains
 
         domains = get_dirty_company_domains(conn)
-        log.info("%d dirty companies", len(domains))
+
+        if label_filter and domains:
+            placeholders_d = ",".join("?" for _ in domains)
+            placeholders_l = ",".join("?" for _ in label_filter)
+            rows = conn.execute(
+                f"""SELECT c.domain FROM companies c
+                    WHERE c.domain IN ({placeholders_d})
+                      AND c.domain IS NOT NULL
+                      AND (
+                          SELECT LOWER(cl.label)
+                          FROM company_labels cl
+                          WHERE cl.company_id = c.id
+                          ORDER BY COALESCE(cl.confidence, 0) DESC, cl.assigned_at DESC
+                          LIMIT 1
+                      ) IN ({placeholders_l})""",
+                [*domains, *[lbl.lower() for lbl in label_filter]],
+            ).fetchall()
+            domains = [r[0] for r in rows]
+            log.info(
+                "%d dirty companies match label filter %s",
+                len(domains),
+                label_filter,
+            )
+        else:
+            log.info("%d dirty companies", len(domains))
+
         return domains
     finally:
         conn.close()

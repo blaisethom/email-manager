@@ -20,9 +20,11 @@ def _sync_concurrency():
     """Acquire a Prefect concurrency slot, or no-op if Prefect isn't available."""
     try:
         from prefect.concurrency.sync import concurrency
-        with concurrency(_CONCURRENCY_SLOT, occupy=1):
-            yield
+        ctx = concurrency(_CONCURRENCY_SLOT, occupy=1)
     except Exception:
+        yield
+        return
+    with ctx:
         yield
 
 
@@ -31,9 +33,11 @@ async def _async_concurrency():
     """Acquire a Prefect concurrency slot (async), or no-op if Prefect isn't available."""
     try:
         from prefect.concurrency.asyncio import concurrency
-        async with concurrency(_CONCURRENCY_SLOT, occupy=1):
-            yield
+        ctx = concurrency(_CONCURRENCY_SLOT, occupy=1)
     except Exception:
+        yield
+        return
+    async with ctx:
         yield
 
 logger = logging.getLogger("email_manager.ai.claude_cli")
@@ -213,7 +217,9 @@ class ClaudeCLIBackend:
 
         if proc.returncode != 0:
             stderr = proc.stderr.read() if proc.stderr else ""
-            raise RuntimeError(f"Claude CLI failed (exit {proc.returncode}): {stderr[:500]}")
+            stdout_snippet = "".join(chunks)[:200]
+            detail = stderr[:300] or stdout_snippet
+            raise RuntimeError(f"Claude CLI failed (exit {proc.returncode}): {detail}")
 
         return "".join(chunks)
 

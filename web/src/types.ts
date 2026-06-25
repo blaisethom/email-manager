@@ -443,6 +443,19 @@ export interface ReviewLabelsResponse {
   total: number;
 }
 
+export interface PipelineCompany {
+  company_id: number;
+  name: string | null;
+  domain: string | null;
+  last_analysed_at: string | null;
+}
+
+export interface PipelineCompaniesResponse {
+  items: PipelineCompany[];
+  total: number;
+  stages: string[];
+}
+
 export interface LearnedRule {
   id: number;
   layer: string;

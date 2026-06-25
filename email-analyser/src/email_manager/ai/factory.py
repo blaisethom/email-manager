@@ -13,15 +13,19 @@ def _claude_cli_available() -> bool:
 
 def get_backend(config: Config) -> LLMBackend:
     if config.ai_backend == "claude":
-        if not config.anthropic_api_key:
-            if _claude_cli_available():
-                from email_manager.ai.claude_cli_backend import ClaudeCLIBackend
-
-                return ClaudeCLIBackend(model=config.claude_model if config.claude_model else None)
-            raise ValueError("ANTHROPIC_API_KEY not set and claude CLI not found on PATH.")
         from email_manager.ai.claude_backend import ClaudeBackend
 
-        return ClaudeBackend(api_key=config.anthropic_api_key, model=config.claude_model)
+        if config.anthropic_api_key:
+            return ClaudeBackend(api_key=config.anthropic_api_key, model=config.claude_model)
+        if config.claude_code_oauth_token:
+            return ClaudeBackend(auth_token=config.claude_code_oauth_token, model=config.claude_model)
+        if _claude_cli_available():
+            from email_manager.ai.claude_cli_backend import ClaudeCLIBackend
+
+            return ClaudeCLIBackend(model=config.claude_model if config.claude_model else None)
+        raise ValueError(
+            "No Claude auth: set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or log in with 'claude /login'."
+        )
     elif config.ai_backend == "claude-cli":
         from email_manager.ai.claude_cli_backend import ClaudeCLIBackend
 

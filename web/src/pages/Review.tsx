@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import type { CategoryConfig, Granularity, LearnedRule, LabelConfig, ReviewCompany } from '../types';
+import type { CategoryConfig, Granularity, LearnedRule, LabelConfig, ReviewCompany, PipelineCompany } from '../types';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -576,9 +577,118 @@ function RulesTab() {
   );
 }
 
+// ── COMPANIES TAB ─────────────────────────────────────────────────────────────
+
+function formatStage(s: string) {
+  return s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function CompaniesTab() {
+  const [items, setItems]       = useState<PipelineCompany[]>([]);
+  const [total, setTotal]       = useState(0);
+  const [stages, setStages]     = useState<string[]>([]);
+  const [q, setQ]               = useState('');
+  const [filter, setFilter]     = useState('');
+  const [stageFilter, setStageFilter] = useState('');
+  const [loading, setLoading]   = useState(true);
+  const [page, setPage]         = useState(1);
+  const navigate                = useNavigate();
+  const LIMIT = 100;
+
+  useEffect(() => {
+    setLoading(true);
+    api.getReviewCompanies({ q: filter || undefined, stage: stageFilter || undefined, page, limit: LIMIT })
+      .then(data => {
+        setItems(data.items);
+        setTotal(data.total);
+        if (data.stages?.length) setStages(data.stages);
+      })
+      .finally(() => setLoading(false));
+  }, [filter, stageFilter, page]);
+
+  function handleSearch(e: React.FormEvent) {
+    e.preventDefault();
+    setPage(1);
+    setFilter(q);
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / LIMIT));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2">
+        <form onSubmit={handleSearch} className="flex gap-2 flex-1">
+          <input
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            placeholder="Search companies…"
+            className="input flex-1"
+          />
+          <button type="submit" className="btn-secondary">Search</button>
+        </form>
+        {stages.length > 0 && (
+          <select
+            className="input w-52 shrink-0"
+            value={stageFilter}
+            onChange={e => { setStageFilter(e.target.value); setPage(1); }}
+          >
+            <option value="">All stages</option>
+            {stages.map(s => (
+              <option key={s} value={s}>{formatStage(s)}</option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="text-sm text-slate-500">Loading…</div>
+      ) : items.length === 0 ? (
+        <div className="text-sm text-slate-500">No companies found.</div>
+      ) : (
+        <>
+          <div className="text-xs text-slate-400">{total} companies</div>
+          <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden">
+            {items.map(c => (
+              <div
+                key={c.company_id}
+                className="flex items-center justify-between px-4 py-3 hover:bg-slate-50 cursor-pointer"
+                onClick={() => navigate(`/companies/${c.company_id}`)}
+              >
+                <div>
+                  <div className="font-medium text-slate-900 text-sm">{c.name ?? c.domain ?? '—'}</div>
+                  {c.name && c.domain && (
+                    <div className="text-xs text-slate-400 mt-0.5">{c.domain}</div>
+                  )}
+                </div>
+                <div className="text-xs text-slate-400 shrink-0 ml-4">{formatDate(c.last_analysed_at)}</div>
+              </div>
+            ))}
+          </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center gap-2 justify-center pt-2">
+              <button
+                disabled={page <= 1}
+                onClick={() => setPage(p => p - 1)}
+                className="btn-secondary text-xs disabled:opacity-40"
+              >← Prev</button>
+              <span className="text-xs text-slate-500">{page} / {totalPages}</span>
+              <button
+                disabled={page >= totalPages}
+                onClick={() => setPage(p => p + 1)}
+                className="btn-secondary text-xs disabled:opacity-40"
+              >Next →</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── PAGE SHELL ────────────────────────────────────────────────────────────────
 
-type Tab = 'labels' | 'discussions' | 'rules';
+type Tab = 'labels' | 'discussions' | 'rules' | 'companies';
 
 export default function Review() {
   const [tab, setTab]               = useState<Tab>('labels');
@@ -598,6 +708,7 @@ export default function Review() {
     { id: 'labels',      label: 'Labels' },
     { id: 'discussions', label: 'Discussions' },
     { id: 'rules',       label: 'Rules library' },
+    { id: 'companies',   label: 'Companies' },
   ];
 
   return (
@@ -631,6 +742,7 @@ export default function Review() {
         {tab === 'labels'      && <LabelsTab      labelConfig={labelConfig} />}
         {tab === 'discussions' && <DiscussionsTab  categoryConfig={categoryConfig} />}
         {tab === 'rules'       && <RulesTab />}
+        {tab === 'companies'   && <CompaniesTab />}
       </div>
     </div>
   );

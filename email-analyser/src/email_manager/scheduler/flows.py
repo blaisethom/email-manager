@@ -140,8 +140,15 @@ def label_flow(batch_size: int = 50, random_sample: bool = True) -> dict:
 # ── AI flow ──────────────────────────────────────────────────────────────────
 
 
+_DEFAULT_ANALYSIS_LABELS = ["investor", "cro", "pharma", "clinic"]
+
+
 @flow(name="email-manager-ai", log_prints=True)
-def ai_flow(batch_size: int | None = None, random_sample: bool = True) -> dict:
+def ai_flow(
+    batch_size: int = 2,
+    random_sample: bool = True,
+    label_filter: list[str] | None = None,
+) -> dict:
     """Run AI interpretation for companies with unprocessed changes.
 
     Fans out one task per company. Tasks compete for the 'ai-llm' Prefect
@@ -152,13 +159,19 @@ def ai_flow(batch_size: int | None = None, random_sample: bool = True) -> dict:
     the backlog is worked through evenly rather than always picking the same
     head-of-queue companies. Set random_sample=False to process in DB order.
 
+    label_filter restricts which companies are eligible — only those whose
+    top-confidence label matches one of the given values. Defaults to
+    investor / cro / pharma / clinic. Pass an empty list to disable filtering.
+
     Set up the limit before first run:
         prefect concurrency-limit create ai-llm 3
     """
     log = get_run_logger()
-    limit = batch_size or SETTINGS.ai_company_batch_size
+    limit = batch_size
 
-    dirty = get_dirty_companies()
+    _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
+
+    dirty = get_dirty_companies(label_filter=_label_filter or None)
     if not dirty:
         log.info("No dirty companies — nothing to do")
         return {"processed": 0, "total_dirty": 0}

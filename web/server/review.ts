@@ -303,4 +303,60 @@ export function registerReviewRoutes(app: Express, db: Database): void {
 
     res.status(201).json({ id: result?.id, rule_text: ruleText, active: true, created_at: now });
   });
+
+  // ── Companies ───────────────────────────────────────────────────────────────
+
+  // GET /api/review/companies
+  // Companies that have been through the AI pipeline, ordered by most-recently analysed.
+  app.get('/api/review/companies', async (req: Request, res: Response) => {
+    const { q, stage, page: pageStr, limit: limitStr } = req.query as Record<string, string>;
+    const page  = Math.max(1, parseInt(pageStr  || '1',  10));
+    const limit = Math.min(200, Math.max(1, parseInt(limitStr || '100', 10)));
+    const offset = (page - 1) * limit;
+
+    const where: string[]   = ['pr.mode LIKE \'staged:%\' AND pr.error IS NULL'];
+    const params: unknown[] = [];
+
+    if (q) {
+      where.push('(c.name LIKE ? OR c.domain LIKE ?)');
+      params.push(`%${q}%`, `%${q}%`);
+    }
+    if (stage) {
+      where.push('pr.mode = ?');
+      params.push(`staged:${stage}`);
+    }
+
+    const whereClause = `WHERE ${where.join(' AND ')}`;
+
+    const stageRows = await db.query<{ stage: string }>(
+      `SELECT DISTINCT SUBSTR(mode, 8) AS stage
+       FROM processing_runs
+       WHERE mode LIKE 'staged:%' AND error IS NULL
+       ORDER BY stage`,
+    );
+
+    const total = (await db.queryOne<{ n: number }>(
+      `SELECT COUNT(DISTINCT c.id) AS n
+       FROM companies c
+       JOIN processing_runs pr ON LOWER(pr.company_domain) = LOWER(c.domain)
+       ${whereClause}`,
+      ...params,
+    ))?.n ?? 0;
+
+    const rows = await db.query<{
+      company_id: number; name: string | null; domain: string | null; last_analysed_at: string | null;
+    }>(
+      `SELECT c.id AS company_id, c.name, c.domain,
+              MAX(pr.started_at) AS last_analysed_at
+       FROM companies c
+       JOIN processing_runs pr ON LOWER(pr.company_domain) = LOWER(c.domain)
+       ${whereClause}
+       GROUP BY c.id
+       ORDER BY last_analysed_at DESC
+       LIMIT ? OFFSET ?`,
+      ...params, limit, offset,
+    );
+
+    res.json({ items: rows, total, stages: stageRows.map(r => r.stage) });
+  });
 }

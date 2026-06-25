@@ -29,6 +29,7 @@ import type {
   PrefectDeployment,
   PrefectFlowRun,
   PrefectLog,
+  PipelineCompaniesResponse,
 } from './types';
 
 const BASE = '/api';
@@ -375,6 +376,17 @@ export const api = {
     if (params.label) qs.set('label', params.label);
     if (params.page)  qs.set('page', String(params.page));
     const res = await fetch(`${BASE}/review/labels?${qs}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
+
+  async getReviewCompanies(params: { q?: string; stage?: string; page?: number; limit?: number } = {}): Promise<PipelineCompaniesResponse> {
+    const qs = new URLSearchParams();
+    if (params.q)     qs.set('q', params.q);
+    if (params.stage) qs.set('stage', params.stage);
+    if (params.page)  qs.set('page', String(params.page));
+    if (params.limit) qs.set('limit', String(params.limit));
+    const res = await fetch(`${BASE}/review/companies?${qs}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   },
