@@ -89,7 +89,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 2
+      batch_size: 5
       random_sample: true
       label_filter:
         - investor
