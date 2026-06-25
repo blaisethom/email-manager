@@ -12,7 +12,7 @@ def _log(msg: str) -> None:
     """Print migration/schema messages to stderr so they don't pollute stdout (e.g. --csv)."""
     print(msg, file=sys.stderr)
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS companies (
     first_seen      TEXT,
     last_seen       TEXT,
     homepage_fetched_at TEXT,
-    description     TEXT
+    description     TEXT,
+    name_source     TEXT DEFAULT 'email'
 );
 
 CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
@@ -727,6 +728,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v38(conn)
     if current_version < 39:
         _migrate_to_v39(conn)
+    if current_version < 40:
+        _migrate_to_v40(conn)
+
+
+def _migrate_to_v40(conn: sqlite3.Connection) -> None:
+    """Migration v39 -> v40: add name_source to companies (email/hubspot/human)."""
+    cols = _get_column_names(conn, "companies")
+    if "name_source" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN name_source TEXT DEFAULT 'email'")
+    conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (40,))
+    conn.commit()
 
 
 def _migrate_to_v39(conn: sqlite3.Connection) -> None:

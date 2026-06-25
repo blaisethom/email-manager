@@ -489,6 +489,16 @@ def sync_companies(
                 domain=props.get("domain"),
                 name=props.get("name"),
             )
+            # Propagate HubSpot name to companies.name unless human has set it
+            hs_name = props.get("name")
+            hs_domain = props.get("domain")
+            if hs_name and hs_domain:
+                conn.execute(
+                    """UPDATE companies SET name = ?, name_source = 'hubspot'
+                       WHERE LOWER(domain) = LOWER(?)
+                         AND (name_source IS NULL OR name_source != 'human')""",
+                    (hs_name, hs_domain),
+                )
             n_companies += 1
             if n_companies % 50 == 0:
                 conn.commit()

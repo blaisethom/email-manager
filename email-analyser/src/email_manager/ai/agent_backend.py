@@ -452,7 +452,7 @@ def apply_changes(
         updates = []
         update_params: list[Any] = []
         if lu.get("company_name"):
-            updates.append("name = ?")
+            updates.append("name = CASE WHEN COALESCE(name_source,'email') = 'human' THEN name ELSE ? END")
             update_params.append(lu["company_name"])
         if lu.get("company_description"):
             updates.append("description = ?")

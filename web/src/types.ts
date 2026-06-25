@@ -448,6 +448,7 @@ export interface PipelineCompany {
   name: string | null;
   domain: string | null;
   last_analysed_at: string | null;
+  name_source: 'email' | 'hubspot' | 'human' | null;
 }
 
 export interface PipelineCompaniesResponse {

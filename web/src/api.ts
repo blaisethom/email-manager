@@ -391,6 +391,15 @@ export const api = {
     return res.json();
   },
 
+  async renameCompany(companyId: number, name: string): Promise<void> {
+    const res = await fetch(`${BASE}/review/companies/${companyId}/name`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  },
+
   async saveCompanyLabels(companyId: number, labels: string[], reason?: string): Promise<void> {
     const res = await fetch(`${BASE}/review/labels/${companyId}`, {
       method: 'POST',

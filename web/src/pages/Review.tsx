@@ -583,6 +583,14 @@ function formatStage(s: string) {
   return s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+function NameSourceBadge({ source }: { source: string | null }) {
+  if (!source || source === 'email') return null;
+  const cls = source === 'human'
+    ? 'bg-blue-100 text-blue-700'
+    : 'bg-purple-100 text-purple-700';
+  return <span className={`text-xs px-1.5 py-0.5 rounded font-medium ml-1.5 ${cls}`}>{source}</span>;
+}
+
 function CompaniesTab() {
   const [items, setItems]       = useState<PipelineCompany[]>([]);
   const [total, setTotal]       = useState(0);
@@ -592,8 +600,38 @@ function CompaniesTab() {
   const [stageFilter, setStageFilter] = useState('');
   const [loading, setLoading]   = useState(true);
   const [page, setPage]         = useState(1);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editName, setEditName]   = useState('');
+  const [saving, setSaving]       = useState(false);
   const navigate                = useNavigate();
   const LIMIT = 100;
+
+  function startRename(c: PipelineCompany, e: React.MouseEvent) {
+    e.stopPropagation();
+    setEditingId(c.company_id);
+    setEditName(c.name ?? c.domain ?? '');
+  }
+
+  async function saveRename(c: PipelineCompany, e: React.MouseEvent | React.FormEvent) {
+    e.stopPropagation();
+    if (!editName.trim()) return;
+    setSaving(true);
+    try {
+      await api.renameCompany(c.company_id, editName.trim());
+      setItems(items.map(i => i.company_id === c.company_id
+        ? { ...i, name: editName.trim(), name_source: 'human' }
+        : i
+      ));
+      setEditingId(null);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function cancelRename(e: React.MouseEvent) {
+    e.stopPropagation();
+    setEditingId(null);
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -652,11 +690,32 @@ function CompaniesTab() {
               <div
                 key={c.company_id}
                 className="flex items-center justify-between px-4 py-3 hover:bg-slate-50 cursor-pointer"
-                onClick={() => navigate(`/companies/${c.company_id}`)}
+                onClick={() => editingId !== c.company_id && navigate(`/companies/${c.company_id}`)}
               >
-                <div>
-                  <div className="font-medium text-slate-900 text-sm">{c.name ?? c.domain ?? '—'}</div>
-                  {c.name && c.domain && (
+                <div className="flex-1 min-w-0">
+                  {editingId === c.company_id ? (
+                    <form onSubmit={e => saveRename(c, e)} className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                      <input
+                        autoFocus
+                        value={editName}
+                        onChange={e => setEditName(e.target.value)}
+                        className="input text-sm py-0.5 px-2 flex-1 min-w-0"
+                      />
+                      <button type="submit" disabled={saving} className="btn-secondary text-xs py-0.5 px-2">Save</button>
+                      <button type="button" onClick={cancelRename} className="text-xs text-slate-400 hover:text-slate-600">Cancel</button>
+                    </form>
+                  ) : (
+                    <div className="flex items-center gap-1">
+                      <span className="font-medium text-slate-900 text-sm">{c.name ?? c.domain ?? '—'}</span>
+                      <NameSourceBadge source={c.name_source} />
+                      <button
+                        onClick={e => startRename(c, e)}
+                        className="text-slate-300 hover:text-slate-500 ml-1 text-xs leading-none"
+                        title="Rename"
+                      >✎</button>
+                    </div>
+                  )}
+                  {c.name && c.domain && editingId !== c.company_id && (
                     <div className="text-xs text-slate-400 mt-0.5">{c.domain}</div>
                   )}
                 </div>

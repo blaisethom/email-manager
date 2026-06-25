@@ -344,9 +344,10 @@ export function registerReviewRoutes(app: Express, db: Database): void {
     ))?.n ?? 0;
 
     const rows = await db.query<{
-      company_id: number; name: string | null; domain: string | null; last_analysed_at: string | null;
+      company_id: number; name: string | null; domain: string | null;
+      last_analysed_at: string | null; name_source: string | null;
     }>(
-      `SELECT c.id AS company_id, c.name, c.domain,
+      `SELECT c.id AS company_id, c.name, c.domain, c.name_source,
               MAX(pr.started_at) AS last_analysed_at
        FROM companies c
        JOIN processing_runs pr ON LOWER(pr.company_domain) = LOWER(c.domain)
@@ -358,5 +359,19 @@ export function registerReviewRoutes(app: Express, db: Database): void {
     );
 
     res.json({ items: rows, total, stages: stageRows.map(r => r.stage) });
+  });
+
+  // PATCH /api/review/companies/:companyId/name
+  // Update a company's display name; marks it as human-set so it won't be overwritten.
+  app.patch('/api/review/companies/:companyId/name', async (req: Request, res: Response) => {
+    const companyId = parseInt(req.params.companyId, 10);
+    if (isNaN(companyId)) { res.status(400).json({ error: 'Invalid company id' }); return; }
+    const { name } = req.body as { name?: string };
+    if (!name?.trim()) { res.status(400).json({ error: 'name is required' }); return; }
+    await db.query(
+      `UPDATE companies SET name = ?, name_source = 'human' WHERE id = ?`,
+      name.trim(), companyId,
+    );
+    res.json({ ok: true, name: name.trim(), name_source: 'human' });
   });
 }
