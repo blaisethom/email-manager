@@ -113,8 +113,8 @@ def enrich_flow() -> dict:
 # ── Label flow (AI model calls) ──────────────────────────────────────────────
 
 
-@flow(name="email-manager-label", log_prints=True)
-def label_flow(batch_size: int = 100, random_sample: bool = True) -> dict:
+@flow(name="email-manager-label", log_prints=True, timeout_seconds=1200)
+def label_flow(batch_size: int = 50, random_sample: bool = True) -> dict:
     """Label companies with AI and rebuild the search index.
 
     Runs after enrich_flow completes (offset by 15 min in schedule).

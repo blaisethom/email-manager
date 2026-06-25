@@ -39,7 +39,7 @@ deployments:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
     schedules:
-      - cron: "*/10 * * * *"
+      - cron: "*/20 * * * *"
         timezone: "UTC"
         active: true
 
@@ -72,7 +72,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 100
+      batch_size: 50
       random_sample: true
 
   # ── AI analysis: interpret dirty companies ───────────────────────────────────
