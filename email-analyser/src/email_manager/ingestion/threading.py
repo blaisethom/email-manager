@@ -111,12 +111,7 @@ def _external_recipient_domains(
     cc_addresses: str | None,
     user_domains: set[str] | None = None,
 ) -> set[str]:
-    """Return external company domains from TO/CC, excluding sender's and user's domains.
-
-    Groups all contacts at the same company together — alice@co.com and
-    bob@co.com both contribute 'co.com'. Used for subject-based thread
-    matching so that only emails involving the same external companies merge.
-    """
+    """Return external company domains from TO/CC, excluding sender's and user's domains."""
     sender_domain = ""
     if from_address and "@" in from_address:
         sender_domain = from_address.lower().split("@", 1)[1]
@@ -139,6 +134,42 @@ def _external_recipient_domains(
                         result.add(domain)
         except (json.JSONDecodeError, TypeError):
             pass
+    return result
+
+
+def _primary_recipients(
+    from_address: str | None,
+    to_addresses: str | None,
+    user_domains: set[str] | None = None,
+) -> set[str]:
+    """Return TO addresses (exact) excluding sender's domain and user domains.
+
+    Intentionally ignores CC — two emails that only share a CC'd party should
+    NOT be considered the same thread, even if they share a subject. Using
+    exact addresses (not domains) means alice@co.com and bob@co.com are treated
+    as distinct, so only the exact same person in TO triggers a merge.
+    """
+    sender_domain = ""
+    if from_address and "@" in from_address:
+        sender_domain = from_address.lower().split("@", 1)[1]
+
+    exclude: set[str] = set()
+    if sender_domain:
+        exclude.add(sender_domain)
+    if user_domains:
+        exclude |= user_domains
+
+    result: set[str] = set()
+    if not to_addresses:
+        return result
+    try:
+        for addr in json.loads(to_addresses):
+            if addr and "@" in addr:
+                domain = addr.lower().split("@", 1)[1]
+                if domain not in exclude:
+                    result.add(addr.lower())
+    except (json.JSONDecodeError, TypeError):
+        pass
     return result
 
 
@@ -333,29 +364,27 @@ def _find_thread_for_email(
         winner = _merge_threads(conn, found_thread_ids, dirty_threads)
         return winner
 
-    # Fallback: subject matching within time window, requiring external company
-    # domain overlap. We compare company domains (not individual addresses) so
-    # that two emails to different people at the same company are treated as the
-    # same conversation, while emails to different companies (same subject) are
-    # kept separate. User domains are excluded so that replies-to-user don't
-    # falsely link unrelated chains via the user's own domain.
+    # Fallback: subject matching within time window. High-precision: require that
+    # the exact same non-user TO address appears in both emails. CC is ignored —
+    # a shared CC party is not sufficient to merge threads. This prevents false
+    # groupings where the same person emails many companies with the same subject
+    # and common CC'd parties create spurious overlap.
     if norm_subj:
         addr_row = conn.execute(
-            "SELECT from_address, to_addresses, cc_addresses FROM emails WHERE id = ?",
+            "SELECT from_address, to_addresses FROM emails WHERE id = ?",
             (email_id,),
         ).fetchone()
-        my_domains: set[str] = set()
+        my_to: set[str] = set()
         if addr_row:
-            my_domains = _external_recipient_domains(
+            my_to = _primary_recipients(
                 addr_row["from_address"],
                 addr_row["to_addresses"],
-                addr_row["cc_addresses"],
                 user_domains,
             )
 
-        if my_domains:
+        if my_to:
             candidates = conn.execute(
-                """SELECT thread_id, from_address, to_addresses, cc_addresses FROM emails
+                """SELECT thread_id, from_address, to_addresses FROM emails
                    WHERE normalised_subject = ?
                      AND thread_id IS NOT NULL
                      AND ABS(julianday(?) - julianday(date)) <= ?
@@ -365,13 +394,12 @@ def _find_thread_for_email(
             ).fetchall()
 
             for cand in candidates:
-                cand_domains = _external_recipient_domains(
+                cand_to = _primary_recipients(
                     cand["from_address"],
                     cand["to_addresses"],
-                    cand["cc_addresses"],
                     user_domains,
                 )
-                if my_domains & cand_domains:
+                if my_to & cand_to:
                     return cand["thread_id"]
 
     # No match — start a new thread
@@ -514,22 +542,22 @@ def _build_union_find(
         f"  [dim]Phase 1 complete: linked {ref_count:,} references[/dim]"
     )
 
-    # Phase 2: Subject-based fallback grouping (with external company domain overlap)
+    # Phase 2: Subject-based fallback grouping (high-precision: exact TO address match)
     # Only unlinked emails (root == msg_id) are considered. Two emails with the same
-    # subject are only merged if they share at least one external company domain —
-    # meaning the same external company is involved in both conversations. User domains
-    # are excluded so that replies-to-user don't falsely link unrelated chains.
+    # subject are only merged if the exact same non-user address appears in the TO
+    # field of both. CC is ignored — a shared CC party is not sufficient. User domains
+    # are excluded so that replies-to-user don't falsely link chains via the hub domain.
     task = progress.add_task("Grouping by subject", total=total)
 
     user_domains = _identify_user_domains(conn)
 
-    # Collect unlinked emails with their subject, date, and external company domains
+    # Collect unlinked emails with their subject, date, and primary (TO) recipients
     subject_groups: dict[str, list[tuple[str, str, set[str]]]] = {}
     offset = 0
     while True:
         rows = conn.execute(
             """SELECT message_id, normalised_subject, date,
-                      from_address, to_addresses, cc_addresses
+                      from_address, to_addresses
                FROM emails ORDER BY id LIMIT ? OFFSET ?""",
             (BATCH_SIZE, offset),
         ).fetchall()
@@ -542,20 +570,19 @@ def _build_union_find(
             msg_id = row["message_id"]
             root = uf.find(msg_id)
             if root == msg_id:  # not linked to anything yet
-                domains = _external_recipient_domains(
+                to_addrs = _primary_recipients(
                     row["from_address"],
                     row["to_addresses"],
-                    row["cc_addresses"],
                     user_domains,
                 )
-                if domains:
+                if to_addrs:
                     subject_groups.setdefault(norm_subj, []).append(
-                        (msg_id, row["date"], domains)
+                        (msg_id, row["date"], to_addrs)
                     )
         progress.update(task, advance=len(rows))
         offset += BATCH_SIZE
 
-    # Link within subject groups using time window AND external company domain overlap
+    # Link within subject groups using time window AND exact TO address overlap
     for _subj, msgs in subject_groups.items():
         if len(msgs) < 2:
             continue
@@ -567,7 +594,6 @@ def _build_union_find(
                 if abs((d2 - d1).days) <= SUBJECT_WINDOW_DAYS and (msgs[i - 1][2] & msgs[i][2]):
                     uf.union(msgs[i - 1][0], msgs[i][0])
             except (ValueError, TypeError):
-                # On date parse failure, still require company domain overlap
                 if msgs[i - 1][2] & msgs[i][2]:
                     uf.union(msgs[i - 1][0], msgs[i][0])
 
