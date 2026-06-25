@@ -1,21 +1,50 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 
 import anthropic
 
 from email_manager.ai.base import TokenTracker, TokenUsage
 
+logger = logging.getLogger(__name__)
+
+_RETRY_DELAYS = [30, 60, 120]  # seconds between retries on 429
+
+
+def _with_retry(fn):
+    """Call fn(), retrying up to len(_RETRY_DELAYS) times on RateLimitError."""
+    for attempt, delay in enumerate(_RETRY_DELAYS, start=1):
+        try:
+            return fn()
+        except anthropic.RateLimitError:
+            logger.warning("Rate limit hit, retrying in %ds (attempt %d/%d)", delay, attempt, len(_RETRY_DELAYS))
+            time.sleep(delay)
+    return fn()  # final attempt — let it raise
+
+
+async def _with_retry_async(fn):
+    """Async version of _with_retry."""
+    import asyncio
+    for attempt, delay in enumerate(_RETRY_DELAYS, start=1):
+        try:
+            return await fn()
+        except anthropic.RateLimitError:
+            logger.warning("Rate limit hit, retrying in %ds (attempt %d/%d)", delay, attempt, len(_RETRY_DELAYS))
+            await asyncio.sleep(delay)
+    return await fn()
+
 
 class ClaudeBackend:
     def __init__(self, api_key: str = "", auth_token: str = "", model: str = "claude-sonnet-4-6") -> None:
         if auth_token:
-            self._client = anthropic.Anthropic(auth_token=auth_token, timeout=120.0)
-            self._async_client = anthropic.AsyncAnthropic(auth_token=auth_token, timeout=120.0)
+            self._client = anthropic.Anthropic(auth_token=auth_token, timeout=120.0, max_retries=0)
+            self._async_client = anthropic.AsyncAnthropic(auth_token=auth_token, timeout=120.0, max_retries=0)
             self._prefill = False  # OAuth route doesn't support assistant prefill
         else:
-            self._client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
-            self._async_client = anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0)
+            self._client = anthropic.Anthropic(api_key=api_key, timeout=120.0, max_retries=0)
+            self._async_client = anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0, max_retries=0)
             self._prefill = True
         self._model = model
         self._tracker = TokenTracker()
@@ -31,13 +60,13 @@ class ClaudeBackend:
     # ── Sync methods ──────────────────────────────────────────────────────
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
-        response = self._client.messages.create(
+        response = _with_retry(lambda: self._client.messages.create(
             model=self._model,
             max_tokens=4096,
             temperature=temperature,
             system=system,
             messages=[{"role": "user", "content": user}],
-        )
+        ))
         self._tracker.record(TokenUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
@@ -49,13 +78,13 @@ class ClaudeBackend:
         messages: list = [{"role": "user", "content": user}]
         if self._prefill:
             messages.append({"role": "assistant", "content": "{"})
-        response = self._client.messages.create(
+        response = _with_retry(lambda: self._client.messages.create(
             model=self._model,
             max_tokens=4096,
             temperature=temperature,
             system=json_system,
             messages=messages,
-        )
+        ))
         self._tracker.record(TokenUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
@@ -78,13 +107,13 @@ class ClaudeBackend:
     # ── Async methods ─────────────────────────────────────────────────────
 
     async def acomplete(self, system: str, user: str, temperature: float = 0.3) -> str:
-        response = await self._async_client.messages.create(
+        response = await _with_retry_async(lambda: self._async_client.messages.create(
             model=self._model,
             max_tokens=4096,
             temperature=temperature,
             system=system,
             messages=[{"role": "user", "content": user}],
-        )
+        ))
         self._tracker.record(TokenUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
@@ -96,13 +125,13 @@ class ClaudeBackend:
         messages: list = [{"role": "user", "content": user}]
         if self._prefill:
             messages.append({"role": "assistant", "content": "{"})
-        response = await self._async_client.messages.create(
+        response = await _with_retry_async(lambda: self._async_client.messages.create(
             model=self._model,
             max_tokens=4096,
             temperature=temperature,
             system=json_system,
             messages=messages,
-        )
+        ))
         self._tracker.record(TokenUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
