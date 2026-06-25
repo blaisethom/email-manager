@@ -50,11 +50,7 @@ def _external_recipients(
     to_addresses: str | None,
     cc_addresses: str | None,
 ) -> set[str]:
-    """Return TO/CC addresses that are outside the sender's domain.
-
-    Excludes the sender's own address and any same-domain colleagues so that
-    internal CCs don't create false subject-based thread groupings.
-    """
+    """Return TO/CC addresses that are outside the sender's domain."""
     sender_domain = ""
     if from_address and "@" in from_address:
         sender_domain = from_address.lower().split("@", 1)[1]
@@ -69,6 +65,78 @@ def _external_recipients(
                     domain = addr.lower().split("@", 1)[1]
                     if not sender_domain or domain != sender_domain:
                         result.add(addr.lower())
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return result
+
+
+def _identify_user_domains(conn: sqlite3.Connection) -> set[str]:
+    """Return the user's own email domains by examining sent-mail folders.
+
+    Used to exclude hub domains from subject-based thread matching, which
+    prevents replies-to-user from falsely linking unrelated chains that share
+    only the user as a common recipient.
+    """
+    rows = conn.execute(
+        """SELECT DISTINCT LOWER(SUBSTR(from_address, INSTR(from_address, '@') + 1)) AS domain
+           FROM emails
+           WHERE (LOWER(folder) LIKE '%sent%' OR LOWER(folder) LIKE '%outbox%')
+             AND from_address LIKE '%@%'"""
+    ).fetchall()
+    if rows:
+        return {r[0] for r in rows}
+    # Fallback: domains that account for >5% of all FROM addresses
+    total_row = conn.execute(
+        "SELECT COUNT(*) FROM emails WHERE from_address LIKE '%@%'"
+    ).fetchone()
+    total = total_row[0] if total_row else 0
+    if not total:
+        return set()
+    threshold = max(int(total * 0.05), 5)
+    rows = conn.execute(
+        """SELECT LOWER(SUBSTR(from_address, INSTR(from_address, '@') + 1)) AS domain,
+                  COUNT(*) AS cnt
+           FROM emails
+           WHERE from_address LIKE '%@%'
+           GROUP BY 1
+           ORDER BY cnt DESC
+           LIMIT 5"""
+    ).fetchall()
+    return {r[0] for r in rows if r[1] >= threshold}
+
+
+def _external_recipient_domains(
+    from_address: str | None,
+    to_addresses: str | None,
+    cc_addresses: str | None,
+    user_domains: set[str] | None = None,
+) -> set[str]:
+    """Return external company domains from TO/CC, excluding sender's and user's domains.
+
+    Groups all contacts at the same company together — alice@co.com and
+    bob@co.com both contribute 'co.com'. Used for subject-based thread
+    matching so that only emails involving the same external companies merge.
+    """
+    sender_domain = ""
+    if from_address and "@" in from_address:
+        sender_domain = from_address.lower().split("@", 1)[1]
+
+    exclude: set[str] = set()
+    if sender_domain:
+        exclude.add(sender_domain)
+    if user_domains:
+        exclude |= user_domains
+
+    result: set[str] = set()
+    for field in (to_addresses, cc_addresses):
+        if not field:
+            continue
+        try:
+            for addr in json.loads(field):
+                if addr and "@" in addr:
+                    domain = addr.lower().split("@", 1)[1]
+                    if domain not in exclude:
+                        result.add(domain)
         except (json.JSONDecodeError, TypeError):
             pass
     return result
@@ -160,6 +228,8 @@ def _incremental_thread(conn: sqlite3.Connection, console: Console) -> int:
     if unthreaded_count == 0:
         return 0
 
+    user_domains = _identify_user_domains(conn)
+
     with Progress(*_progress_columns(), console=console, transient=True) as progress:
         task = progress.add_task("Threading new emails", total=unthreaded_count)
         updated = 0
@@ -186,7 +256,7 @@ def _incremental_thread(conn: sqlite3.Connection, console: Console) -> int:
                 email_date = row["date"]
 
                 thread_id = _find_thread_for_email(
-                    conn, email_id, message_id, norm_subj, email_date, dirty_threads
+                    conn, email_id, message_id, norm_subj, email_date, dirty_threads, user_domains
                 )
 
                 conn.execute(
@@ -225,6 +295,7 @@ def _find_thread_for_email(
     norm_subj: str,
     email_date: str,
     dirty_threads: set[str],
+    user_domains: set[str] | None = None,
 ) -> str:
     """Determine the thread_id for a single unthreaded email.
 
@@ -262,24 +333,27 @@ def _find_thread_for_email(
         winner = _merge_threads(conn, found_thread_ids, dirty_threads)
         return winner
 
-    # Fallback: subject matching within time window, requiring external recipient overlap.
-    # We only count TO/CC addresses outside the sender's domain — this prevents
-    # internal CCs (e.g. colleagues) and the sender themselves from creating false
-    # groupings when the same person sends the same subject to different companies.
+    # Fallback: subject matching within time window, requiring external company
+    # domain overlap. We compare company domains (not individual addresses) so
+    # that two emails to different people at the same company are treated as the
+    # same conversation, while emails to different companies (same subject) are
+    # kept separate. User domains are excluded so that replies-to-user don't
+    # falsely link unrelated chains via the user's own domain.
     if norm_subj:
         addr_row = conn.execute(
             "SELECT from_address, to_addresses, cc_addresses FROM emails WHERE id = ?",
             (email_id,),
         ).fetchone()
-        my_addrs: set[str] = set()
+        my_domains: set[str] = set()
         if addr_row:
-            my_addrs = _external_recipients(
+            my_domains = _external_recipient_domains(
                 addr_row["from_address"],
                 addr_row["to_addresses"],
                 addr_row["cc_addresses"],
+                user_domains,
             )
 
-        if my_addrs:
+        if my_domains:
             candidates = conn.execute(
                 """SELECT thread_id, from_address, to_addresses, cc_addresses FROM emails
                    WHERE normalised_subject = ?
@@ -291,12 +365,13 @@ def _find_thread_for_email(
             ).fetchall()
 
             for cand in candidates:
-                cand_addrs = _external_recipients(
+                cand_domains = _external_recipient_domains(
                     cand["from_address"],
                     cand["to_addresses"],
                     cand["cc_addresses"],
+                    user_domains,
                 )
-                if my_addrs & cand_addrs:
+                if my_domains & cand_domains:
                     return cand["thread_id"]
 
     # No match — start a new thread
@@ -439,10 +514,16 @@ def _build_union_find(
         f"  [dim]Phase 1 complete: linked {ref_count:,} references[/dim]"
     )
 
-    # Phase 2: Subject-based fallback grouping (with participant overlap check)
+    # Phase 2: Subject-based fallback grouping (with external company domain overlap)
+    # Only unlinked emails (root == msg_id) are considered. Two emails with the same
+    # subject are only merged if they share at least one external company domain —
+    # meaning the same external company is involved in both conversations. User domains
+    # are excluded so that replies-to-user don't falsely link unrelated chains.
     task = progress.add_task("Grouping by subject", total=total)
 
-    # Collect unlinked emails with their subject, date, and participants
+    user_domains = _identify_user_domains(conn)
+
+    # Collect unlinked emails with their subject, date, and external company domains
     subject_groups: dict[str, list[tuple[str, str, set[str]]]] = {}
     offset = 0
     while True:
@@ -461,19 +542,20 @@ def _build_union_find(
             msg_id = row["message_id"]
             root = uf.find(msg_id)
             if root == msg_id:  # not linked to anything yet
-                addrs = _external_recipients(
+                domains = _external_recipient_domains(
                     row["from_address"],
                     row["to_addresses"],
                     row["cc_addresses"],
+                    user_domains,
                 )
-                if addrs:
+                if domains:
                     subject_groups.setdefault(norm_subj, []).append(
-                        (msg_id, row["date"], addrs)
+                        (msg_id, row["date"], domains)
                     )
         progress.update(task, advance=len(rows))
         offset += BATCH_SIZE
 
-    # Link within subject groups using time window AND participant overlap
+    # Link within subject groups using time window AND external company domain overlap
     for _subj, msgs in subject_groups.items():
         if len(msgs) < 2:
             continue
@@ -485,7 +567,7 @@ def _build_union_find(
                 if abs((d2 - d1).days) <= SUBJECT_WINDOW_DAYS and (msgs[i - 1][2] & msgs[i][2]):
                     uf.union(msgs[i - 1][0], msgs[i][0])
             except (ValueError, TypeError):
-                # On date parse failure, still require participant overlap
+                # On date parse failure, still require company domain overlap
                 if msgs[i - 1][2] & msgs[i][2]:
                     uf.union(msgs[i - 1][0], msgs[i][0])
 

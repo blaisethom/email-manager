@@ -395,16 +395,31 @@ function ThreadRow({ thread }: { thread: CompanyThread }) {
             <div className="space-y-3">
               {emails.map((email) => (
                 <div key={email.id} className="bg-slate-50 rounded-lg p-3 text-sm">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-medium text-slate-700">
-                      {email.from_name || email.from_address}
-                    </span>
-                    <span className="text-xs text-slate-400">{formatDate(email.date)}</span>
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <div className="min-w-0">
+                      <div className="text-xs text-slate-500">
+                        <span className="font-medium text-slate-600">From:</span>{' '}
+                        {email.from_name ? `${email.from_name} <${email.from_address}>` : email.from_address}
+                      </div>
+                      {email.to_addresses.length > 0 && (
+                        <div className="text-xs text-slate-500">
+                          <span className="font-medium text-slate-600">To:</span>{' '}
+                          {email.to_addresses.join(', ')}
+                        </div>
+                      )}
+                      {email.cc_addresses.length > 0 && (
+                        <div className="text-xs text-slate-500">
+                          <span className="font-medium text-slate-600">Cc:</span>{' '}
+                          {email.cc_addresses.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-400 flex-shrink-0">{formatDate(email.date)}</span>
                   </div>
                   {email.subject && (
-                    <div className="text-xs text-slate-500 mb-1">{email.subject}</div>
+                    <div className="text-xs font-medium text-slate-700 mb-1 mt-1">{email.subject}</div>
                   )}
-                  <pre className="text-xs text-slate-600 whitespace-pre-wrap font-sans leading-relaxed max-h-48 overflow-y-auto">
+                  <pre className="text-xs text-slate-600 whitespace-pre-wrap font-sans leading-relaxed max-h-48 overflow-y-auto mt-2 border-t border-slate-200 pt-2">
                     {(email.body_text || '').slice(0, 1500)}
                     {(email.body_text || '').length > 1500 ? '\n...' : ''}
                   </pre>
