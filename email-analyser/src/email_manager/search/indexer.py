@@ -113,9 +113,11 @@ def build_search_index(
         rows = fetchall(conn, "SELECT thread_id, doc_hash FROM thread_search_docs")
         existing = {r["thread_id"]: r["doc_hash"] for r in rows}
 
-    # Get company domains for threads (via email addresses)
-    # Build a lookup: thread_id -> (company_domain, company_name, is_important)
-    company_lookup: dict[str, tuple[str | None, str | None, bool]] = {}
+    # Pre-load all companies once to avoid N+1 queries inside the thread loop
+    company_by_domain: dict[str, dict] = {}
+    for r in fetchall(conn, "SELECT domain, name FROM companies WHERE domain IS NOT NULL"):
+        if r["domain"]:
+            company_by_domain[r["domain"].lower()] = r
 
     # Get labelled company domains (important)
     important_domains: set[str] = set()
@@ -146,7 +148,7 @@ def build_search_index(
         if not force and tid in existing and existing[tid] == doc_hash:
             continue
 
-        # Determine company domain from email addresses
+        # Determine company domain from email addresses (in-memory lookup)
         company_domain = None
         company_name = None
         is_important = False
@@ -154,12 +156,7 @@ def build_search_index(
             addr = email.get("from_address") or ""
             if "@" in addr:
                 domain = addr.split("@")[1].lower()
-                # Look up company
-                comp = fetchone(
-                    conn,
-                    "SELECT domain, name FROM companies WHERE LOWER(domain) = ?",
-                    (domain,),
-                )
+                comp = company_by_domain.get(domain)
                 if comp and comp["domain"]:
                     company_domain = comp["domain"]
                     company_name = comp["name"]
