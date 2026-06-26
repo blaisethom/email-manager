@@ -39,10 +39,13 @@ PROMPT_VERSION = "v2"
 def load_category_config(config_path: Path | None = None) -> list[dict[str, Any]]:
     """Load discussion category definitions including event_types from YAML."""
     if config_path is None:
+        _pkg_root = Path(__file__).parent.parent
         for candidate in (
             Path("discussion_categories.yaml"),
             Path("discussion_categories.yml"),
             Path("data/discussion_categories.yaml"),
+            _pkg_root / "discussion_categories.yaml",
+            _pkg_root / "discussion_categories.yml",
         ):
             if candidate.exists():
                 config_path = candidate
