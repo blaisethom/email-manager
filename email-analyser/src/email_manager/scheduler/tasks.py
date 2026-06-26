@@ -305,6 +305,9 @@ def seed_change_journal(label_filter: list[str]) -> int:
                     WHERE cj.entity_type = 'company'
                       AND cj.entity_id = c.domain
                       AND cj.processed_at IS NULL
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM event_ledger el WHERE el.domain = c.domain
                   )""",
             [lbl.lower() for lbl in label_filter],
         ).fetchall()
