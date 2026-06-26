@@ -1605,10 +1605,16 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
 
     conditions: list[str] = []
     params: list = []
+    join_params: list = []
+    label_join = ""
+    label_select_extra = ""
+    label_order = "c.email_count DESC"
 
     if label:
-        conditions.append("c.id IN (SELECT company_id FROM company_labels WHERE label = ?)")
-        params.append(label)
+        label_join = "JOIN company_labels cl_label ON c.id = cl_label.company_id AND cl_label.label = ?"
+        label_select_extra = ", cl_label.confidence AS label_score"
+        label_order = "cl_label.confidence DESC, c.email_count DESC"
+        join_params = [label]
     elif unlabelled:
         conditions.append("c.id NOT IN (SELECT company_id FROM company_labels)")
 
@@ -1645,27 +1651,29 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
         params.append(last_seen_before)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    all_params = join_params + params
 
     if csv_output:
         # No limit for CSV — output all matching rows
         rows = fetchall(
             conn,
-            f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+            f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen{label_select_extra}
                 FROM companies c
+                {label_join}
                 {where}
-                ORDER BY c.email_count DESC""",
-            tuple(params),
+                ORDER BY {label_order}""",
+            tuple(all_params),
         )
     else:
-        params.append(limit)
         rows = fetchall(
             conn,
-            f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen
+            f"""SELECT c.id, c.name, c.domain, c.email_count, c.first_seen, c.last_seen{label_select_extra}
                 FROM companies c
+                {label_join}
                 {where}
-                ORDER BY c.email_count DESC
+                ORDER BY {label_order}
                 LIMIT ?""",
-            tuple(params),
+            tuple(all_params + [limit]),
         )
 
     console = Console()
@@ -1681,22 +1689,39 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
         import csv
         import sys
         writer = csv.writer(sys.stdout)
-        writer.writerow(["name", "domain", "email_count", "labels", "first_seen", "last_seen"])
+        header = ["name", "domain", "email_count", "labels"]
+        if label:
+            header.append(f"{label}_score")
+        header += ["contacts", "first_seen", "last_seen"]
+        writer.writerow(header)
         for row in rows:
-            labels = fetchall(
+            all_labels = fetchall(
                 conn,
                 "SELECT label FROM company_labels WHERE company_id = ? ORDER BY confidence DESC",
                 (row["id"],),
             )
-            label_str = ";".join(l["label"] for l in labels)
-            writer.writerow([
+            label_str = ";".join(l["label"] for l in all_labels)
+            contacts = fetchall(
+                conn,
+                "SELECT contact_email FROM company_contacts WHERE company_id = ? ORDER BY contact_email",
+                (row["id"],),
+            )
+            contact_str = ";".join(c["contact_email"] for c in contacts)
+            csv_row = [
                 row["name"],
                 row["domain"],
                 row["email_count"],
                 label_str,
+            ]
+            if label:
+                score = row["label_score"]
+                csv_row.append(f"{score:.4f}" if score is not None else "")
+            csv_row += [
+                contact_str,
                 (row["first_seen"] or "")[:10],
                 (row["last_seen"] or "")[:10],
-            ])
+            ]
+            writer.writerow(csv_row)
         conn.close()
         return
 
@@ -1704,6 +1729,8 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
     table.add_column("Company", width=20)
     table.add_column("Domain", width=25)
     table.add_column("Emails", width=8, justify="right")
+    if label:
+        table.add_column("Score", width=8, justify="right")
     table.add_column("Labels", width=25)
     table.add_column("Contacts", width=35)
     table.add_column("First Seen", width=12)
@@ -1719,22 +1746,28 @@ def companies(ctx: click.Context, limit: int, label: str | None, unlabelled: boo
         if len(contacts) > 5:
             contact_list += f" (+{len(contacts) - 5} more)"
 
-        labels = fetchall(
+        all_labels = fetchall(
             conn,
             "SELECT label, confidence FROM company_labels WHERE company_id = ? ORDER BY confidence DESC",
             (row["id"],),
         )
-        label_str = ", ".join(f'{l["label"]} ({l["confidence"]:.0%})' for l in labels) if labels else ""
+        label_str = ", ".join(f'{l["label"]} ({l["confidence"]:.0%})' for l in all_labels) if all_labels else ""
 
-        table.add_row(
+        tbl_row = [
             row["name"],
             row["domain"],
             str(row["email_count"]),
+        ]
+        if label:
+            score = row["label_score"]
+            tbl_row.append(f"{score:.0%}" if score is not None else "")
+        tbl_row += [
             label_str,
             contact_list,
             (row["first_seen"] or "")[:10],
             (row["last_seen"] or "")[:10],
-        )
+        ]
+        table.add_row(*tbl_row)
 
     console.print(table)
 
