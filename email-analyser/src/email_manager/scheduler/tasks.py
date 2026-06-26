@@ -277,6 +277,51 @@ def get_dirty_companies(label_filter: list[str] | None = None) -> list[str]:
         conn.close()
 
 
+@task(name="seed-change-journal", retries=1, retry_delay_seconds=30)
+def seed_change_journal(label_filter: list[str]) -> int:
+    """Add all labelled companies without analyse_discussions results to the change journal.
+
+    Returns the number of companies seeded.
+    """
+    log = get_run_logger()
+    _, conn = _cfg_and_conn()
+    try:
+        from email_manager.change_journal import record_changes
+
+        placeholders_l = ",".join("?" for _ in label_filter)
+        rows = conn.execute(
+            f"""SELECT DISTINCT c.domain FROM companies c
+                JOIN company_labels cl ON cl.company_id = c.id
+                WHERE LOWER(cl.label) IN ({placeholders_l})
+                  AND c.domain IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM processing_runs pr
+                    WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                      AND pr.mode = 'staged:analyse_discussions'
+                      AND pr.error IS NULL
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM change_journal cj
+                    WHERE cj.entity_type = 'company'
+                      AND cj.entity_id = c.domain
+                      AND cj.processed_at IS NULL
+                  )""",
+            [lbl.lower() for lbl in label_filter],
+        ).fetchall()
+        domains = [r[0] for r in rows]
+
+        if not domains:
+            log.info("No new companies to seed into change journal")
+            return 0
+
+        record_changes(conn, [("company", d, "seed_for_analysis", "ai_flow") for d in domains])
+        conn.commit()
+        log.info("Seeded %d companies into change journal", len(domains))
+        return len(domains)
+    finally:
+        conn.close()
+
+
 @task(
     name="process-company-ai",
     retries=1,

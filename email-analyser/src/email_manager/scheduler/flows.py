@@ -28,6 +28,7 @@ from .tasks import (
     run_fetch_homepages,
     run_hubspot_task_enrichment,
     run_label_companies,
+    seed_change_journal,
     sync_calendar,
     sync_email_account,
     sync_hubspot,
@@ -147,6 +148,7 @@ def ai_flow(
     batch_size: int = 2,
     random_sample: bool = True,
     label_filter: list[str] | None = None,
+    seed_unprocessed: bool = False,
 ) -> dict:
     """Run AI interpretation for companies with unprocessed changes.
 
@@ -162,6 +164,10 @@ def ai_flow(
     top-confidence label matches one of the given values. Defaults to
     investor / cro / pharma / clinic. Pass an empty list to disable filtering.
 
+    seed_unprocessed: when True, first adds all labelled companies that have
+    never been through analyse_discussions to the change journal so subsequent
+    batches pick them up.
+
     Set up the limit before first run:
         prefect concurrency-limit create ai-llm 3
     """
@@ -169,6 +175,10 @@ def ai_flow(
     limit = batch_size
 
     _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
+
+    if seed_unprocessed and _label_filter:
+        seeded = seed_change_journal(_label_filter)
+        log.info("Seeded %d unprocessed companies into change journal", seeded)
 
     dirty = get_dirty_companies(label_filter=_label_filter or None)
     if not dirty:
