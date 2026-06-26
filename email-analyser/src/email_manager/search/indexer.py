@@ -338,19 +338,29 @@ def _refresh_outreach_scores(
                 score += math.log1p(c)
         updates.append((score, t["thread_id"]))
 
-    # Batch UPDATE against thread_search_docs (rows missing will simply be no-ops).
-    nonzero = 0
-    BATCH = 1000
-    for i in range(0, len(updates), BATCH):
-        chunk = updates[i : i + BATCH]
-        for score, tid in chunk:
+    # Bulk UPDATE using a VALUES list to avoid one round-trip per thread.
+    nonzero = sum(1 for s, _ in updates if s > 0)
+    if updates and is_postgres:
+        BATCH = 2000
+        for i in range(0, len(updates), BATCH):
+            chunk = updates[i : i + BATCH]
+            values_sql = ",".join(f"({s!r},{t!r})" for s, t in chunk)
             conn.execute(
-                "UPDATE thread_search_docs SET outreach_score = ? WHERE thread_id = ?",
-                (score, tid),
+                f"UPDATE thread_search_docs SET outreach_score = v.score"
+                f" FROM (VALUES {values_sql}) AS v(score, tid)"
+                f" WHERE thread_search_docs.thread_id = v.tid"
             )
-            if score > 0:
-                nonzero += 1
-        conn.commit()
+            conn.commit()
+    else:
+        # SQLite fallback: executemany is still faster than one-by-one
+        BATCH = 2000
+        for i in range(0, len(updates), BATCH):
+            chunk = updates[i : i + BATCH]
+            conn.executemany(
+                "UPDATE thread_search_docs SET outreach_score = ? WHERE thread_id = ?",
+                chunk,
+            )
+            conn.commit()
 
     console.print(
         f"  [green]  outreach scores: {nonzero}/{len(updates)} threads boosted[/green]"
