@@ -328,11 +328,18 @@ def seed_change_journal(label_filter: list[str]) -> int:
     retry_delay_seconds=300,
     task_run_name="{domain}",
 )
-def process_company_ai(domain: str, stages: list[str] | None = None) -> dict[str, int]:
+def process_company_ai(
+    domain: str,
+    stages: list[str] | None = None,
+    force: bool = False,
+) -> dict[str, int]:
     """Run the AI interpretation pipeline for a single company.
 
     Uses a Prefect concurrency limit to cap simultaneous LLM calls across
     all parallel company tasks.
+
+    force=True re-runs all stages even if the output appears up-to-date,
+    which is useful for re-linking discussions to threads.
     """
     from prefect.concurrency.sync import concurrency as prefect_concurrency
 
@@ -346,6 +353,6 @@ def process_company_ai(domain: str, stages: list[str] | None = None) -> dict[str
         from email_manager.pipeline.runner import run_pipeline
 
         config = Config()
-        results = run_pipeline(config, stages=_stages, company=domain)
-        log.info("AI pipeline %s: %s", domain, results)
+        results = run_pipeline(config, stages=_stages, company=domain, force=force)
+        log.info("AI pipeline %s (force=%s): %s", domain, force, results)
         return results
