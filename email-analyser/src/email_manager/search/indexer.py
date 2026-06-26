@@ -129,24 +129,48 @@ def build_search_index(
         if r["domain"]:
             important_domains.add(r["domain"].lower())
 
+    # Pre-compute thread hashes in one query (message_id + date only, no bodies).
+    # This avoids one DB round-trip per thread just for hash comparison.
+    # We replicate _compute_hash() by concatenating "message_id:date" strings
+    # in date-DESC order — matching the per-thread query order exactly.
+    thread_hashes_precomputed: dict[str, str] = {}
+    all_email_meta = fetchall(
+        conn,
+        "SELECT thread_id, message_id, date FROM emails ORDER BY thread_id, date DESC, message_id",
+    )
+    _cur_tid: str | None = None
+    _cur_h: "hashlib._Hash | None" = None  # type: ignore[name-defined]
+    for row in all_email_meta:
+        tid_r = row["thread_id"]
+        if tid_r != _cur_tid:
+            if _cur_tid is not None and _cur_h is not None:
+                thread_hashes_precomputed[_cur_tid] = _cur_h.hexdigest()
+            _cur_tid = tid_r
+            _cur_h = hashlib.md5()
+        if _cur_h is not None:
+            _cur_h.update(f"{row.get('message_id', '')}:{row.get('date', '')}".encode())
+    if _cur_tid is not None and _cur_h is not None:
+        thread_hashes_precomputed[_cur_tid] = _cur_h.hexdigest()
+    console.print(f"  [dim]Pre-computed hashes for {len(thread_hashes_precomputed)} threads[/dim]")
+
     updated = 0
     batch: list[tuple] = []
 
     for i, thread in enumerate(threads):
         tid = thread["thread_id"]
 
-        # Fetch emails for this thread
+        # Skip unchanged threads without fetching their emails
+        doc_hash = thread_hashes_precomputed.get(tid, "")
+        if not force and tid in existing and existing[tid] == doc_hash:
+            continue
+
+        # Only fetch full email bodies for threads that actually changed
         emails = fetchall(
             conn,
             """SELECT message_id, from_address, to_addresses, date, body_text
-               FROM emails WHERE thread_id = ? ORDER BY date DESC""",
+               FROM emails WHERE thread_id = ? ORDER BY date DESC, message_id""",
             (tid,),
         )
-
-        # Check if we need to update
-        doc_hash = _compute_hash(emails)
-        if not force and tid in existing and existing[tid] == doc_hash:
-            continue
 
         # Determine company domain from email addresses (in-memory lookup)
         company_domain = None
