@@ -208,6 +208,22 @@ def ai_flow(
         else:
             results[domain] = outcome
 
+    # Mark processed domains as done in the change journal so they don't
+    # keep appearing in dirty batches on subsequent runs
+    if results:
+        from email_manager.config import Config
+        from email_manager.db import get_db
+        from email_manager.change_journal import mark_processed
+
+        try:
+            conn = get_db(Config())
+            marked = mark_processed(conn, entity_type="company", entity_ids=list(results.keys()))
+            conn.commit()
+            conn.close()
+            log.info("Marked %d change_journal entries as processed", marked)
+        except Exception as exc:
+            log.warning("Failed to mark change_journal entries: %s", exc)
+
     summary = {
         "processed": len(results),
         "failed": len(failed),
