@@ -72,7 +72,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 50
+      batch_size: 10
       random_sample: true
 
   # ── AI analysis: interpret dirty companies ───────────────────────────────────
