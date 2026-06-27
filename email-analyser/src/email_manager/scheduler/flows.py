@@ -217,7 +217,38 @@ def ai_flow(
 
         try:
             conn = get_db(Config())
-            marked = mark_processed(conn, entity_type="company", entity_ids=list(results.keys()))
+            processed_domains = list(results.keys())
+
+            # Mark direct company-type entries
+            marked = mark_processed(conn, entity_type="company", entity_ids=processed_domains)
+
+            # Also mark thread-type entries that resolve to these companies,
+            # otherwise companies remain dirty forever via thread resolution
+            thread_rows = conn.execute(
+                "SELECT DISTINCT entity_id FROM change_journal"
+                " WHERE entity_type = 'thread' AND processed_at IS NULL"
+            ).fetchall()
+            if thread_rows:
+                thread_ids = [r[0] for r in thread_rows]
+                ph_t = ",".join("?" for _ in thread_ids)
+                ph_d = ",".join("?" for _ in processed_domains)
+                resolved = conn.execute(
+                    f"""SELECT DISTINCT e.thread_id
+                        FROM emails e
+                        JOIN company_contacts cc ON (
+                            e.from_address = cc.contact_email
+                            OR e.to_addresses LIKE '%%' || cc.contact_email || '%%'
+                        )
+                        JOIN companies c ON cc.company_id = c.id
+                        WHERE e.thread_id IN ({ph_t}) AND c.domain IN ({ph_d})""",
+                    thread_ids + processed_domains,
+                ).fetchall()
+                if resolved:
+                    resolved_thread_ids = [r[0] for r in resolved]
+                    marked += mark_processed(
+                        conn, entity_type="thread", entity_ids=resolved_thread_ids
+                    )
+
             conn.commit()
             conn.close()
             log.info("Marked %d change_journal entries as processed", marked)
