@@ -110,3 +110,36 @@ def mark_processed(
         [now] + params,
     )
     return cursor.rowcount
+
+
+def mark_thread_entries_for_companies(
+    conn: sqlite3.Connection,
+    company_domains: list[str],
+) -> int:
+    """Mark all unprocessed thread change_journal entries that belong to the given companies.
+
+    Uses a single atomic UPDATE with a subquery to avoid race conditions and
+    the overhead of loading all thread IDs into Python.
+    """
+    if not company_domains:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    ph = ",".join("?" for _ in company_domains)
+    cursor = conn.execute(
+        f"""UPDATE change_journal
+            SET processed_at = ?
+            WHERE entity_type = 'thread'
+              AND processed_at IS NULL
+              AND entity_id IN (
+                  SELECT DISTINCT e.thread_id
+                  FROM emails e
+                  JOIN company_contacts cc ON (
+                      e.from_address = cc.contact_email
+                      OR e.to_addresses LIKE '%%' || cc.contact_email || '%%'
+                  )
+                  JOIN companies c ON cc.company_id = c.id
+                  WHERE c.domain IN ({ph})
+              )""",
+        [now] + company_domains,
+    )
+    return cursor.rowcount
