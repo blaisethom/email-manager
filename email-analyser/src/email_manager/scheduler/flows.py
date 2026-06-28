@@ -22,6 +22,7 @@ from prefect import flow, get_run_logger
 from .config import SETTINGS
 from .tasks import (
     get_dirty_companies,
+    get_dirty_companies_with_event_counts,
     process_company_ai,
     run_build_search_index,
     run_extract_base,
@@ -145,34 +146,41 @@ _DEFAULT_ANALYSIS_LABELS = ["investor", "cro", "pharma", "clinic"]
 
 @flow(name="email-manager-ai", log_prints=True, timeout_seconds=1200)
 def ai_flow(
-    batch_size: int = 2,
+    event_budget: int = 100,
+    solo_threshold: int = 50,
     random_sample: bool = True,
     label_filter: list[str] | None = None,
     seed_unprocessed: bool = False,
 ) -> dict:
     """Run AI interpretation for companies with unprocessed changes.
 
-    Fans out one task per company. Tasks compete for the 'ai-llm' Prefect
-    concurrency limit (default 3 slots), ensuring we never saturate the
-    Claude API regardless of how many companies are queued.
+    Batches by total unassigned event count rather than company count, so a
+    handful of small companies fit in one run while a large one gets the whole
+    budget to itself.
 
-    When random_sample=True (default), selects a random subset each run so
-    the backlog is worked through evenly rather than always picking the same
-    head-of-queue companies. Set random_sample=False to process in DB order.
+    Batching rules:
+      - Companies with >= solo_threshold unassigned events run alone (one per
+        flow run) so they don't crowd out other companies or starve memory.
+      - Otherwise, companies are added greedily (sorted ascending by event count
+        after an optional random shuffle) until event_budget is reached. Companies
+        with 0 unassigned events are counted as 5 toward the budget (they're fast
+        but not free — they still run extract_events and contact_memory).
+      - Large companies are automatically split across runs: discover_discussions
+        caps at 200 events per company run, so each subsequent run processes the
+        next chunk of unassigned events.
 
     label_filter restricts which companies are eligible — only those whose
     top-confidence label matches one of the given values. Defaults to
-    investor / cro / pharma / clinic. Pass an empty list to disable filtering.
+    investor / cro / pharma / clinic.
 
     seed_unprocessed: when True, first adds all labelled companies that have
-    never been through analyse_discussions to the change journal so subsequent
-    batches pick them up.
+    never been through analyse_discussions to the change journal.
 
-    Set up the limit before first run:
+    Set up the concurrency limit before first run:
         prefect concurrency-limit create ai-llm 3
     """
     log = get_run_logger()
-    limit = batch_size
+    _ZERO_EVENT_COST = 5  # nominal budget cost for companies with no unassigned events
 
     _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
 
@@ -180,20 +188,45 @@ def ai_flow(
         seeded = seed_change_journal(_label_filter)
         log.info("Seeded %d unprocessed companies into change journal", seeded)
 
-    dirty = get_dirty_companies(label_filter=_label_filter or None)
+    dirty = get_dirty_companies_with_event_counts(label_filter=_label_filter or None)
     if not dirty:
         log.info("No dirty companies — nothing to do")
         return {"processed": 0, "total_dirty": 0}
 
-    skipped = 0
-    if random_sample and len(dirty) > limit:
-        batch = random.sample(dirty, limit)
-        log.info("Randomly sampled %d of %d dirty companies", len(batch), len(dirty))
+    total_dirty = len(dirty)
+
+    # Split into large (solo) and small companies
+    large = [d for d in dirty if d["event_count"] >= solo_threshold]
+    small = [d for d in dirty if d["event_count"] < solo_threshold]
+
+    if random_sample:
+        random.shuffle(large)
+        random.shuffle(small)
+
+    if large:
+        # Pick one large company and run it alone this cycle
+        chosen = large[0]
+        batch = [chosen["domain"]]
+        log.info(
+            "Solo run: %s (%d unassigned events >= solo_threshold %d); "
+            "%d other large companies deferred",
+            chosen["domain"], chosen["event_count"], solo_threshold, len(large) - 1,
+        )
     else:
-        batch = dirty[:limit]
-        skipped = len(dirty) - len(batch)
-        if skipped:
-            log.info("Queuing %d companies (%d deferred to next run)", len(batch), skipped)
+        # Greedily fill up to event_budget with small companies
+        batch = []
+        spent = 0
+        for d in small:
+            cost = d["event_count"] or _ZERO_EVENT_COST
+            if spent + cost > event_budget and batch:
+                break
+            batch.append(d["domain"])
+            spent += cost
+        deferred = total_dirty - len(batch)
+        log.info(
+            "Batch of %d companies, ~%d events (budget %d); %d deferred",
+            len(batch), spent, event_budget, deferred,
+        )
 
     # Fan out — concurrency is capped by the 'ai-llm' limit inside each task
     futures = {domain: process_company_ai.submit(domain) for domain in batch}
@@ -208,8 +241,6 @@ def ai_flow(
         else:
             results[domain] = outcome
 
-    # Mark processed domains as done in the change journal so they don't
-    # keep appearing in dirty batches on subsequent runs
     if results:
         from email_manager.config import Config
         from email_manager.db import get_db
@@ -218,13 +249,8 @@ def ai_flow(
         try:
             conn = get_db(Config())
             processed_domains = list(results.keys())
-
-            # Mark direct company-type entries
             marked = mark_processed(conn, entity_type="company", entity_ids=processed_domains)
-
-            # Mark thread-type entries for these companies atomically (one UPDATE, no race)
             marked += mark_thread_entries_for_companies(conn, processed_domains)
-
             conn.commit()
             conn.close()
             log.info("Marked %d change_journal entries as processed", marked)
@@ -234,8 +260,8 @@ def ai_flow(
     summary = {
         "processed": len(results),
         "failed": len(failed),
-        "total_dirty": len(dirty),
-        "deferred": skipped,
+        "total_dirty": total_dirty,
+        "deferred": total_dirty - len(batch),
     }
     if failed:
         log.warning("Failed domains: %s", failed)

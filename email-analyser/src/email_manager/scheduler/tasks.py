@@ -233,6 +233,28 @@ def run_build_search_index(force: bool = False, skip_embeddings: bool = False) -
 # ── AI pipeline tasks ────────────────────────────────────────────────────────
 
 
+def _filter_domains_by_label(conn, domains: list[str], label_filter: list[str]) -> list[str]:
+    """Filter a list of domains to only those whose top label is in label_filter."""
+    if not domains or not label_filter:
+        return domains
+    placeholders_d = ",".join("?" for _ in domains)
+    placeholders_l = ",".join("?" for _ in label_filter)
+    rows = conn.execute(
+        f"""SELECT c.domain FROM companies c
+            WHERE c.domain IN ({placeholders_d})
+              AND c.domain IS NOT NULL
+              AND (
+                  SELECT LOWER(cl.label)
+                  FROM company_labels cl
+                  WHERE cl.company_id = c.id
+                  ORDER BY COALESCE(cl.confidence, 0) DESC, cl.assigned_at DESC
+                  LIMIT 1
+              ) IN ({placeholders_l})""",
+        [*domains, *[lbl.lower() for lbl in label_filter]],
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 @task(name="get-dirty-companies", retries=1, retry_delay_seconds=30)
 def get_dirty_companies(label_filter: list[str] | None = None) -> list[str]:
     """Return company domains that have unprocessed changes in the journal.
@@ -248,31 +270,64 @@ def get_dirty_companies(label_filter: list[str] | None = None) -> list[str]:
         domains = get_dirty_company_domains(conn)
 
         if label_filter and domains:
-            placeholders_d = ",".join("?" for _ in domains)
-            placeholders_l = ",".join("?" for _ in label_filter)
-            rows = conn.execute(
-                f"""SELECT c.domain FROM companies c
-                    WHERE c.domain IN ({placeholders_d})
-                      AND c.domain IS NOT NULL
-                      AND (
-                          SELECT LOWER(cl.label)
-                          FROM company_labels cl
-                          WHERE cl.company_id = c.id
-                          ORDER BY COALESCE(cl.confidence, 0) DESC, cl.assigned_at DESC
-                          LIMIT 1
-                      ) IN ({placeholders_l})""",
-                [*domains, *[lbl.lower() for lbl in label_filter]],
-            ).fetchall()
-            domains = [r[0] for r in rows]
-            log.info(
-                "%d dirty companies match label filter %s",
-                len(domains),
-                label_filter,
-            )
+            domains = _filter_domains_by_label(conn, domains, label_filter)
+            log.info("%d dirty companies match label filter %s", len(domains), label_filter)
         else:
             log.info("%d dirty companies", len(domains))
 
         return domains
+    finally:
+        conn.close()
+
+
+@task(name="get-dirty-companies-with-event-counts", retries=1, retry_delay_seconds=30)
+def get_dirty_companies_with_event_counts(
+    label_filter: list[str] | None = None,
+) -> list[dict]:
+    """Return dirty companies with their unassigned event count.
+
+    Each entry: {domain, event_count}. event_count is the number of unassigned
+    events in event_ledger linked to the company via email address patterns —
+    this is the primary cost driver for discover_discussions.
+
+    Companies with 0 unassigned events are included; they're cheap (extract_events
+    only) and have a nominal cost assigned by the caller for budget purposes.
+
+    Result sorted by event_count ascending so small companies are processed first
+    in a greedy budget fill.
+    """
+    log = get_run_logger()
+    _, conn = _cfg_and_conn()
+    try:
+        from email_manager.change_journal import get_dirty_company_domains
+
+        domains = get_dirty_company_domains(conn)
+
+        if label_filter and domains:
+            domains = _filter_domains_by_label(conn, domains, label_filter)
+            log.info("%d dirty companies match label filter %s", len(domains), label_filter)
+        else:
+            log.info("%d dirty companies", len(domains))
+
+        result = []
+        for domain in domains:
+            like = f"%@{domain}%"
+            row = conn.execute(
+                """SELECT COUNT(DISTINCT el.id)
+                   FROM event_ledger el
+                   WHERE el.discussion_id IS NULL
+                     AND el.thread_id IN (
+                         SELECT DISTINCT e.thread_id FROM emails e
+                         WHERE e.from_address LIKE ? OR e.to_addresses LIKE ?
+                     )""",
+                (like, like),
+            ).fetchone()
+            result.append({"domain": domain, "event_count": row[0] if row else 0})
+
+        result.sort(key=lambda x: x["event_count"])
+        total = sum(r["event_count"] for r in result)
+        log.info("%d dirty companies, %d total unassigned events", len(result), total)
+        return result
     finally:
         conn.close()
 

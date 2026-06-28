@@ -91,7 +91,8 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 5
+      event_budget: 100
+      solo_threshold: 50
       random_sample: true
       label_filter:
         - investor
