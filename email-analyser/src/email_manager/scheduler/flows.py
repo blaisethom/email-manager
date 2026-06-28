@@ -143,7 +143,7 @@ def label_flow(batch_size: int = 10, random_sample: bool = True) -> dict:
 _DEFAULT_ANALYSIS_LABELS = ["investor", "cro", "pharma", "clinic"]
 
 
-@flow(name="email-manager-ai", log_prints=True)
+@flow(name="email-manager-ai", log_prints=True, timeout_seconds=1200)
 def ai_flow(
     batch_size: int = 2,
     random_sample: bool = True,
