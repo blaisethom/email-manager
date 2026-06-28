@@ -25,7 +25,9 @@ pull:
       shell: true
       # Single line: shell: true runs each line in a separate sh -c, so variables
       # set in one line are gone by the next. Chain with && to keep CLONE_DIR in scope.
-      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX) && git clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && /opt/prefect/bin/python3 \"$CLONE_DIR/email-analyser/scripts/worker_bootstrap.py\""
+      # Post-cleanup removes the clone dir after bootstrap copies everything into /tmp/em-deps.
+      # Each run only removes its own unique dir (safe for concurrent runs).
+      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && python3 \"$CLONE_DIR/email-analyser/scripts/worker_bootstrap.py\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; exit $STATUS"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
