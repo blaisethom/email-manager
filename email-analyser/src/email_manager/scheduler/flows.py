@@ -102,6 +102,8 @@ def enrich_flow() -> dict:
     log = get_run_logger()
 
     with prefect_concurrency("memory-heavy", occupy=1, strict=True):
+        import time
+        time.sleep(20)  # Brief pause after slot acquisition so prior process finishes cleanup
         base_count = run_extract_base()
 
         hs_future = run_hubspot_task_enrichment.submit()
