@@ -93,18 +93,24 @@ def enrich_flow() -> dict:
       1. extract_base  — parse raw emails into threads/contacts/companies
       2. hubspot_task_enrichment + fetch_homepages — parallel, no AI calls
       3. build_search_index — incremental text index (no embeddings)
+
+    Holds the 'memory-heavy' concurrency slot (limit=1) for its full duration
+    so it never overlaps with ai_flow and causes OOM.
     """
+    from prefect.concurrency.sync import concurrency as prefect_concurrency
+
     log = get_run_logger()
 
-    base_count = run_extract_base()
+    with prefect_concurrency("memory-heavy", occupy=1):
+        base_count = run_extract_base()
 
-    hs_future = run_hubspot_task_enrichment.submit()
-    hp_future = run_fetch_homepages.submit()
+        hs_future = run_hubspot_task_enrichment.submit()
+        hp_future = run_fetch_homepages.submit()
 
-    hs_result = hs_future.result(raise_on_failure=False)
-    hp_result = hp_future.result(raise_on_failure=False)
+        hs_result = hs_future.result(raise_on_failure=False)
+        hp_result = hp_future.result(raise_on_failure=False)
 
-    si_count = run_build_search_index(skip_embeddings=True)
+        si_count = run_build_search_index(skip_embeddings=True)
 
     result = {
         "extract_base": base_count,
@@ -228,18 +234,22 @@ def ai_flow(
             len(batch), spent, event_budget, deferred,
         )
 
-    # Fan out — concurrency is capped by the 'ai-llm' limit inside each task
-    futures = {domain: process_company_ai.submit(domain) for domain in batch}
+    # Fan out — holds 'memory-heavy' slot (limit=1) so ai and enrich don't overlap.
+    # Concurrency of individual LLM calls is capped by the 'ai-llm' limit inside each task.
+    from prefect.concurrency.sync import concurrency as prefect_concurrency
 
-    results = {}
-    failed = []
-    for domain, future in futures.items():
-        outcome = future.result(raise_on_failure=False)
-        if isinstance(outcome, Exception):
-            log.warning("AI pipeline failed for %s: %s", domain, outcome)
-            failed.append(domain)
-        else:
-            results[domain] = outcome
+    with prefect_concurrency("memory-heavy", occupy=1):
+        futures = {domain: process_company_ai.submit(domain) for domain in batch}
+
+        results = {}
+        failed = []
+        for domain, future in futures.items():
+            outcome = future.result(raise_on_failure=False)
+            if isinstance(outcome, Exception):
+                log.warning("AI pipeline failed for %s: %s", domain, outcome)
+                failed.append(domain)
+            else:
+                results[domain] = outcome
 
     if results:
         from email_manager.config import Config
