@@ -101,7 +101,7 @@ def enrich_flow() -> dict:
 
     log = get_run_logger()
 
-    with prefect_concurrency("memory-heavy", occupy=1):
+    with prefect_concurrency("memory-heavy", occupy=1, strict=True):
         base_count = run_extract_base()
 
         hs_future = run_hubspot_task_enrichment.submit()
@@ -238,7 +238,7 @@ def ai_flow(
     # Concurrency of individual LLM calls is capped by the 'ai-llm' limit inside each task.
     from prefect.concurrency.sync import concurrency as prefect_concurrency
 
-    with prefect_concurrency("memory-heavy", occupy=1):
+    with prefect_concurrency("memory-heavy", occupy=1, strict=True):
         futures = {domain: process_company_ai.submit(domain) for domain in batch}
 
         results = {}
