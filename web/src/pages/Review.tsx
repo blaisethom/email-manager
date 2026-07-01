@@ -718,6 +718,15 @@ function CompaniesTab() {
                   {c.name && c.domain && editingId !== c.company_id && (
                     <div className="text-xs text-slate-400 mt-0.5">{c.domain}</div>
                   )}
+                  {c.stages_run?.length > 0 && editingId !== c.company_id && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {c.stages_run.map(s => (
+                        <span key={s} className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono">
+                          {formatStage(s)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="text-xs text-slate-400 shrink-0 ml-4">{formatDate(c.last_analysed_at)}</div>
               </div>
@@ -747,27 +756,24 @@ function CompaniesTab() {
 
 // ── PAGE SHELL ────────────────────────────────────────────────────────────────
 
-type Tab = 'labels' | 'discussions' | 'rules' | 'companies';
+type Tab = 'companies' | 'discussions' | 'rules';
 
 export default function Review() {
-  const [tab, setTab]               = useState<Tab>('labels');
-  const [labelConfig, setLabelConfig] = useState<LabelConfig[]>([]);
+  const [tab, setTab]               = useState<Tab>('companies');
   const [categoryConfig, setCategoryConfig] = useState<CategoryConfig[]>([]);
 
   useEffect(() => {
     fetch('/api/meta')
       .then(r => r.json())
       .then(data => {
-        setLabelConfig(data.labelConfig ?? []);
         setCategoryConfig(data.categoryConfig ?? []);
       });
   }, []);
 
   const tabs: { id: Tab; label: string }[] = [
-    { id: 'labels',      label: 'Labels' },
+    { id: 'companies',   label: 'Companies' },
     { id: 'discussions', label: 'Discussions' },
     { id: 'rules',       label: 'Rules library' },
-    { id: 'companies',   label: 'Companies' },
   ];
 
   return (
@@ -798,10 +804,9 @@ export default function Review() {
 
       {/* Tab content */}
       <div>
-        {tab === 'labels'      && <LabelsTab      labelConfig={labelConfig} />}
+        {tab === 'companies'   && <CompaniesTab />}
         {tab === 'discussions' && <DiscussionsTab  categoryConfig={categoryConfig} />}
         {tab === 'rules'       && <RulesTab />}
-        {tab === 'companies'   && <CompaniesTab />}
       </div>
     </div>
   );

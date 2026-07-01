@@ -535,10 +535,13 @@ async function startJob(job: PipelineJob): Promise<void> {
 
   console.log(`[jobs] Starting job #${job.id}: ${ANALYSER_PATH} ${args.join(' ')}`);
 
+  // Strip model env vars so the email-analyser reads them from its own .env file
+  // (avoids the web server's stale env overriding the analyser's config)
+  const { CLAUDE_MODEL: _cm, EXTRACT_EVENTS_MODEL: _eem, ...inheritedEnv } = process.env;
   const child = spawn(ANALYSER_PATH, args, {
     cwd: ANALYSER_CWD,
     env: {
-      ...process.env,
+      ...inheritedEnv,
       TERM: 'dumb',
       COLUMNS: '200',
       PYTHONUNBUFFERED: '1',

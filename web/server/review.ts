@@ -358,7 +358,31 @@ export function registerReviewRoutes(app: Express, db: Database): void {
       ...params, limit, offset,
     );
 
-    res.json({ items: rows, total, stages: stageRows.map(r => r.stage) });
+    // Fetch distinct stages run per company in one query
+    const domains = rows.map(r => r.domain).filter(Boolean) as string[];
+    let stagesByDomain: Record<string, string[]> = {};
+    if (domains.length > 0) {
+      const perDomain = await db.query<{ domain: string; stage: string }>(
+        `SELECT LOWER(pr2.company_domain) AS domain, SUBSTR(pr2.mode, 8) AS stage
+         FROM processing_runs pr2
+         WHERE pr2.mode LIKE 'staged:%' AND pr2.error IS NULL
+           AND LOWER(pr2.company_domain) IN (${domains.map(() => '?').join(',')})
+         GROUP BY LOWER(pr2.company_domain), pr2.mode
+         ORDER BY stage`,
+        ...domains.map(d => d.toLowerCase()),
+      );
+      for (const r of perDomain) {
+        if (!stagesByDomain[r.domain]) stagesByDomain[r.domain] = [];
+        stagesByDomain[r.domain].push(r.stage);
+      }
+    }
+
+    const items = rows.map(r => ({
+      ...r,
+      stages_run: r.domain ? (stagesByDomain[r.domain.toLowerCase()] ?? []) : [],
+    }));
+
+    res.json({ items, total, stages: stageRows.map(r => r.stage) });
   });
 
   // PATCH /api/review/companies/:companyId/name

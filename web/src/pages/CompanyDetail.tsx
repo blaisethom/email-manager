@@ -178,7 +178,7 @@ function LabelsSection({
         <p className="text-sm text-slate-400">No labels assigned</p>
       ) : (
         <div className="divide-y divide-slate-100">
-          {labels.map(item => (
+          {[...labels].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0)).map(item => (
             <div key={item.label} className="py-3 border-b border-slate-100 last:border-0">
               <div className="flex items-center gap-3">
                 <Badge label={item.label} variant="label" />

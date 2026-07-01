@@ -334,7 +334,12 @@ def get_dirty_companies_with_event_counts(
 
 @task(name="seed-change-journal", retries=1, retry_delay_seconds=30)
 def seed_change_journal(label_filter: list[str]) -> int:
-    """Add all labelled companies without analyse_discussions results to the change journal.
+    """Add labelled companies that need analysis to the change journal.
+
+    Seeds companies that:
+    - Have never been through analyse_discussions, OR
+    - Have discussions with events but no milestone evaluation yet, OR
+    - Have discussions with events newer than the last milestone evaluation.
 
     Returns the number of companies seeded.
     """
@@ -350,12 +355,6 @@ def seed_change_journal(label_filter: list[str]) -> int:
                 WHERE LOWER(cl.label) IN ({placeholders_l})
                   AND c.domain IS NOT NULL
                   AND NOT EXISTS (
-                    SELECT 1 FROM processing_runs pr
-                    WHERE LOWER(pr.company_domain) = LOWER(c.domain)
-                      AND pr.mode = 'staged:analyse_discussions'
-                      AND pr.error IS NULL
-                  )
-                  AND NOT EXISTS (
                     SELECT 1 FROM change_journal cj
                     WHERE cj.entity_type = 'company'
                       AND cj.entity_id = c.domain
@@ -363,6 +362,32 @@ def seed_change_journal(label_filter: list[str]) -> int:
                   )
                   AND EXISTS (
                     SELECT 1 FROM event_ledger el WHERE el.domain = c.domain
+                  )
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM processing_runs pr
+                      WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                        AND pr.mode = 'staged:analyse_discussions'
+                        AND pr.error IS NULL
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM discussions d
+                      JOIN event_ledger el ON el.discussion_id = d.id
+                      WHERE d.company_id = c.id
+                        AND NOT EXISTS (
+                          SELECT 1 FROM milestones m WHERE m.discussion_id = d.id
+                        )
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM discussions d
+                      JOIN event_ledger el ON el.discussion_id = d.id
+                      WHERE d.company_id = c.id
+                        AND el.created_at > COALESCE(
+                            (SELECT MAX(m2.last_evaluated_at) FROM milestones m2
+                             WHERE m2.discussion_id = d.id),
+                            '1970-01-01'
+                        )
+                    )
                   )""",
             [lbl.lower() for lbl in label_filter],
         ).fetchall()

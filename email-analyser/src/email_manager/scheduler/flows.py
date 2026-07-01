@@ -192,9 +192,10 @@ def ai_flow(
 
     _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
 
-    if seed_unprocessed and _label_filter:
+    if _label_filter:
         seeded = seed_change_journal(_label_filter)
-        log.info("Seeded %d unprocessed companies into change journal", seeded)
+        if seeded:
+            log.info("Seeded %d companies with pending analysis into change journal", seeded)
 
     dirty = get_dirty_companies_with_event_counts(label_filter=_label_filter or None)
     if not dirty:

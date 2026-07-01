@@ -86,7 +86,10 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
-    schedules: []   # No schedule — driven continuously by ai_loop.sh
+    schedules:
+      - cron: "5 * * * *"   # Top of each hour (+5 min offset from enrich); seeds pending analysis
+        timezone: "UTC"
+        active: true
     parameters:
       event_budget: 100
       solo_threshold: 50
