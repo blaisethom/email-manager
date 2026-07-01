@@ -360,9 +360,6 @@ def seed_change_journal(label_filter: list[str]) -> int:
                       AND cj.entity_id = c.domain
                       AND cj.processed_at IS NULL
                   )
-                  AND EXISTS (
-                    SELECT 1 FROM event_ledger el WHERE el.domain = c.domain
-                  )
                   AND (
                     NOT EXISTS (
                       SELECT 1 FROM processing_runs pr
