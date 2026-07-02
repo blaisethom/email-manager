@@ -359,6 +359,7 @@ def seed_change_journal(label_filter: list[str]) -> int:
                     SELECT 1 FROM change_journal cj
                     WHERE cj.entity_type = 'company'
                       AND cj.entity_id = c.domain
+                      AND cj.change_type = 'seed_for_analysis'
                       AND cj.processed_at IS NULL
                   )
                   AND (
