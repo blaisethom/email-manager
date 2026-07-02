@@ -339,7 +339,8 @@ def seed_change_journal(label_filter: list[str]) -> int:
     Seeds companies that:
     - Have never been through analyse_discussions AND have at least one discussion, OR
     - Have discussions with events but no milestone evaluation yet, OR
-    - Have discussions with events newer than the last milestone evaluation.
+    - Have discussions with events newer than the last milestone evaluation, OR
+    - Are marked stale by the job manager (new emails since last extract_events run).
 
     Returns the number of companies seeded.
     """
@@ -390,6 +391,7 @@ def seed_change_journal(label_filter: list[str]) -> int:
                             '1970-01-01'
                         )
                     )
+                    OR c.staleness_status = 'stale'
                   )""",
             [lbl.lower() for lbl in label_filter],
         ).fetchall()
