@@ -527,6 +527,24 @@ def analyse_discussions(
         on_progress=on_progress, concurrency=concurrency,
     )
     if not proposed_dict:
+        # Write a no-op processing_runs record so seed_change_journal OR1 won't re-seed
+        # companies that have been visited but have nothing to analyse.
+        if company_domain:
+            from email_manager.db import fetchone as _fo
+            now = datetime.now(timezone.utc).isoformat()
+            parent_row = _fo(
+                conn,
+                "SELECT id FROM processing_runs WHERE company_domain = ? AND mode = ? ORDER BY id DESC LIMIT 1",
+                (company_domain, "staged:analyse_discussions"),
+            )
+            conn.execute(
+                """INSERT INTO processing_runs
+                   (company_domain, mode, model, started_at, completed_at, discussions_updated, parent_run_id)
+                   VALUES (?, ?, ?, ?, ?, 0, ?)""",
+                (company_domain, "staged:analyse_discussions", backend.model_name,
+                 _started, now, parent_row["id"] if parent_row else None),
+            )
+            conn.commit()
         return 0
 
     p_hash = compute_prompt_hash(ANALYSE_SYSTEM + format_rules_block(conn, LAYER_ANALYSIS))

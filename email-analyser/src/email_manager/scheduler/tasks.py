@@ -337,7 +337,7 @@ def seed_change_journal(label_filter: list[str]) -> int:
     """Add labelled companies that need analysis to the change journal.
 
     Seeds companies that:
-    - Have never been through analyse_discussions, OR
+    - Have never been through analyse_discussions AND have at least one discussion, OR
     - Have discussions with events but no milestone evaluation yet, OR
     - Have discussions with events newer than the last milestone evaluation.
 
@@ -361,11 +361,16 @@ def seed_change_journal(label_filter: list[str]) -> int:
                       AND cj.processed_at IS NULL
                   )
                   AND (
-                    NOT EXISTS (
-                      SELECT 1 FROM processing_runs pr
-                      WHERE LOWER(pr.company_domain) = LOWER(c.domain)
-                        AND pr.mode = 'staged:analyse_discussions'
-                        AND pr.error IS NULL
+                    (
+                      NOT EXISTS (
+                        SELECT 1 FROM processing_runs pr
+                        WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                          AND pr.mode = 'staged:analyse_discussions'
+                          AND pr.error IS NULL
+                      )
+                      AND EXISTS (
+                        SELECT 1 FROM discussions d WHERE d.company_id = c.id
+                      )
                     )
                     OR EXISTS (
                       SELECT 1 FROM discussions d
