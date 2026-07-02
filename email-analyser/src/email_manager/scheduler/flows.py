@@ -264,6 +264,14 @@ def ai_flow(
             processed_domains = list(results.keys())
             marked = mark_processed(conn, entity_type="company", entity_ids=processed_domains)
             marked += mark_thread_entries_for_companies(conn, processed_domains)
+            # Clear staleness so OR4 doesn't re-seed companies that just ran through
+            # the pipeline (even with 0 results). Jobs.ts will re-mark stale if new
+            # emails arrive after this point.
+            placeholders = ",".join("?" for _ in processed_domains)
+            conn.execute(
+                f"UPDATE companies SET staleness_status = 'up_to_date' WHERE domain IN ({placeholders})",
+                processed_domains,
+            )
             conn.commit()
             conn.close()
             log.info("Marked %d change_journal entries as processed", marked)
