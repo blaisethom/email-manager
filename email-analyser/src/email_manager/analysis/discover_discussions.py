@@ -818,6 +818,13 @@ def discover_discussions(
 
     if clean:
         _clean_discussions(conn, company_domain=company_domain, company_label=company_label)
+    elif force and company_domain:
+        # When force-running a specific company, unassign events from its AI-created
+        # discussions so discover can re-group them with the latest rules. Without this,
+        # events already assigned to discussions are invisible to the discovery query
+        # and force=True has no effect. Externally-sourced discussions (HubSpot deals
+        # etc.) are preserved — only AI-created ones (source_type IS NULL) are cleared.
+        _clean_discussions(conn, company_domain=company_domain)
 
     account_owner = _detect_account_owner(conn)
 

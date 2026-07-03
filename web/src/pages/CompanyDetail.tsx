@@ -266,7 +266,6 @@ function DiscussionFeedbackSection({
           company: companyDomain,
           stages: ['discover_discussions'],
           force: true,
-          clean: true,
         });
         onRerun(job.id);
       }
