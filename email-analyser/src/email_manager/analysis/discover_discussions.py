@@ -896,7 +896,7 @@ def discover_discussions(
             except Exception as e:
                 logger.error("LLM call failed for company %s (batch %d): %s",
                              company["domain"], batch_idx + 1, e)
-                continue
+                raise  # propagate so the caller records the error in processing_runs
 
             batch_discussions = result.get("discussions", [])
             discussions.extend(batch_discussions)
