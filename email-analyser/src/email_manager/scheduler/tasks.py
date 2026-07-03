@@ -581,14 +581,15 @@ def process_company_ai(
     domain: str,
     stages: list[str] | None = None,
     force: bool = False,
+    clean: bool = False,
 ) -> dict[str, int]:
     """Run the AI interpretation pipeline for a single company.
 
     Uses a Prefect concurrency limit to cap simultaneous LLM calls across
     all parallel company tasks.
 
-    force=True re-runs all stages even if the output appears up-to-date,
-    which is useful for re-linking discussions to threads.
+    force=True re-runs all stages even if the output appears up-to-date.
+    clean=True deletes existing discussions first (used after user feedback).
     """
     from prefect.concurrency.sync import concurrency as prefect_concurrency
 
@@ -602,6 +603,6 @@ def process_company_ai(
         from email_manager.pipeline.runner import run_pipeline
 
         config = Config()
-        results = run_pipeline(config, stages=_stages, company=domain, force=force)
-        log.info("AI pipeline %s (force=%s): %s", domain, force, results)
+        results = run_pipeline(config, stages=_stages, company=domain, force=force, clean=clean)
+        log.info("AI pipeline %s (force=%s clean=%s): %s", domain, force, clean, results)
         return results

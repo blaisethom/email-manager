@@ -306,6 +306,7 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
       if (config.company) parameters.domain = config.company;
       if (config.stages?.length) parameters.stages = config.stages;
       if (config.force) parameters.force = true;
+      if (config.clean) parameters.clean = true;
 
       const flowRun = await triggerDeployment(deployment.id, parameters);
       console.log(`[jobs] Dispatched to Prefect: deployment=${deploymentName} flow_run=${flowRun.id}`);

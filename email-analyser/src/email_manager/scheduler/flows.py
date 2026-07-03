@@ -495,7 +495,7 @@ def contact_memory_flow(
 
 
 @flow(name="email-manager-company-ai", log_prints=True)
-def company_flow(domain: str, stages: list[str] | None = None, force: bool = False) -> dict:
+def company_flow(domain: str, stages: list[str] | None = None, force: bool = False, clean: bool = False) -> dict:
     """Run the AI interpretation pipeline for a single company.
 
     Triggered on demand from the web UI (e.g. after discussion feedback or
@@ -503,10 +503,12 @@ def company_flow(domain: str, stages: list[str] | None = None, force: bool = Fal
     which pipeline stages run; omit it to run all AI stages.
 
     force=True re-runs all stages even if output appears up-to-date.
+    clean=True deletes existing discussions first so they are re-discovered
+    from scratch (used when the user submits new feedback rules).
     """
     log = get_run_logger()
-    log.info("Running company AI flow for %s (stages=%s force=%s)", domain, stages or "all", force)
-    result = process_company_ai(domain, stages=stages or None, force=force)
+    log.info("Running company AI flow for %s (stages=%s force=%s clean=%s)", domain, stages or "all", force, clean)
+    result = process_company_ai(domain, stages=stages or None, force=force, clean=clean)
     log.info("Company AI flow complete for %s: %s", domain, result)
     return result
 

@@ -885,14 +885,34 @@ def discover_discussions(
 
             try:
                 from email_manager.analysis.feedback import format_rules_block
-                system = DISCOVER_SYSTEM + format_rules_block(conn, "discussions")
+                rules_block = format_rules_block(conn, "discussions")
+                system = DISCOVER_SYSTEM + rules_block
+
+                # Print context so it appears in Prefect/job logs
+                if rules_block.strip():
+                    print(f"\n=== Feedback rules injected for {company['name']} ===")
+                    print(rules_block.strip())
+                    print("=" * 50)
+                print(f"\n=== Sending {len(batch_events)} events to AI ({company['name']}) ===")
+                for ev in batch_events:
+                    print(f"  [{ev['id']}] {ev.get('event_date','')} {ev.get('type','')} {ev.get('actor','')}")
+                print("=" * 50)
+
                 result = backend.complete_json(system, user_prompt)
             except Exception as e:
                 logger.error("LLM call failed for company %s (batch %d): %s",
                              company["domain"], batch_idx + 1, e)
                 raise  # propagate so the caller records the error in processing_runs
 
+            # Print AI response summary
             batch_discussions = result.get("discussions", [])
+            print(f"\n=== AI proposed {len(batch_discussions)} discussion(s) for {company['name']} ===")
+            for d in batch_discussions:
+                eid_count = len(d.get("event_ids", []))
+                existing_id = d.get("existing_id")
+                label = f"[update #{existing_id}]" if existing_id else "[new]"
+                print(f"  {label} \"{d.get('title','?')}\" ({eid_count} events)")
+            print("=" * 50)
             discussions.extend(batch_discussions)
 
             # Save this batch immediately so subsequent batches see the new discussions
