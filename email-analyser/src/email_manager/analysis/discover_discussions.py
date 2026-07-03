@@ -224,19 +224,19 @@ def _get_events_for_company(
 ) -> list[dict[str, Any]]:
     """Get unassigned events related to a company domain, limited to avoid huge prompts.
 
-    Only includes events that were either:
-    - Extracted during this company's own processing run, OR
-    - Extracted from threads where this company's domain appears in from/to/cc
-      AND the extracting run was for this same company (prevents cross-company leakage)
+    Uses thread_id lookup (consistent with _get_companies_with_unassigned_events) so
+    events with source_email_id=NULL are not silently excluded.
     """
     like_pattern = f"%@{company_domain}%"
     rows = fetchall(
         conn,
         """SELECT DISTINCT el.*
            FROM event_ledger el
-           JOIN emails e ON el.source_email_id = e.message_id
            WHERE el.discussion_id IS NULL
-             AND (e.from_address LIKE ? OR e.to_addresses LIKE ? OR e.cc_addresses LIKE ?)
+             AND el.thread_id IN (
+                 SELECT DISTINCT e.thread_id FROM emails e
+                 WHERE e.from_address LIKE ? OR e.to_addresses LIKE ? OR e.cc_addresses LIKE ?
+             )
              AND (el.run_id IS NULL OR el.run_id IN (
                  SELECT id FROM processing_runs WHERE company_domain = ?
              ))
