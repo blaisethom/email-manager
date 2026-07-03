@@ -259,12 +259,13 @@ function DiscussionFeedbackSection({
       const updated = await api.getCompanyDiscussionFeedback(companyId);
       setPastRules(updated);
       setFeedback('');
-      // Trigger a discover_discussions re-run for this company
+      // Trigger a discover_discussions re-run for this company, forcing past the "up to date" check
       if (companyDomain) {
         const job = await api.createJob({
           job_type: 'analyse',
           company: companyDomain,
           stages: ['discover_discussions'],
+          force: true,
         });
         onRerun(job.id);
       }
