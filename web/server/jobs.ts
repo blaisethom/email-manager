@@ -15,7 +15,7 @@ import type { Response } from 'express';
 import type { Database, DbRow } from './db.js';
 import {
   prefectEnabled, triggerDeployment, getDeploymentByName,
-  getFlowRun, cancelFlowRun, prefectStateToJobStatus,
+  getFlowRun, cancelFlowRun, prefectStateToJobStatus, getFlowRunLogs,
 } from './prefect.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -101,6 +101,15 @@ let dbUpdateTimer: ReturnType<typeof setInterval> | null = null;
 // Keep log buffers for recently finished jobs so detail page can show them
 const finishedLogBuffers = new Map<number, string[]>();
 const MAX_FINISHED_BUFFERS = 5;
+
+// Prefect-backed running jobs: SSE clients + log buffer + log file
+interface PrefectJobState {
+  clients: Set<Response>;
+  logBuffer: string[];
+  logStream: fs.WriteStream;
+}
+const prefectJobStates = new Map<number, PrefectJobState>();
+const prefectLogOffsets = new Map<number, number>(); // job.id → next log offset
 
 // ── DDL ──────────��─────────────────────────────────��───────────────────────
 
@@ -308,6 +317,17 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
         config.job_type, configJson, now, flowRun.id, deploymentName,
       );
       if (!row) throw new Error('Failed to create job record');
+
+      // Initialise SSE state + log file for this Prefect-backed job
+      const logFile = path.join(LOG_DIR, `job_${row.id}.log`);
+      prefectJobStates.set(row.id, {
+        clients: new Set(),
+        logBuffer: [],
+        logStream: fs.createWriteStream(logFile, { flags: 'w' }),
+      });
+      prefectLogOffsets.set(row.id, 0);
+      startPrefectPoller();
+
       return row;
     }
 
@@ -372,8 +392,42 @@ async function pollPrefectJobs(): Promise<void> {
           job.id,
         );
 
+        // ── Fetch and broadcast new log lines ──────────────────────────────
+        const offset = prefectLogOffsets.get(job.id) ?? 0;
+        const logs = await getFlowRunLogs(job.prefect_flow_run_id, offset, 200);
+        if (logs.length > 0) {
+          const state = prefectJobStates.get(job.id);
+          for (const entry of logs) {
+            const line = entry.message;
+            const stream = entry.level >= 40 ? 'stderr' : 'stdout';
+            const ts = entry.timestamp;
+            if (state) {
+              state.logBuffer.push(line);
+              if (state.logBuffer.length > MAX_LOG_BUFFER) state.logBuffer.shift();
+              state.logStream.write(line + '\n');
+              const data = `data: ${JSON.stringify({ type: 'log', line, stream, ts })}\n\n`;
+              for (const client of Array.from(state.clients)) {
+                try { client.write(data); } catch { state.clients.delete(client); }
+              }
+            }
+          }
+          prefectLogOffsets.set(job.id, offset + logs.length);
+        }
+
         if (isTerminal) {
           scheduleStaleRefresh();
+          // Close SSE clients and clean up state
+          const state = prefectJobStates.get(job.id);
+          if (state) {
+            const statusEvent = `data: ${JSON.stringify({ type: 'status', status: newStatus })}\n\n`;
+            for (const client of Array.from(state.clients)) {
+              try { client.write(statusEvent); client.end(); } catch { /* ignore */ }
+            }
+            state.clients.clear();
+            state.logStream.end();
+            prefectJobStates.delete(job.id);
+            prefectLogOffsets.delete(job.id);
+          }
         }
       } catch (err) {
         console.error(`[prefect] Failed to poll flow run ${job.prefect_flow_run_id}:`, err);
@@ -757,7 +811,7 @@ export function subscribeToLogs(jobId: number, res: Response): void {
   });
   res.flushHeaders();
 
-  // If job is active, send in-memory buffer then stream live
+  // Local active job
   if (activeJob?.jobId === jobId) {
     for (const line of activeJob.logBuffer) {
       res.write(`data: ${JSON.stringify({ type: 'log', line, ts: null })}\n\n`);
@@ -766,7 +820,21 @@ export function subscribeToLogs(jobId: number, res: Response): void {
     res.on('close', () => {
       activeJob?.sseClients.delete(res);
     });
-  } else {
+    return;
+  }
+
+  // Prefect-backed job that is still running
+  const prefectState = prefectJobStates.get(jobId);
+  if (prefectState) {
+    for (const line of prefectState.logBuffer) {
+      res.write(`data: ${JSON.stringify({ type: 'log', line, ts: null })}\n\n`);
+    }
+    prefectState.clients.add(res);
+    res.on('close', () => prefectState.clients.delete(res));
+    return;
+  }
+
+  {
     // Job is finished — read log file from disk
     const logFile = path.join(LOG_DIR, `job_${jobId}.log`);
     if (fs.existsSync(logFile)) {

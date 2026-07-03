@@ -334,12 +334,14 @@ def _run_stage_flow(
     with prefect_concurrency("memory-heavy", occupy=1, strict=True):
         succeeded = []
         failed = []
-        for domain in batch:
+        for i, domain in enumerate(batch):
+            log.info("[%d/%d] %s → %s", i + 1, len(batch), stage, domain)
             try:
                 process_company_ai(domain, stages=[stage])
+                log.info("[%d/%d] %s ✓ %s", i + 1, len(batch), stage, domain)
                 succeeded.append(domain)
             except Exception as exc:
-                log.warning("%s failed for %s: %s", stage, domain, exc)
+                log.warning("[%d/%d] %s ✗ %s: %s", i + 1, len(batch), stage, domain, exc)
                 failed.append(domain)
 
     return succeeded, failed

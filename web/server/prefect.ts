@@ -5,9 +5,13 @@
  * Example: PREFECT_API_URL=http://172.21.1.47:4200
  */
 
-export const PREFECT_API_URL = process.env.PREFECT_API_URL
-  ? process.env.PREFECT_API_URL.replace(/\/$/, '') + '/api'
-  : null;
+export const PREFECT_API_URL = (() => {
+  const raw = process.env.PREFECT_API_URL;
+  if (!raw) return null;
+  const trimmed = raw.replace(/\/+$/, '');
+  // Accept both http://host:4200 and http://host:4200/api
+  return trimmed.endsWith('/api') ? trimmed : trimmed + '/api';
+})();
 
 export function prefectEnabled(): boolean {
   return !!PREFECT_API_URL;
