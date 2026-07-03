@@ -12,7 +12,7 @@ def _log(msg: str) -> None:
     """Print migration/schema messages to stderr so they don't pollute stdout (e.g. --csv)."""
     print(msg, file=sys.stderr)
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 42
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -633,6 +633,17 @@ def get_db(config: Config) -> sqlite3.Connection:
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
+    # Fast path: if schema is already at the current version, skip all DDL.
+    # This avoids 40+ DDL round-trips (with catalog locks) on every get_db() call.
+    try:
+        row = conn.execute(
+            "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if row and row[0] >= SCHEMA_VERSION:
+            return
+    except Exception:
+        pass  # schema_version table doesn't exist yet — fall through to full init
+
     conn.executescript(SCHEMA_SQL)
     # Track schema version
     row = conn.execute(
@@ -730,6 +741,35 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_to_v39(conn)
     if current_version < 40:
         _migrate_to_v40(conn)
+    if current_version < 41:
+        _migrate_to_v41(conn)
+    if current_version < 42:
+        _migrate_to_v42(conn)
+
+
+def _migrate_to_v42(conn: sqlite3.Connection) -> None:
+    """Migration v41 -> v42: add human_deleted flag to event_ledger for soft-delete support."""
+    cols = _get_column_names(conn, "event_ledger")
+    if "human_deleted" not in cols:
+        conn.execute("ALTER TABLE event_ledger ADD COLUMN human_deleted INTEGER DEFAULT 0")
+    conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (42,))
+    conn.commit()
+    _log("  [migration v42] human_deleted added to event_ledger")
+
+
+def _migrate_to_v41(conn: sqlite3.Connection) -> None:
+    """Migration v40 -> v41: add source to milestones, status+source to proposed_actions."""
+    cols_m = _get_column_names(conn, "milestones")
+    if "source" not in cols_m:
+        conn.execute("ALTER TABLE milestones ADD COLUMN source TEXT DEFAULT 'ai'")
+    cols_pa = _get_column_names(conn, "proposed_actions")
+    if "status" not in cols_pa:
+        conn.execute("ALTER TABLE proposed_actions ADD COLUMN status TEXT DEFAULT 'open'")
+    if "source" not in cols_pa:
+        conn.execute("ALTER TABLE proposed_actions ADD COLUMN source TEXT DEFAULT 'ai'")
+    conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (41,))
+    conn.commit()
+    _log("  [migration v41] source added to milestones; status+source added to proposed_actions")
 
 
 def _migrate_to_v40(conn: sqlite3.Connection) -> None:

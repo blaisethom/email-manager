@@ -292,65 +292,249 @@ function ActionRow({ action, linkState }: { action: DiscussionAction; linkState?
   );
 }
 
-function MilestoneTracker({ milestones }: { milestones: Milestone[] }) {
-  if (milestones.length === 0) return null;
+function MilestoneTracker({
+  milestones: initialMilestones,
+  discussionId,
+}: {
+  milestones: Milestone[];
+  discussionId: number;
+}) {
+  const [milestones, setMilestones] = useState<Milestone[]>(initialMilestones);
+  const [addingNew, setAddingNew] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newAchieved, setNewAchieved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editingDateId, setEditingDateId] = useState<number | null>(null);
+  const [editingNameId, setEditingNameId] = useState<number | null>(null);
+  const [nameDraft, setNameDraft] = useState('');
+  const [dateDraft, setDateDraft] = useState('');
+
+  // Sync with parent when props change (e.g. full refresh)
+  useEffect(() => { setMilestones(initialMilestones); }, [initialMilestones]);
 
   const achieved = milestones.filter((m) => m.achieved);
-  const pending = milestones.filter((m) => !m.achieved);
+
+  async function toggleAchieved(m: Milestone) {
+    const next = !m.achieved;
+    setMilestones((prev) => prev.map((x) => x.id === m.id ? { ...x, achieved: next } : x));
+    try {
+      await api.updateMilestone(m.id, { achieved: next });
+    } catch (e) {
+      setMilestones((prev) => prev.map((x) => x.id === m.id ? { ...x, achieved: m.achieved } : x));
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function saveName(m: Milestone) {
+    if (!nameDraft.trim() || nameDraft === m.name) { setEditingNameId(null); return; }
+    try {
+      await api.updateMilestone(m.id, { name: nameDraft.trim() });
+      setMilestones((prev) => prev.map((x) => x.id === m.id ? { ...x, name: nameDraft.trim() } : x));
+    } catch (e) {
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+    setEditingNameId(null);
+  }
+
+  async function saveDate(m: Milestone) {
+    const val = dateDraft.trim() || null;
+    try {
+      await api.updateMilestone(m.id, { achieved_date: val });
+      setMilestones((prev) => prev.map((x) => x.id === m.id ? { ...x, achieved_date: val } : x));
+    } catch (e) {
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+    setEditingDateId(null);
+  }
+
+  async function remove(m: Milestone) {
+    if (!confirm(`Delete milestone "${m.name}"?`)) return;
+    try {
+      await api.deleteMilestone(m.id);
+      setMilestones((prev) => prev.filter((x) => x.id !== m.id));
+    } catch (e) {
+      alert(`Delete failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function addMilestone() {
+    if (!newName.trim()) return;
+    setSaving(true);
+    try {
+      const created = await api.addMilestone(discussionId, { name: newName.trim(), achieved: newAchieved });
+      setMilestones((prev) => [...prev, created]);
+      setNewName('');
+      setNewAchieved(false);
+      setAddingNew(false);
+    } catch (e) {
+      alert(`Add failed: ${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-4">
-        <div className="flex items-center gap-1.5 text-sm text-slate-500">
-          <span className="font-semibold text-emerald-600">{achieved.length}</span>
-          <span>of</span>
-          <span className="font-semibold">{milestones.length}</span>
-          <span>milestones</span>
-        </div>
-        {/* Progress bar */}
-        <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-emerald-500 rounded-full transition-all duration-500"
-            style={{ width: `${(achieved.length / milestones.length) * 100}%` }}
-          />
-        </div>
-      </div>
+      {milestones.length > 0 && (
+        <>
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex items-center gap-1.5 text-sm text-slate-500">
+              <span className="font-semibold text-emerald-600">{achieved.length}</span>
+              <span>of</span>
+              <span className="font-semibold">{milestones.length}</span>
+              <span>milestones</span>
+            </div>
+            <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+                style={{ width: milestones.length > 0 ? `${(achieved.length / milestones.length) * 100}%` : '0%' }}
+              />
+            </div>
+          </div>
 
-      <div className="space-y-2">
-        {achieved.map((m) => (
-          <div key={m.name} className="flex items-center gap-3 py-1.5">
-            <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center flex-shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            </div>
-            <div className="flex-1 min-w-0">
-              <span className="text-sm font-medium text-slate-900">
-                {m.name.replace(/_/g, ' ')}
-              </span>
-            </div>
-            {m.achieved_date && (
-              <span className="text-xs text-slate-400 flex-shrink-0">{formatDate(m.achieved_date)}</span>
-            )}
-            {m.confidence != null && m.confidence > 0 && (
-              <span className="text-xs text-slate-400 flex-shrink-0">
-                {Math.round(m.confidence * 100)}%
-              </span>
-            )}
+          <div className="space-y-2 mb-3">
+            {milestones.map((m) => (
+              <div key={m.id} className={`flex items-center gap-3 py-1.5 group ${m.achieved ? '' : 'opacity-60'}`}>
+                {/* Achieved toggle */}
+                <button
+                  onClick={() => toggleAchieved(m)}
+                  className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 border-2 transition-colors ${
+                    m.achieved
+                      ? 'bg-emerald-100 border-emerald-400 text-emerald-600'
+                      : 'border-slate-200 hover:border-emerald-300'
+                  }`}
+                  title={m.achieved ? 'Mark not achieved' : 'Mark achieved'}
+                >
+                  {m.achieved && (
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  )}
+                </button>
+
+                {/* Name */}
+                <div className="flex-1 min-w-0">
+                  {editingNameId === m.id ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        autoFocus
+                        value={nameDraft}
+                        onChange={(e) => setNameDraft(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') saveName(m); if (e.key === 'Escape') setEditingNameId(null); }}
+                        className="px-2 py-0.5 text-sm border border-slate-300 rounded flex-1"
+                      />
+                      <button onClick={() => saveName(m)} className="text-xs text-blue-600 hover:text-blue-800">Save</button>
+                      <button onClick={() => setEditingNameId(null)} className="text-xs text-slate-400 hover:text-slate-600">Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm font-medium text-slate-900">
+                        {m.name.replace(/_/g, ' ')}
+                      </span>
+                      {m.source === 'human' ? (
+                        <span className="text-[10px] font-medium text-purple-600 bg-purple-50 px-1 py-0.5 rounded">human</span>
+                      ) : (
+                        <span className="text-[10px] text-slate-300">ai</span>
+                      )}
+                      <button
+                        onClick={() => { setEditingNameId(m.id); setNameDraft(m.name); }}
+                        className="text-xs text-slate-400 hover:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Edit name"
+                      >
+                        ✎
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Date */}
+                {editingDateId === m.id ? (
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="date"
+                      autoFocus
+                      value={dateDraft}
+                      onChange={(e) => setDateDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') saveDate(m); if (e.key === 'Escape') setEditingDateId(null); }}
+                      className="px-2 py-0.5 text-xs border border-slate-300 rounded"
+                    />
+                    <button onClick={() => saveDate(m)} className="text-xs text-blue-600">Save</button>
+                    <button onClick={() => setEditingDateId(null)} className="text-xs text-slate-400">✕</button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {m.achieved_date ? (
+                      <span className="text-xs text-slate-400">{formatDate(m.achieved_date)}</span>
+                    ) : null}
+                    <button
+                      onClick={() => { setEditingDateId(m.id); setDateDraft(m.achieved_date?.slice(0, 10) ?? ''); }}
+                      className="text-xs text-slate-400 hover:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Edit date"
+                    >
+                      ✎
+                    </button>
+                  </div>
+                )}
+
+                {m.confidence != null && m.confidence > 0 && (
+                  <span className="text-xs text-slate-400 flex-shrink-0">
+                    {Math.round(m.confidence * 100)}%
+                  </span>
+                )}
+
+                {/* Delete */}
+                <button
+                  onClick={() => remove(m)}
+                  className="text-xs text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                  title="Delete milestone"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
           </div>
-        ))}
-        {pending.map((m) => (
-          <div key={m.name} className="flex items-center gap-3 py-1.5 opacity-50">
-            <div className="w-6 h-6 rounded-full border-2 border-slate-200 flex items-center justify-center flex-shrink-0">
-              <div className="w-2 h-2 rounded-full bg-slate-300" />
-            </div>
-            <span className="text-sm text-slate-500">
-              {m.name.replace(/_/g, ' ')}
-            </span>
+        </>
+      )}
+
+      {/* Add milestone */}
+      {addingNew ? (
+        <div className="border border-slate-200 rounded-lg p-3 bg-slate-50 space-y-2 mt-2">
+          <input
+            autoFocus
+            type="text"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addMilestone(); if (e.key === 'Escape') setAddingNew(false); }}
+            placeholder="Milestone name…"
+            className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+          />
+          <label className="flex items-center gap-2 text-sm text-slate-600">
+            <input
+              type="checkbox"
+              checked={newAchieved}
+              onChange={(e) => setNewAchieved(e.target.checked)}
+              className="rounded border-slate-300"
+            />
+            Already achieved
+          </label>
+          <div className="flex gap-2">
+            <button onClick={addMilestone} disabled={saving || !newName.trim()} className="btn-primary text-xs px-3 py-1">
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button onClick={() => { setAddingNew(false); setNewName(''); }} disabled={saving} className="btn-secondary text-xs px-3 py-1">
+              Cancel
+            </button>
           </div>
-        ))}
-      </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => setAddingNew(true)}
+          className="text-xs text-blue-600 hover:text-blue-800 mt-1"
+        >
+          + Add milestone
+        </button>
+      )}
     </div>
   );
 }
@@ -361,60 +545,280 @@ const PRIORITY_STYLES: Record<string, { bg: string; icon: string; label: string 
   low: { bg: 'bg-slate-50 border-slate-200', icon: 'text-slate-400', label: 'Low' },
 };
 
-function ProposedActionsList({ actions }: { actions: ProposedAction[] }) {
-  if (actions.length === 0) return null;
+const PRIORITY_CYCLE: Record<string, string> = { low: 'medium', medium: 'high', high: 'low' };
+
+function ProposedActionsList({
+  actions: initialActions,
+  discussionId,
+}: {
+  actions: ProposedAction[];
+  discussionId: number;
+}) {
+  const [actions, setActions] = useState<ProposedAction[]>(initialActions);
+  const [addingNew, setAddingNew] = useState(false);
+  const [newAction, setNewAction] = useState('');
+  const [newPriority, setNewPriority] = useState('medium');
+  const [newWaitUntil, setNewWaitUntil] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<Partial<ProposedAction>>({});
+  const [editingDateId, setEditingDateId] = useState<number | null>(null);
+  const [dateDraft, setDateDraft] = useState('');
+
+  useEffect(() => { setActions(initialActions); }, [initialActions]);
+
+  async function toggleStatus(pa: ProposedAction) {
+    const next = pa.status === 'done' ? 'open' : 'done';
+    setActions((prev) => prev.map((x) => x.id === pa.id ? { ...x, status: next } : x));
+    try {
+      await api.updateProposedAction(pa.id, { status: next });
+    } catch (e) {
+      setActions((prev) => prev.map((x) => x.id === pa.id ? { ...x, status: pa.status } : x));
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function cyclePriority(pa: ProposedAction) {
+    const next = PRIORITY_CYCLE[pa.priority] ?? 'medium';
+    setActions((prev) => prev.map((x) => x.id === pa.id ? { ...x, priority: next } : x));
+    try {
+      await api.updateProposedAction(pa.id, { priority: next });
+    } catch (e) {
+      setActions((prev) => prev.map((x) => x.id === pa.id ? { ...x, priority: pa.priority } : x));
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function saveEdit(pa: ProposedAction) {
+    if (!editDraft.action?.trim()) { setEditingId(null); return; }
+    try {
+      await api.updateProposedAction(pa.id, { action: editDraft.action });
+      setActions((prev) => prev.map((x) => x.id === pa.id ? { ...x, action: editDraft.action! } : x));
+    } catch (e) {
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+    setEditingId(null);
+  }
+
+  async function saveDate(pa: ProposedAction) {
+    const val = dateDraft.trim() || null;
+    try {
+      await api.updateProposedAction(pa.id, { wait_until: val });
+      setActions((prev) => prev.map((x) => x.id === pa.id ? { ...x, wait_until: val } : x));
+    } catch (e) {
+      alert(`Update failed: ${(e as Error).message}`);
+    }
+    setEditingDateId(null);
+  }
+
+  async function remove(pa: ProposedAction) {
+    if (!confirm(`Delete action "${pa.action}"?`)) return;
+    try {
+      await api.deleteProposedAction(pa.id);
+      setActions((prev) => prev.filter((x) => x.id !== pa.id));
+    } catch (e) {
+      alert(`Delete failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function addAction() {
+    if (!newAction.trim()) return;
+    setSaving(true);
+    try {
+      const created = await api.addProposedAction(discussionId, {
+        action: newAction.trim(),
+        priority: newPriority,
+        wait_until: newWaitUntil.trim() || null,
+      });
+      setActions((prev) => [...prev, created]);
+      setNewAction('');
+      setNewPriority('medium');
+      setNewWaitUntil('');
+      setAddingNew(false);
+    } catch (e) {
+      alert(`Add failed: ${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
-    <div className="space-y-3">
-      {actions.map((pa) => {
-        const style = PRIORITY_STYLES[pa.priority] ?? PRIORITY_STYLES.medium;
-        const isWait = !!pa.wait_until;
+    <div>
+      <div className="space-y-3 mb-3">
+        {actions.map((pa) => {
+          const style = PRIORITY_STYLES[pa.priority] ?? PRIORITY_STYLES.medium;
+          const isDone = pa.status === 'done';
 
-        return (
-          <div key={pa.id} className={`rounded-lg border p-4 ${style.bg}`}>
-            <div className="flex items-start gap-3">
-              {/* Priority icon */}
-              <div className={`mt-0.5 flex-shrink-0 ${style.icon}`}>
-                {isWait ? (
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <polyline points="12 6 12 12 16 14" />
-                  </svg>
-                ) : (
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                  </svg>
-                )}
-              </div>
-
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-900 leading-relaxed">
-                  {pa.action}
-                </p>
-                {pa.reasoning && (
-                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">{pa.reasoning}</p>
-                )}
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-2 text-xs text-slate-400">
-                  <span className={`font-medium ${style.icon}`}>{style.label} priority</span>
-                  {pa.wait_until && (
-                    <span>Wait until {formatDate(pa.wait_until)}</span>
+          return (
+            <div key={pa.id} className={`rounded-lg border p-4 ${style.bg} group ${isDone ? 'opacity-60' : ''}`}>
+              <div className="flex items-start gap-3">
+                {/* Status toggle */}
+                <button
+                  onClick={() => toggleStatus(pa)}
+                  className={`mt-0.5 w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 border-2 transition-colors ${
+                    isDone
+                      ? 'bg-emerald-100 border-emerald-400 text-emerald-600'
+                      : 'border-slate-300 hover:border-emerald-300'
+                  }`}
+                  title={isDone ? 'Mark open' : 'Mark done'}
+                >
+                  {isDone && (
+                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none"
+                      stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
                   )}
-                  {pa.assignee && (
-                    <Link
-                      to={`/contacts/${encodeURIComponent(pa.assignee)}`}
-                      className="text-blue-600 hover:underline"
+                </button>
+
+                <div className="flex-1 min-w-0">
+                  {/* Action text */}
+                  {editingId === pa.id ? (
+                    <div className="space-y-1">
+                      <textarea
+                        autoFocus
+                        value={editDraft.action ?? ''}
+                        onChange={(e) => setEditDraft({ ...editDraft, action: e.target.value })}
+                        rows={2}
+                        className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+                      />
+                      <div className="flex gap-2">
+                        <button onClick={() => saveEdit(pa)} className="btn-primary text-xs px-2 py-0.5">Save</button>
+                        <button onClick={() => setEditingId(null)} className="btn-secondary text-xs px-2 py-0.5">Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-start gap-1.5 group/text">
+                      <p className={`text-sm font-medium leading-relaxed flex-1 ${isDone ? 'line-through text-slate-500' : 'text-slate-900'}`}>
+                        {pa.action}
+                      </p>
+                      <button
+                        onClick={() => { setEditingId(pa.id); setEditDraft({ action: pa.action }); }}
+                        className="text-xs text-slate-400 hover:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                        title="Edit action"
+                      >
+                        ✎
+                      </button>
+                    </div>
+                  )}
+
+                  {pa.reasoning && (
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">{pa.reasoning}</p>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-2 text-xs text-slate-400">
+                    {/* Priority badge — clickable to cycle */}
+                    <button
+                      onClick={() => cyclePriority(pa)}
+                      className={`font-medium ${style.icon} hover:opacity-70 transition-opacity`}
+                      title="Click to change priority"
                     >
-                      {pa.assignee}
-                    </Link>
-                  )}
+                      {style.label} priority
+                    </button>
+
+                    {/* Wait until — editable */}
+                    {editingDateId === pa.id ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="date"
+                          autoFocus
+                          value={dateDraft}
+                          onChange={(e) => setDateDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') saveDate(pa); if (e.key === 'Escape') setEditingDateId(null); }}
+                          className="px-1 py-0.5 text-xs border border-slate-300 rounded"
+                        />
+                        <button onClick={() => saveDate(pa)} className="text-blue-600">Save</button>
+                        <button onClick={() => setEditingDateId(null)} className="text-slate-400">✕</button>
+                      </div>
+                    ) : (
+                      <span className="flex items-center gap-1">
+                        {pa.wait_until && <span>Wait until {formatDate(pa.wait_until)}</span>}
+                        <button
+                          onClick={() => { setEditingDateId(pa.id); setDateDraft(pa.wait_until?.slice(0, 10) ?? ''); }}
+                          className="text-slate-400 hover:text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Edit wait until"
+                        >
+                          ✎
+                        </button>
+                      </span>
+                    )}
+
+                    {pa.assignee && (
+                      <Link to={`/contacts/${encodeURIComponent(pa.assignee)}`} className="text-blue-600 hover:underline">
+                        {pa.assignee}
+                      </Link>
+                    )}
+
+                    {pa.source === 'human' && (
+                      <span className="text-[10px] font-medium text-purple-600 bg-purple-50 px-1 py-0.5 rounded">human</span>
+                    )}
+                  </div>
                 </div>
+
+                {/* Delete */}
+                <button
+                  onClick={() => remove(pa)}
+                  className="text-xs text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5"
+                  title="Delete action"
+                >
+                  ✕
+                </button>
               </div>
             </div>
+          );
+        })}
+      </div>
+
+      {/* Add action */}
+      {addingNew ? (
+        <div className="border border-slate-200 rounded-lg p-3 bg-slate-50 space-y-2 mt-2">
+          <textarea
+            autoFocus
+            value={newAction}
+            onChange={(e) => setNewAction(e.target.value)}
+            placeholder="Describe the action…"
+            rows={2}
+            className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block">
+              <span className="text-xs text-slate-500">Priority</span>
+              <select
+                value={newPriority}
+                onChange={(e) => setNewPriority(e.target.value)}
+                className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+              >
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs text-slate-500">Wait until (optional)</span>
+              <input
+                type="date"
+                value={newWaitUntil}
+                onChange={(e) => setNewWaitUntil(e.target.value)}
+                className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+              />
+            </label>
           </div>
-        );
-      })}
+          <div className="flex gap-2">
+            <button onClick={addAction} disabled={saving || !newAction.trim()} className="btn-primary text-xs px-3 py-1">
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button onClick={() => { setAddingNew(false); setNewAction(''); }} disabled={saving} className="btn-secondary text-xs px-3 py-1">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => setAddingNew(true)}
+          className="text-xs text-blue-600 hover:text-blue-800 mt-1"
+        >
+          + Add action
+        </button>
+      )}
     </div>
   );
 }
@@ -871,22 +1275,18 @@ export default function DiscussionDetailPage() {
       )}
 
       {/* Proposed Actions (next steps) */}
-      {data.proposed_actions && data.proposed_actions.length > 0 && (
-        <div className="card p-6 mb-6">
-          <h2 className="text-base font-semibold text-slate-900 mb-3">
-            Next Steps
-          </h2>
-          <ProposedActionsList actions={data.proposed_actions} />
-        </div>
-      )}
+      <div className="card p-6 mb-6">
+        <h2 className="text-base font-semibold text-slate-900 mb-3">
+          Next Steps
+        </h2>
+        <ProposedActionsList actions={data.proposed_actions ?? []} discussionId={data.id} />
+      </div>
 
       {/* Milestones */}
-      {data.milestones && data.milestones.length > 0 && (
-        <div className="card p-6 mb-6">
-          <h2 className="text-base font-semibold text-slate-900 mb-3">Milestones</h2>
-          <MilestoneTracker milestones={data.milestones} />
-        </div>
-      )}
+      <div className="card p-6 mb-6">
+        <h2 className="text-base font-semibold text-slate-900 mb-3">Milestones</h2>
+        <MilestoneTracker milestones={data.milestones ?? []} discussionId={data.id} />
+      </div>
 
       {/* Participants */}
       {data.participants.length > 0 && (

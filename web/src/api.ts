@@ -11,6 +11,8 @@ import type {
   ThreadEmail,
   CalendarEventsResponse,
   ProposedAction,
+  Milestone,
+  EventLedgerEntry,
   PipelineJob,
   PipelineStage,
   JobConfig,
@@ -571,5 +573,111 @@ export const api = {
   async cancelPrefectRun(runId: string): Promise<void> {
     const res = await fetch(`${BASE}/prefect/runs/${runId}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  },
+
+  // ── Thread events ──────────────────────────────────────────────────────
+
+  getThreadEvents(threadId: string): Promise<{ events: EventLedgerEntry[] }> {
+    return fetchJson(`${BASE}/threads/${encodeURIComponent(threadId)}/events`);
+  },
+
+  async createThreadEvent(
+    threadId: string,
+    data: { type: string; actor?: string; target?: string; event_date?: string; detail?: string; discussion_id?: number },
+  ): Promise<EventLedgerEntry> {
+    const res = await fetch(`${BASE}/threads/${encodeURIComponent(threadId)}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    return res.json();
+  },
+
+  // ── Milestone CRUD ─────────────────────────────────────────────────────
+
+  async addMilestone(
+    discussionId: number,
+    data: { name: string; achieved?: boolean; achieved_date?: string },
+  ): Promise<Milestone> {
+    const res = await fetch(`${BASE}/discussions/${discussionId}/milestones`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    return res.json();
+  },
+
+  async updateMilestone(
+    id: number,
+    data: { name?: string; achieved?: boolean; achieved_date?: string | null },
+  ): Promise<void> {
+    const res = await fetch(`${BASE}/milestones/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+  },
+
+  async deleteMilestone(id: number, reason?: string): Promise<void> {
+    const url = `${BASE}/milestones/${id}${reason ? `?reason=${encodeURIComponent(reason)}` : ''}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+  },
+
+  // ── Proposed-action CRUD ───────────────────────────────────────────────
+
+  async updateProposedAction(
+    id: number,
+    data: { action?: string; priority?: string; wait_until?: string | null; assignee?: string | null; status?: string },
+  ): Promise<void> {
+    const res = await fetch(`${BASE}/proposed-actions/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+  },
+
+  async deleteProposedAction(id: number, reason?: string): Promise<void> {
+    const url = `${BASE}/proposed-actions/${id}${reason ? `?reason=${encodeURIComponent(reason)}` : ''}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+  },
+
+  async addProposedAction(
+    discussionId: number,
+    data: { action: string; priority?: string; wait_until?: string | null; assignee?: string | null },
+  ): Promise<ProposedAction> {
+    const res = await fetch(`${BASE}/discussions/${discussionId}/proposed-actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    return res.json();
   },
 };

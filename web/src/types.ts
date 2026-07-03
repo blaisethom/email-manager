@@ -248,14 +248,17 @@ export interface EventLedgerEntry {
   confidence: number | null;
   thread_id: string | null;
   source_email_id: string | null;
+  discussion_id: number | null;
 }
 
 export interface Milestone {
+  id: number;
   name: string;
   achieved: boolean;
   achieved_date: string | null;
   evidence_event_ids: string[];
   confidence: number | null;
+  source: string;
 }
 
 export interface ProposedAction {
@@ -266,6 +269,8 @@ export interface ProposedAction {
   wait_until: string | null;
   assignee: string | null;
   created_at: string;
+  status: string;
+  source: string;
 }
 
 export interface ParentDiscussion {

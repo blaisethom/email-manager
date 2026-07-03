@@ -133,22 +133,47 @@ def build_search_index(
     # This avoids one DB round-trip per thread just for hash comparison.
     # We replicate _compute_hash() by concatenating "message_id:date" strings
     # in date-DESC order — matching the per-thread query order exactly.
+    #
+    # For Postgres: use a named server-side cursor (itersize=2000) so rows are
+    # streamed in small batches rather than fully buffered in Python memory.
+    # A large mailbox can have 50k–200k email rows; fetching all at once can
+    # consume hundreds of MB of Python heap.
     thread_hashes_precomputed: dict[str, str] = {}
-    all_email_meta = fetchall(
-        conn,
-        "SELECT thread_id, message_id, date FROM emails ORDER BY thread_id, date DESC, message_id",
-    )
     _cur_tid: str | None = None
     _cur_h: "hashlib._Hash | None" = None  # type: ignore[name-defined]
-    for row in all_email_meta:
-        tid_r = row["thread_id"]
-        if tid_r != _cur_tid:
-            if _cur_tid is not None and _cur_h is not None:
-                thread_hashes_precomputed[_cur_tid] = _cur_h.hexdigest()
-            _cur_tid = tid_r
-            _cur_h = hashlib.md5()
-        if _cur_h is not None:
-            _cur_h.update(f"{row.get('message_id', '')}:{row.get('date', '')}".encode())
+
+    if is_postgres:
+        _raw_conn = conn._conn  # type: ignore[attr-defined]
+        _cur = _raw_conn.cursor(name="email_hash_stream")
+        _cur.itersize = 2000
+        _cur.execute(
+            "SELECT thread_id, message_id, date FROM emails ORDER BY thread_id, date DESC, message_id"
+        )
+        for _row in _cur:
+            tid_r, mid, dt = _row[0], _row[1], _row[2]
+            if tid_r != _cur_tid:
+                if _cur_tid is not None and _cur_h is not None:
+                    thread_hashes_precomputed[_cur_tid] = _cur_h.hexdigest()
+                _cur_tid = tid_r
+                _cur_h = hashlib.md5()
+            if _cur_h is not None:
+                _cur_h.update(f"{mid or ''}:{dt or ''}".encode())
+        _cur.close()
+    else:
+        all_email_meta = fetchall(
+            conn,
+            "SELECT thread_id, message_id, date FROM emails ORDER BY thread_id, date DESC, message_id",
+        )
+        for row in all_email_meta:
+            tid_r = row["thread_id"]
+            if tid_r != _cur_tid:
+                if _cur_tid is not None and _cur_h is not None:
+                    thread_hashes_precomputed[_cur_tid] = _cur_h.hexdigest()
+                _cur_tid = tid_r
+                _cur_h = hashlib.md5()
+            if _cur_h is not None:
+                _cur_h.update(f"{row.get('message_id', '')}:{row.get('date', '')}".encode())
+
     if _cur_tid is not None and _cur_h is not None:
         thread_hashes_precomputed[_cur_tid] = _cur_h.hexdigest()
     console.print(f"  [dim]Pre-computed hashes for {len(thread_hashes_precomputed)} threads[/dim]")
@@ -275,6 +300,63 @@ def _refresh_outreach_scores(
     """
     console.print("  [dim]Computing outreach scores...[/dim]")
 
+    if is_postgres:
+        _refresh_outreach_scores_sql(conn, console)
+    else:
+        _refresh_outreach_scores_python(conn, console)
+
+
+def _refresh_outreach_scores_sql(conn: sqlite3.Connection, console: Console) -> None:
+    """Postgres-only: compute and update outreach scores entirely in SQL.
+
+    Avoids loading all sent-email blobs and thread participants into Python memory.
+    Uses json_array_elements_text() to unnest the JSON address arrays server-side.
+    """
+    folder_list = ",".join(f"'{f}'" for f in SENT_FOLDERS)
+
+    conn.execute(f"""
+        WITH me_addrs AS (
+            SELECT LOWER(from_address) AS addr
+            FROM emails
+            WHERE folder IN ({folder_list})
+              AND from_address IS NOT NULL
+            GROUP BY LOWER(from_address)
+            HAVING COUNT(*) > {ME_MIN_SENT}
+        ),
+        outreach AS (
+            SELECT LOWER(r.value) AS addr, COUNT(*) AS cnt
+            FROM emails e
+            JOIN me_addrs m ON LOWER(e.from_address) = m.addr
+            CROSS JOIN LATERAL json_array_elements_text(
+                COALESCE(NULLIF(e.to_addresses, ''), '[]')::json
+            ) r(value)
+            WHERE r.value <> ''
+              AND LOWER(r.value) NOT IN (SELECT addr FROM me_addrs)
+            GROUP BY LOWER(r.value)
+        ),
+        thread_scores AS (
+            SELECT t.thread_id,
+                   SUM(LN(1.0 + COALESCE(o.cnt, 0))) AS score
+            FROM threads t
+            CROSS JOIN LATERAL json_array_elements_text(
+                COALESCE(NULLIF(t.participants, ''), '[]')::json
+            ) p(email)
+            LEFT JOIN outreach o ON o.addr = LOWER(p.email)
+            WHERE p.email <> ''
+              AND LOWER(p.email) NOT IN (SELECT addr FROM me_addrs)
+            GROUP BY t.thread_id
+        )
+        UPDATE thread_search_docs tsd
+        SET outreach_score = ts.score
+        FROM thread_scores ts
+        WHERE tsd.thread_id = ts.thread_id
+    """)
+    conn.commit()
+    console.print("  [green]  outreach scores updated (SQL)[/green]")
+
+
+def _refresh_outreach_scores_python(conn: sqlite3.Connection, console: Console) -> None:
+    """SQLite path: compute outreach scores in Python (dev machines only)."""
     folder_placeholders = ",".join("?" * len(SENT_FOLDERS))
     me_rows = fetchall(
         conn,
@@ -292,7 +374,6 @@ def _refresh_outreach_scores(
 
     console.print(f"  [dim]  'me' addresses: {sorted(me_addresses)}[/dim]")
 
-    # Per-recipient outreach counts from emails I sent.
     me_placeholders = ",".join("?" * len(me_addresses))
     sent_rows = fetchall(
         conn,
@@ -318,7 +399,6 @@ def _refresh_outreach_scores(
 
     console.print(f"  [dim]  unique recipients I've emailed: {len(outreach_count)}[/dim]")
 
-    # Aggregate per-thread.
     thread_rows = fetchall(conn, "SELECT thread_id, participants FROM threads")
 
     updates: list[tuple[float, str]] = []
@@ -338,29 +418,15 @@ def _refresh_outreach_scores(
                 score += math.log1p(c)
         updates.append((score, t["thread_id"]))
 
-    # Bulk UPDATE using a VALUES list to avoid one round-trip per thread.
     nonzero = sum(1 for s, _ in updates if s > 0)
-    if updates and is_postgres:
-        BATCH = 2000
-        for i in range(0, len(updates), BATCH):
-            chunk = updates[i : i + BATCH]
-            values_sql = ",".join(f"({s!r},{t!r})" for s, t in chunk)
-            conn.execute(
-                f"UPDATE thread_search_docs SET outreach_score = v.score"
-                f" FROM (VALUES {values_sql}) AS v(score, tid)"
-                f" WHERE thread_search_docs.thread_id = v.tid"
-            )
-            conn.commit()
-    else:
-        # SQLite fallback: executemany is still faster than one-by-one
-        BATCH = 2000
-        for i in range(0, len(updates), BATCH):
-            chunk = updates[i : i + BATCH]
-            conn.executemany(
-                "UPDATE thread_search_docs SET outreach_score = ? WHERE thread_id = ?",
-                chunk,
-            )
-            conn.commit()
+    BATCH = 2000
+    for i in range(0, len(updates), BATCH):
+        chunk = updates[i : i + BATCH]
+        conn.executemany(
+            "UPDATE thread_search_docs SET outreach_score = ? WHERE thread_id = ?",
+            chunk,
+        )
+        conn.commit()
 
     console.print(
         f"  [green]  outreach scores: {nonzero}/{len(updates)} threads boosted[/green]"

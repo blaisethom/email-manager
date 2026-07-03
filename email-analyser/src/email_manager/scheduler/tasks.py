@@ -410,6 +410,117 @@ def seed_change_journal(label_filter: list[str]) -> int:
         conn.close()
 
 
+@task(name="get-companies-for-extract-events", retries=1, retry_delay_seconds=30)
+def get_companies_for_extract_events(
+    label_filter: list[str],
+    batch_size: int = 10,
+) -> list[str]:
+    """Companies needing extract_events: never processed, new emails since last cutoff, or stale.
+
+    Uses the indexed from_domain column for the email date check (not LIKE scans).
+    """
+    log = get_run_logger()
+    _, conn = _cfg_and_conn()
+    try:
+        placeholders_l = ",".join("?" for _ in label_filter)
+        rows = conn.execute(
+            f"""SELECT DISTINCT c.domain
+                FROM companies c
+                JOIN company_labels cl ON cl.company_id = c.id
+                WHERE LOWER(cl.label) IN ({placeholders_l})
+                  AND c.domain IS NOT NULL
+                  AND (
+                    c.staleness_status = 'stale'
+                    OR NOT EXISTS (
+                      SELECT 1 FROM processing_runs pr
+                      WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                        AND pr.mode = 'staged:extract_events'
+                        AND pr.error IS NULL
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM emails e
+                      WHERE e.from_domain = c.domain
+                        AND e.date > COALESCE((
+                          SELECT pr.email_cutoff_date
+                          FROM processing_runs pr
+                          WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                            AND pr.mode = 'staged:extract_events'
+                            AND pr.error IS NULL
+                          ORDER BY pr.id DESC LIMIT 1
+                        ), '')
+                    )
+                  )
+                LIMIT ?""",
+            [lbl.lower() for lbl in label_filter] + [batch_size],
+        ).fetchall()
+        domains = [r[0] for r in rows]
+        log.info("%d companies need extract_events", len(domains))
+        return domains
+    finally:
+        conn.close()
+
+
+@task(name="get-companies-for-stage", retries=1, retry_delay_seconds=30)
+def get_companies_for_stage(
+    stage: str,
+    prerequisite: str,
+    label_filter: list[str],
+    batch_size: int = 10,
+) -> list[str]:
+    """Companies where prerequisite has a more recent successful run than stage.
+
+    A company is eligible if:
+    - prerequisite has at least one successful processing_run, AND
+    - stage has never run successfully, OR the latest successful prerequisite run
+      has a higher id than the latest successful stage run (id is monotonically
+      increasing, so higher id = more recent).
+    """
+    log = get_run_logger()
+    _, conn = _cfg_and_conn()
+    try:
+        placeholders_l = ",".join("?" for _ in label_filter)
+        prereq_mode = f"staged:{prerequisite}"
+        stage_mode = f"staged:{stage}"
+        rows = conn.execute(
+            f"""SELECT DISTINCT c.domain
+                FROM companies c
+                JOIN company_labels cl ON cl.company_id = c.id
+                WHERE LOWER(cl.label) IN ({placeholders_l})
+                  AND c.domain IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM processing_runs pr
+                    WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                      AND pr.mode = ?
+                      AND pr.error IS NULL
+                  )
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM processing_runs pr
+                      WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                        AND pr.mode = ?
+                        AND pr.error IS NULL
+                    )
+                    OR (
+                      SELECT MAX(pr.id) FROM processing_runs pr
+                      WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                        AND pr.mode = ? AND pr.error IS NULL
+                    ) > (
+                      SELECT MAX(pr.id) FROM processing_runs pr
+                      WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                        AND pr.mode = ? AND pr.error IS NULL
+                    )
+                  )
+                LIMIT ?""",
+            [lbl.lower() for lbl in label_filter]
+            + [prereq_mode, stage_mode, prereq_mode, stage_mode, batch_size],
+        ).fetchall()
+        domains = [r[0] for r in rows]
+        log.info("%d companies need %s (prerequisite=%s)", len(domains), stage, prerequisite)
+        return domains
+    finally:
+        conn.close()
+
+
 @task(
     name="process-company-ai",
     retries=1,

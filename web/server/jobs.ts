@@ -217,44 +217,43 @@ export async function refreshStaleness(): Promise<void> {
      ) AND (staleness_status IS NULL OR staleness_status != 'never')`
   );
 
-  // 2. Get all companies that HAVE been analysed (typically ~200-300)
-  const analysed = await db.query<{ domain: string; email_cutoff_date: string | null }>(
+  // 2. Single bulk query: check each analysed company for newer emails using the
+  //    indexed from_domain column (idx_emails_from_domain, added in schema v33).
+  //    Previously this was N+1 LIKE '%@domain%' queries — one unindexed seq scan
+  //    per company. Now it's one query whose inner EXISTS uses an index seek.
+  const rows = await db.query<{ domain: string; is_stale: boolean }>(
     `SELECT c.domain,
-            (SELECT pr.email_cutoff_date FROM processing_runs pr
-             WHERE LOWER(pr.company_domain) = LOWER(c.domain) AND pr.mode = 'staged:extract_events' AND pr.error IS NULL
-             ORDER BY pr.id DESC LIMIT 1
-            ) AS email_cutoff_date
+            EXISTS (
+              SELECT 1 FROM emails e
+              WHERE e.from_domain = c.domain
+                AND e.date > COALESCE((
+                  SELECT pr.email_cutoff_date FROM processing_runs pr
+                  WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                    AND pr.mode = 'staged:extract_events' AND pr.error IS NULL
+                  ORDER BY pr.id DESC LIMIT 1
+                ), '')
+            ) AS is_stale
      FROM companies c
      WHERE EXISTS (
        SELECT 1 FROM processing_runs pr
-       WHERE LOWER(pr.company_domain) = LOWER(c.domain) AND pr.mode LIKE 'staged:%' AND pr.error IS NULL
+       WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+         AND pr.mode LIKE 'staged:%' AND pr.error IS NULL
      )`
   );
 
-  // 3. For each analysed company, check for new emails (uses idx_emails_from index)
+  // 3. Bulk update — one UPDATE per company but all results already in memory
   let staleCount = 0;
   let upToDateCount = 0;
-  for (const row of analysed) {
-    let hasNew = false;
-    if (row.email_cutoff_date) {
-      const like = `%@${row.domain}%`;
-      const newer = await db.queryOne<{ x: number }>(
-        `SELECT 1 AS x FROM emails
-         WHERE (from_address LIKE ? OR to_addresses LIKE ?) AND date > ?
-         LIMIT 1`,
-        like, like, row.email_cutoff_date
-      );
-      hasNew = !!newer;
-    }
-    const status = hasNew ? 'stale' : 'up_to_date';
+  for (const row of rows) {
+    const status = row.is_stale ? 'stale' : 'up_to_date';
     await db.query(
       `UPDATE companies SET staleness_status = ? WHERE domain = ?`,
       status, row.domain
     );
-    if (hasNew) staleCount++; else upToDateCount++;
+    if (row.is_stale) staleCount++; else upToDateCount++;
   }
 
-  console.log(`[jobs] Staleness refresh: ${staleCount} stale, ${upToDateCount} up to date, ${analysed.length} analysed (${Date.now() - start}ms)`);
+  console.log(`[jobs] Staleness refresh: ${staleCount} stale, ${upToDateCount} up to date, ${rows.length} analysed (${Date.now() - start}ms)`);
 }
 
 function scheduleStaleRefresh(): void {

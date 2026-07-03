@@ -426,7 +426,10 @@ def apply_changes(
 
         actions = update.get("proposed_actions", [])
         if actions:
-            conn.execute("DELETE FROM proposed_actions WHERE discussion_id = ?", (disc_id,))
+            conn.execute(
+                "DELETE FROM proposed_actions WHERE discussion_id = ? AND (source IS NULL OR source != 'human')",
+                (disc_id,),
+            )
             for a in actions:
                 conn.execute(
                     """INSERT INTO proposed_actions
@@ -439,6 +442,16 @@ def apply_changes(
                     ),
                 )
                 counts["actions"] += 1
+            # Remove any AI-inserted action whose text matches a human-rejected action
+            conn.execute(
+                """DELETE FROM proposed_actions
+                   WHERE discussion_id = ? AND (source IS NULL OR source != 'human')
+                     AND LOWER(TRIM(action)) IN (
+                         SELECT LOWER(TRIM(action)) FROM proposed_actions
+                         WHERE discussion_id = ? AND status = 'rejected' AND source = 'human'
+                     )""",
+                (disc_id, disc_id),
+            )
 
         counts["updates"] += 1
 

@@ -532,7 +532,8 @@ def _save_quick_update_results(
                    achieved = excluded.achieved,
                    achieved_date = excluded.achieved_date,
                    confidence = excluded.confidence,
-                   last_evaluated_at = excluded.last_evaluated_at""",
+                   last_evaluated_at = excluded.last_evaluated_at
+                   WHERE milestones.source IS NULL OR milestones.source != 'human_deleted'""",
                 (
                     disc_id,
                     m.get("name", ""),
@@ -547,7 +548,7 @@ def _save_quick_update_results(
         # Save proposed actions (replace existing)
         actions = update.get("proposed_actions", [])
         if actions:
-            conn.execute("DELETE FROM proposed_actions WHERE discussion_id = ?", (disc_id,))
+            conn.execute("DELETE FROM proposed_actions WHERE discussion_id = ? AND (source IS NULL OR source != 'human')", (disc_id,))
             for action in actions:
                 conn.execute(
                     """INSERT INTO proposed_actions

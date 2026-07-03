@@ -271,7 +271,8 @@ def _save_milestones(
                achieved_date = excluded.achieved_date,
                evidence_event_ids = excluded.evidence_event_ids,
                confidence = excluded.confidence,
-               last_evaluated_at = excluded.last_evaluated_at""",
+               last_evaluated_at = excluded.last_evaluated_at
+               WHERE milestones.source IS NULL OR milestones.source != 'human_deleted'""",
             (
                 discussion_id,
                 m.get("name", ""),

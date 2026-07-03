@@ -21,6 +21,8 @@ from prefect import flow, get_run_logger
 
 from .config import SETTINGS
 from .tasks import (
+    get_companies_for_extract_events,
+    get_companies_for_stage,
     get_dirty_companies,
     get_dirty_companies_with_event_counts,
     process_company_ai,
@@ -237,22 +239,24 @@ def ai_flow(
             len(batch), spent, event_budget, deferred,
         )
 
-    # Fan out — holds 'memory-heavy' slot (limit=1) so ai and enrich don't overlap.
-    # Concurrency of individual LLM calls is capped by the 'ai-llm' limit inside each task.
+    # Run companies sequentially — holds 'memory-heavy' slot so ai and enrich never
+    # overlap. Previously all batch companies were submitted in parallel (.submit()),
+    # which spawned up to 20 threads simultaneously even though the 'ai-llm' slot
+    # only let 3 run at once. Each waiting thread still held a DB connection and
+    # Prefect state, contributing to OOM. Sequential calls mean at most 1 pipeline
+    # is live at any time; the 'ai-llm' slot handles global throttling across runs.
     from prefect.concurrency.sync import concurrency as prefect_concurrency
 
     with prefect_concurrency("memory-heavy", occupy=1, strict=True):
-        futures = {domain: process_company_ai.submit(domain) for domain in batch}
-
         results = {}
         failed = []
-        for domain, future in futures.items():
-            outcome = future.result(raise_on_failure=False)
-            if isinstance(outcome, Exception):
-                log.warning("AI pipeline failed for %s: %s", domain, outcome)
-                failed.append(domain)
-            else:
+        for domain in batch:
+            try:
+                outcome = process_company_ai(domain)
                 results[domain] = outcome
+            except Exception as exc:
+                log.warning("AI pipeline failed for %s: %s", domain, exc)
+                failed.append(domain)
 
     if results:
         from email_manager.config import Config
@@ -287,6 +291,197 @@ def ai_flow(
     if failed:
         log.warning("Failed domains: %s", failed)
     log.info("AI flow complete: %s", summary)
+    return summary
+
+
+# ── Per-stage flows ───────────────────────────────────────────────────────────
+#
+# Each flow runs a single pipeline stage for all eligible companies and holds
+# the 'memory-heavy' concurrency slot (limit=1) so it never overlaps with
+# enrich_flow or another stage flow.
+#
+# Eligibility is driven entirely by processing_runs: a company enters a stage
+# flow's batch when its prerequisite stage has a more recent successful run
+# than the current stage (or the current stage has never run). No change_journal
+# involvement — each flow is self-contained.
+#
+# Schedule offsets stagger the flows so they don't all wake up simultaneously
+# and immediately collide on the memory-heavy slot:
+#   extract_events     */20       :00, :20, :40
+#   discover          3,23,43     :03, :23, :43
+#   analyse           7,27,47     :07, :27, :47
+#   propose           12,32,52    :12, :32, :52
+#   contact_memory    17 */2      :17 every 2 h (less time-sensitive)
+
+
+def _run_stage_flow(
+    stage: str,
+    batch: list[str],
+    log,
+) -> tuple[list[str], list[str]]:
+    """Common body for all single-stage flows: sequential per-company with memory-heavy slot.
+
+    Returns (succeeded_domains, failed_domains).
+    """
+    from prefect.concurrency.sync import concurrency as prefect_concurrency
+
+    if not batch:
+        log.info("No companies need %s — nothing to do", stage)
+        return [], []
+
+    log.info("Running %s for %d companies", stage, len(batch))
+
+    with prefect_concurrency("memory-heavy", occupy=1, strict=True):
+        succeeded = []
+        failed = []
+        for domain in batch:
+            try:
+                process_company_ai(domain, stages=[stage])
+                succeeded.append(domain)
+            except Exception as exc:
+                log.warning("%s failed for %s: %s", stage, domain, exc)
+                failed.append(domain)
+
+    return succeeded, failed
+
+
+@flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=1200)
+def extract_events_flow(
+    label_filter: list[str] | None = None,
+    batch_size: int = 10,
+) -> dict:
+    """Extract events for companies with new emails since their last run.
+
+    Eligibility: staleness_status='stale', emails after last extract_events
+    cutoff date, or never processed.
+
+    Clears staleness_status='up_to_date' after successful processing so the
+    company doesn't re-enter the batch before new emails arrive.
+    """
+    log = get_run_logger()
+    _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
+
+    batch = get_companies_for_extract_events(
+        label_filter=_label_filter, batch_size=batch_size
+    )
+    succeeded, failed = _run_stage_flow("extract_events", batch, log)
+
+    if succeeded:
+        from email_manager.config import Config
+        from email_manager.db import get_db
+        try:
+            conn = get_db(Config())
+            placeholders = ",".join("?" for _ in succeeded)
+            conn.execute(
+                f"UPDATE companies SET staleness_status = 'up_to_date'"
+                f" WHERE domain IN ({placeholders})",
+                succeeded,
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            log.warning("Failed to clear staleness_status: %s", exc)
+
+    summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
+    log.info("extract_events complete: %s", summary)
+    return summary
+
+
+@flow(name="email-manager-discover-discussions", log_prints=True, timeout_seconds=1200)
+def discover_discussions_flow(
+    label_filter: list[str] | None = None,
+    batch_size: int = 10,
+) -> dict:
+    """Discover discussions for companies where extract_events has run more recently.
+
+    Prerequisite: staged:extract_events completed after last staged:discover_discussions.
+    """
+    log = get_run_logger()
+    _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
+
+    batch = get_companies_for_stage(
+        stage="discover_discussions",
+        prerequisite="extract_events",
+        label_filter=_label_filter,
+        batch_size=batch_size,
+    )
+    succeeded, failed = _run_stage_flow("discover_discussions", batch, log)
+    summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
+    log.info("discover_discussions complete: %s", summary)
+    return summary
+
+
+@flow(name="email-manager-analyse-discussions", log_prints=True, timeout_seconds=1200)
+def analyse_discussions_flow(
+    label_filter: list[str] | None = None,
+    batch_size: int = 10,
+) -> dict:
+    """Analyse discussions for companies where discover_discussions has run more recently.
+
+    Prerequisite: staged:discover_discussions completed after last staged:analyse_discussions.
+    """
+    log = get_run_logger()
+    _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
+
+    batch = get_companies_for_stage(
+        stage="analyse_discussions",
+        prerequisite="discover_discussions",
+        label_filter=_label_filter,
+        batch_size=batch_size,
+    )
+    succeeded, failed = _run_stage_flow("analyse_discussions", batch, log)
+    summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
+    log.info("analyse_discussions complete: %s", summary)
+    return summary
+
+
+@flow(name="email-manager-propose-actions", log_prints=True, timeout_seconds=1200)
+def propose_actions_flow(
+    label_filter: list[str] | None = None,
+    batch_size: int = 10,
+) -> dict:
+    """Propose actions for companies where analyse_discussions has run more recently.
+
+    Prerequisite: staged:analyse_discussions completed after last staged:propose_actions.
+    """
+    log = get_run_logger()
+    _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
+
+    batch = get_companies_for_stage(
+        stage="propose_actions",
+        prerequisite="analyse_discussions",
+        label_filter=_label_filter,
+        batch_size=batch_size,
+    )
+    succeeded, failed = _run_stage_flow("propose_actions", batch, log)
+    summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
+    log.info("propose_actions complete: %s", summary)
+    return summary
+
+
+@flow(name="email-manager-contact-memory", log_prints=True, timeout_seconds=1200)
+def contact_memory_flow(
+    label_filter: list[str] | None = None,
+    batch_size: int = 10,
+) -> dict:
+    """Build contact memories for companies where propose_actions has run more recently.
+
+    Prerequisite: staged:propose_actions completed after last staged:contact_memory.
+    Runs less frequently than the other stages (every 2 hours) since contact
+    memory is less time-sensitive.
+    """
+    log = get_run_logger()
+    _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
+
+    batch = get_companies_for_stage(
+        stage="contact_memory",
+        prerequisite="propose_actions",
+        label_filter=_label_filter,
+        batch_size=batch_size,
+    )
+    succeeded, failed = _run_stage_flow("contact_memory", batch, log)
+    summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
+    log.info("contact_memory complete: %s", summary)
     return summary
 
 

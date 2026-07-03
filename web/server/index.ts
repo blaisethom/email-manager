@@ -77,6 +77,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS hubspot_task_threads (
 // Ensure human_state_override column exists (Python migration v39)
 try { db.exec('ALTER TABLE discussions ADD COLUMN human_state_override TEXT'); } catch { /* already exists */ }
 
+// Ensure v41 columns exist (Python migration v41)
+try { db.exec("ALTER TABLE milestones ADD COLUMN source TEXT DEFAULT 'ai'"); } catch { /* already exists */ }
+try { db.exec("ALTER TABLE proposed_actions ADD COLUMN status TEXT DEFAULT 'open'"); } catch { /* already exists */ }
+try { db.exec("ALTER TABLE proposed_actions ADD COLUMN source TEXT DEFAULT 'ai'"); } catch { /* already exists */ }
+try { db.exec("ALTER TABLE event_ledger ADD COLUMN human_deleted INTEGER DEFAULT 0"); } catch { /* already exists */ }
+
 // Ensure notes tables exist (Python migration v38)
 db.exec(`CREATE TABLE IF NOT EXISTS hubspot_notes (
     id                      TEXT PRIMARY KEY,
@@ -642,9 +648,9 @@ app.get('/api/companies/:id/insights', async (req: Request, res: Response) => {
             d.first_seen, d.last_seen, d.updated_at, d.parent_id, d.run_id,
             (SELECT COUNT(*) FROM event_ledger el WHERE el.discussion_id = d.id) AS event_count,
             (SELECT MAX(el.created_at) FROM event_ledger el WHERE el.discussion_id = d.id) AS latest_event_created,
-            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id) AS action_count,
-            (SELECT COUNT(*) FROM milestones m WHERE m.discussion_id = d.id AND m.achieved = 1) AS milestones_achieved,
-            (SELECT COUNT(*) FROM milestones m WHERE m.discussion_id = d.id) AS milestones_total,
+            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND (pa.status IS NULL OR pa.status != 'rejected')) AS action_count,
+            (SELECT COUNT(*) FROM milestones m WHERE m.discussion_id = d.id AND m.achieved = 1 AND (m.source IS NULL OR m.source != 'human_deleted')) AS milestones_achieved,
+            (SELECT COUNT(*) FROM milestones m WHERE m.discussion_id = d.id AND (m.source IS NULL OR m.source != 'human_deleted')) AS milestones_total,
             pr.mode AS last_run_mode, pr.model AS last_run_model
      FROM discussions d
      LEFT JOIN processing_runs pr ON d.run_id = pr.id
@@ -885,9 +891,9 @@ app.get('/api/discussions', async (req: Request, res: Response) => {
     `SELECT d.id, d.title, d.category, d.current_state, d.company_id, d.parent_id, d.summary,
             d.participants, d.first_seen, d.last_seen, d.updated_at,
             c.name AS company_name,
-            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id) AS proposed_action_count,
-            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND pa.priority = 'high') AS high_priority_count,
-            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND pa.priority = 'medium') AS med_priority_count
+            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND (pa.status IS NULL OR pa.status != 'rejected')) AS proposed_action_count,
+            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND pa.priority = 'high' AND (pa.status IS NULL OR pa.status != 'rejected')) AS high_priority_count,
+            (SELECT COUNT(*) FROM proposed_actions pa WHERE pa.discussion_id = d.id AND pa.priority = 'medium' AND (pa.status IS NULL OR pa.status != 'rejected')) AS med_priority_count
      FROM discussions d LEFT JOIN companies c ON c.id = d.company_id
      ${whereClause} ORDER BY ${sortCol} ${order} LIMIT ? OFFSET ?`,
     ...params, limit, offset
@@ -955,17 +961,19 @@ app.get('/api/discussions/:id', async (req: Request, res: Response) => {
   );
 
   const milestonesRaw = await db.query(
-    `SELECT name, achieved, achieved_date, evidence_event_ids, confidence
-     FROM milestones WHERE discussion_id = ? ORDER BY achieved DESC, achieved_date ASC NULLS LAST`, id
+    `SELECT id, name, achieved, achieved_date, evidence_event_ids, confidence, source
+     FROM milestones WHERE discussion_id = ? AND (source IS NULL OR source != 'human_deleted')
+     ORDER BY achieved DESC, achieved_date ASC NULLS LAST`, id
   );
   const milestones = milestonesRaw.map((m: any) => ({
     ...m, achieved: !!m.achieved,
     evidence_event_ids: parseJsonField<string[]>(m.evidence_event_ids) ?? [],
+    source: m.source ?? 'ai',
   }));
 
   const proposedActions = await db.query(
-    `SELECT id, action, reasoning, priority, wait_until, assignee, created_at
-     FROM proposed_actions WHERE discussion_id = ?
+    `SELECT id, action, reasoning, priority, wait_until, assignee, created_at, status, source
+     FROM proposed_actions WHERE discussion_id = ? AND (status IS NULL OR status != 'rejected')
      ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, id ASC`, id
   ).catch(() => []);
 
@@ -1012,8 +1020,8 @@ app.get('/api/discussions/:id/proposed-actions', async (req: Request, res: Respo
   if (isNaN(id)) { res.status(400).json({ error: 'Invalid discussion id' }); return; }
 
   const actions = await db.query(
-    `SELECT id, action, reasoning, priority, wait_until, assignee, created_at
-     FROM proposed_actions WHERE discussion_id = ?
+    `SELECT id, action, reasoning, priority, wait_until, assignee, created_at, status, source
+     FROM proposed_actions WHERE discussion_id = ? AND (status IS NULL OR status != 'rejected')
      ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, id ASC`, id
   ).catch(() => []);
   res.json(actions);
@@ -1251,9 +1259,197 @@ app.delete('/api/events/:id', async (req: Request, res: Response) => {
   );
   if (!existing) { res.status(404).json({ error: 'Event not found' }); return; }
 
-  await db.query('DELETE FROM event_ledger WHERE id = ?', id);
+  await db.query('UPDATE event_ledger SET human_deleted = 1 WHERE id = ?', id);
   await recordFeedback('events', 'event', id, 'delete', existing, null, reason);
   res.json({ deleted: true, id });
+});
+
+// ── /api/threads/:threadId/events ─────────────────────────────────────────
+
+app.get('/api/threads/:threadId/events', async (req: Request, res: Response) => {
+  const threadId = decodeURIComponent(req.params.threadId);
+  const events = await db.query(
+    `SELECT id, domain, type, actor, target, event_date, detail, confidence, thread_id, source_email_id, discussion_id
+     FROM event_ledger WHERE thread_id = ? AND (human_deleted IS NULL OR human_deleted = 0)
+     ORDER BY event_date ASC, created_at ASC`, threadId
+  );
+  res.json({ events });
+});
+
+app.post('/api/threads/:threadId/events', async (req: Request, res: Response) => {
+  const threadId = decodeURIComponent(req.params.threadId);
+  const { type, actor, target, event_date, detail, discussion_id } = (req.body ?? {}) as {
+    type?: string; actor?: string | null; target?: string | null;
+    event_date?: string | null; detail?: string | null; discussion_id?: number | null;
+  };
+  if (!type) { res.status(400).json({ error: 'type is required' }); return; }
+
+  const id = `human-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const now = nowIso();
+  await db.query(
+    `INSERT INTO event_ledger (id, thread_id, discussion_id, domain, type, actor, target, event_date, detail, confidence, model_version, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    id, threadId, discussion_id ?? null, 'other', type,
+    actor ?? null, target ?? null, event_date ?? null, detail ?? null,
+    1.0, 'human', now
+  );
+  await recordFeedback('events', 'event', id, 'create', null, { type, actor, target, event_date, detail, thread_id: threadId }, null);
+  const created = await db.queryOne('SELECT id, domain, type, actor, target, event_date, detail, confidence, thread_id, source_email_id, discussion_id FROM event_ledger WHERE id = ?', id);
+  res.status(201).json(created);
+});
+
+// ── /api/discussions/:id/milestones ───────────────────────────────────────
+
+app.post('/api/discussions/:id/milestones', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid discussion id' }); return; }
+
+  const { name, achieved, achieved_date } = (req.body ?? {}) as {
+    name?: string; achieved?: boolean; achieved_date?: string | null;
+  };
+  if (!name) { res.status(400).json({ error: 'name is required' }); return; }
+
+  const now = nowIso();
+  try {
+    await db.query(
+      `INSERT INTO milestones (discussion_id, name, achieved, achieved_date, source, last_evaluated_at)
+       VALUES (?, ?, ?, ?, 'human', ?)`,
+      id, name, achieved ? 1 : 0, achieved_date ?? null, now
+    );
+  } catch (e: any) {
+    if (String(e.message).includes('UNIQUE')) {
+      res.status(409).json({ error: 'A milestone with that name already exists for this discussion' });
+      return;
+    }
+    throw e;
+  }
+
+  const created = await db.queryOne(
+    `SELECT id, name, achieved, achieved_date, evidence_event_ids, confidence, source FROM milestones WHERE discussion_id = ? AND name = ?`,
+    id, name
+  );
+  await recordFeedback('discussion_updates', 'milestone', id, 'create', null, { name, achieved, achieved_date }, null);
+  res.status(201).json(created ? { ...created, achieved: !!(created as any).achieved, evidence_event_ids: [], source: 'human' } : null);
+});
+
+// ── /api/milestones/:id ───────────────────────────────────────────────────
+
+app.patch('/api/milestones/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid milestone id' }); return; }
+
+  const { name, achieved, achieved_date } = (req.body ?? {}) as {
+    name?: string; achieved?: boolean; achieved_date?: string | null;
+  };
+
+  const existing = await db.queryOne<Record<string, unknown>>(
+    'SELECT id, discussion_id, name, achieved, achieved_date FROM milestones WHERE id = ?', id
+  );
+  if (!existing) { res.status(404).json({ error: 'Milestone not found' }); return; }
+
+  const updates: string[] = [];
+  const values: unknown[] = [];
+  if (name !== undefined) { updates.push('name = ?'); values.push(name); }
+  if (achieved !== undefined) { updates.push('achieved = ?'); values.push(achieved ? 1 : 0); }
+  if (achieved_date !== undefined) { updates.push('achieved_date = ?'); values.push(achieved_date); }
+
+  if (updates.length > 0) {
+    await db.query(`UPDATE milestones SET ${updates.join(', ')} WHERE id = ?`, ...values, id);
+    await recordFeedback('discussion_updates', 'milestone', id, 'edit',
+      { name: existing.name, achieved: existing.achieved, achieved_date: existing.achieved_date },
+      { name, achieved, achieved_date }, null);
+  }
+  res.json({ id, updated: updates.map(u => u.split(' = ')[0]) });
+});
+
+app.delete('/api/milestones/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid milestone id' }); return; }
+
+  const reason = (req.query.reason as string | undefined) ?? null;
+  const existing = await db.queryOne<Record<string, unknown>>(
+    'SELECT id, discussion_id, name, achieved FROM milestones WHERE id = ?', id
+  );
+  if (!existing) { res.status(404).json({ error: 'Milestone not found' }); return; }
+
+  await db.query("UPDATE milestones SET source = 'human_deleted' WHERE id = ?", id);
+  await recordFeedback('discussion_updates', 'milestone', id, 'delete', existing, null, reason);
+  res.json({ deleted: true, id });
+});
+
+// ── /api/proposed-actions/:id ─────────────────────────────────────────────
+
+app.patch('/api/proposed-actions/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid proposed action id' }); return; }
+
+  const { action, priority, wait_until, assignee, status } = (req.body ?? {}) as {
+    action?: string; priority?: string; wait_until?: string | null; assignee?: string | null; status?: string;
+  };
+
+  const existing = await db.queryOne<Record<string, unknown>>(
+    'SELECT id, discussion_id, action, priority, wait_until, assignee, status FROM proposed_actions WHERE id = ?', id
+  );
+  if (!existing) { res.status(404).json({ error: 'Proposed action not found' }); return; }
+
+  const updates: string[] = [];
+  const values: unknown[] = [];
+  if (action !== undefined) { updates.push('action = ?'); values.push(action); }
+  if (priority !== undefined) { updates.push('priority = ?'); values.push(priority); }
+  if (wait_until !== undefined) { updates.push('wait_until = ?'); values.push(wait_until); }
+  if (assignee !== undefined) { updates.push('assignee = ?'); values.push(assignee); }
+  if (status !== undefined) { updates.push('status = ?'); values.push(status); }
+
+  if (updates.length > 0) {
+    await db.query(`UPDATE proposed_actions SET ${updates.join(', ')} WHERE id = ?`, ...values, id);
+    await recordFeedback('actions', 'proposed_action', id, 'edit',
+      { action: existing.action, priority: existing.priority, wait_until: existing.wait_until, assignee: existing.assignee, status: existing.status },
+      { action, priority, wait_until, assignee, status }, null);
+  }
+  res.json({ id, updated: updates.map(u => u.split(' = ')[0]) });
+});
+
+app.delete('/api/proposed-actions/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid proposed action id' }); return; }
+
+  const reason = (req.query.reason as string | undefined) ?? null;
+  const existing = await db.queryOne<Record<string, unknown>>(
+    'SELECT id, discussion_id, action, priority FROM proposed_actions WHERE id = ?', id
+  );
+  if (!existing) { res.status(404).json({ error: 'Proposed action not found' }); return; }
+
+  await db.query("UPDATE proposed_actions SET status = 'rejected', source = 'human' WHERE id = ?", id);
+  await recordFeedback('actions', 'proposed_action', id, 'delete', existing, null, reason);
+  res.json({ deleted: true, id });
+});
+
+app.post('/api/discussions/:id/proposed-actions', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: 'Invalid discussion id' }); return; }
+
+  const { action, priority, wait_until, assignee } = (req.body ?? {}) as {
+    action?: string; priority?: string; wait_until?: string | null; assignee?: string | null;
+  };
+  if (!action) { res.status(400).json({ error: 'action is required' }); return; }
+
+  const now = nowIso();
+  const result = await db.query(
+    `INSERT INTO proposed_actions (discussion_id, action, priority, wait_until, assignee, source, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'human', 'open', ?)`,
+    id, action, priority ?? 'medium', wait_until ?? null, assignee ?? null, now
+  );
+
+  // Retrieve the created row using the last inserted id
+  const newId = (result as any)?.lastID ?? (result as any)?.insertId;
+  let created: any = null;
+  if (newId) {
+    created = await db.queryOne(
+      `SELECT id, action, reasoning, priority, wait_until, assignee, created_at, status, source FROM proposed_actions WHERE id = ?`, newId
+    );
+  }
+  await recordFeedback('actions', 'proposed_action', id, 'create', null, { action, priority, wait_until, assignee }, null);
+  res.status(201).json(created ?? { id: newId, action, priority: priority ?? 'medium', wait_until: wait_until ?? null, assignee: assignee ?? null, reasoning: null, created_at: now, status: 'open', source: 'human' });
 });
 
 // ── /api/threads/:threadId/emails ─────────────────────────────────────────

@@ -7,11 +7,11 @@ Each thread is processed in a single LLM call that:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import sqlite3
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -446,8 +446,10 @@ def _process_thread(
             else:
                 src_type, src_id = "email", None
 
+            _actor = ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor")
+            _target = ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target")
             all_parsed.append({
-                "id": f"evt_{uuid.uuid4().hex[:12]}",
+                "id": _event_id(thread_id, event_type, _actor, _target, ev.get("event_date")),
                 "thread_id": thread_id,
                 "source_email_id": source_email_id,
                 "source_calendar_event_id": source_calendar_id,
@@ -455,8 +457,8 @@ def _process_thread(
                 "source_id": src_id,
                 "domain": domain,
                 "type": event_type,
-                "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
-                "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
+                "actor": _actor,
+                "target": _target,
                 "event_date": ev.get("event_date"),
                 "detail": ev.get("detail"),
                 "confidence": ev.get("confidence", 0.5),
@@ -669,8 +671,10 @@ def _process_batch(
             else:
                 src_type, src_id = "email", None
 
+            _actor = ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor")
+            _target = ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target")
             all_parsed.append({
-                "id": f"evt_{uuid.uuid4().hex[:12]}",
+                "id": _event_id(thread_id, event_type, _actor, _target, ev.get("event_date")),
                 "thread_id": thread_id,
                 "source_email_id": source_email_id,
                 "source_calendar_event_id": source_calendar_id,
@@ -678,8 +682,8 @@ def _process_batch(
                 "source_id": src_id,
                 "domain": domain,
                 "type": event_type,
-                "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
-                "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
+                "actor": _actor,
+                "target": _target,
                 "event_date": ev.get("event_date"),
                 "detail": ev.get("detail"),
                 "confidence": ev.get("confidence", 0.5),
@@ -689,6 +693,12 @@ def _process_batch(
             })
 
     return all_parsed
+
+
+def _event_id(thread_id: str, event_type: str, actor: str | None, target: str | None, event_date: str | None) -> str:
+    """Stable content-hash event ID so INSERT OR IGNORE deduplicates re-extractions."""
+    key = f"{thread_id}:{event_type}:{actor or ''}:{target or ''}:{event_date or ''}"
+    return "evt_" + hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def _save_events(conn: sqlite3.Connection, events: list[dict[str, Any]], run_id: int | None = None) -> int:
@@ -919,13 +929,15 @@ def extract_events_propose(
                     source_calendar_id = ev.get("calendar_event_id")
                     src_type = "calendar" if source_calendar_id else "email"
                     src_id = source_calendar_id or source_email_id
+                    _actor = ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor")
+                    _target = ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target")
                     parsed.append({
-                        "id": f"evt_{uuid.uuid4().hex[:12]}", "thread_id": thread_id,
+                        "id": _event_id(thread_id, event_type, _actor, _target, ev.get("event_date")),
+                        "thread_id": thread_id,
                         "source_email_id": source_email_id, "source_calendar_event_id": source_calendar_id,
                         "source_type": src_type, "source_id": src_id,
                         "domain": domain, "type": event_type,
-                        "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
-                        "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
+                        "actor": _actor, "target": _target,
                         "event_date": ev.get("event_date"), "detail": ev.get("detail"),
                         "confidence": ev.get("confidence", 0.5),
                         "model_version": backend.model_name, "prompt_version": PROMPT_VERSION, "created_at": now,
@@ -1019,13 +1031,15 @@ def extract_events_propose(
                     source_calendar_id = ev.get("calendar_event_id")
                     src_type = "calendar" if source_calendar_id else "email"
                     src_id = source_calendar_id or source_email_id
+                    _actor = ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor")
+                    _target = ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target")
                     all_parsed.append({
-                        "id": f"evt_{uuid.uuid4().hex[:12]}", "thread_id": tid,
+                        "id": _event_id(tid, event_type, _actor, _target, ev.get("event_date")),
+                        "thread_id": tid,
                         "source_email_id": source_email_id, "source_calendar_event_id": source_calendar_id,
                         "source_type": src_type, "source_id": src_id,
                         "domain": domain, "type": event_type,
-                        "actor": ", ".join(ev["actor"]) if isinstance(ev.get("actor"), list) else ev.get("actor"),
-                        "target": ", ".join(ev["target"]) if isinstance(ev.get("target"), list) else ev.get("target"),
+                        "actor": _actor, "target": _target,
                         "event_date": ev.get("event_date"), "detail": ev.get("detail"),
                         "confidence": ev.get("confidence", 0.5),
                         "model_version": backend.model_name, "prompt_version": PROMPT_VERSION, "created_at": now,

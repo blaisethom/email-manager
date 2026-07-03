@@ -1,13 +1,32 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, createContext, useContext } from 'react';
 import { useParams, Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
-import type { CompanyDetail, CompanyLabel, CompanyThread, DiscussionSummary, ThreadEmail, LabelConfig } from '../types';
+import type { CompanyDetail, CompanyLabel, CompanyThread, DiscussionSummary, ThreadEmail, LabelConfig, EventLedgerEntry } from '../types';
 import Badge from '../components/Badge';
 import Breadcrumbs, { extendBreadcrumbs } from '../components/Breadcrumbs';
 import Markdown from '../components/Markdown';
 import CompanyInsightsTab from '../components/CompanyInsights';
 import { HubSpotCompanyPanel } from '../components/HubSpotPanel';
 import { formatDate, formatDateTime } from '../utils';
+
+// Context for sharing fetched event types across all ThreadRow instances
+const EventTypesContext = createContext<string[]>([]);
+
+const DOMAIN_COLORS: Record<string, string> = {
+  investment: 'bg-blue-100 text-blue-700',
+  'investor-relations': 'bg-indigo-100 text-indigo-700',
+  'pharma-deal': 'bg-purple-100 text-purple-700',
+  scheduling: 'bg-sky-100 text-sky-700',
+  'contract-negotiation': 'bg-amber-100 text-amber-700',
+  partnership: 'bg-teal-100 text-teal-700',
+  hiring: 'bg-pink-100 text-pink-700',
+  'internal-decision': 'bg-slate-100 text-slate-700',
+  'board-discussion': 'bg-orange-100 text-orange-700',
+  'vendor-selection': 'bg-lime-100 text-lime-700',
+  'support-issue': 'bg-red-100 text-red-700',
+  newsletter: 'bg-gray-100 text-gray-600',
+  other: 'bg-gray-100 text-gray-600',
+};
 
 function HomepageModal({ companyId, onClose }: { companyId: number; onClose: () => void }) {
   const [content, setContent] = useState<string | null>(null);
@@ -332,6 +351,327 @@ function DiscussionCard({ disc, linkState }: { disc: DiscussionSummary; linkStat
   );
 }
 
+function ThreadEventRow({
+  ev,
+  onRefresh,
+}: {
+  ev: EventLedgerEntry;
+  onRefresh: () => void;
+}) {
+  const eventTypes = useContext(EventTypesContext);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState({
+    type: ev.type,
+    actor: ev.actor ?? '',
+    target: ev.target ?? '',
+    event_date: ev.event_date ?? '',
+    detail: ev.detail ?? '',
+  });
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.updateEvent(ev.id, {
+        type: draft.type,
+        actor: draft.actor || null,
+        target: draft.target || null,
+        event_date: draft.event_date || null,
+        detail: draft.detail || null,
+      });
+      setEditing(false);
+      onRefresh();
+    } catch (e) {
+      alert(`Save failed: ${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove() {
+    if (!confirm(`Delete event "${ev.type}: ${ev.detail ?? ''}"?`)) return;
+    try {
+      await api.deleteEvent(ev.id);
+      onRefresh();
+    } catch (e) {
+      alert(`Delete failed: ${(e as Error).message}`);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="border border-slate-200 rounded-lg p-3 bg-slate-50 space-y-2 text-xs">
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="text-slate-500">Type</span>
+            {eventTypes.length > 0 ? (
+              <select
+                value={draft.type}
+                onChange={(e) => setDraft({ ...draft, type: e.target.value })}
+                className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+              >
+                {eventTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                {!eventTypes.includes(draft.type) && (
+                  <option value={draft.type}>{draft.type}</option>
+                )}
+              </select>
+            ) : (
+              <input
+                value={draft.type}
+                onChange={(e) => setDraft({ ...draft, type: e.target.value })}
+                className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+              />
+            )}
+          </label>
+          <label className="block">
+            <span className="text-slate-500">Date</span>
+            <input
+              type="date"
+              value={draft.event_date?.slice(0, 10) ?? ''}
+              onChange={(e) => setDraft({ ...draft, event_date: e.target.value })}
+              className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+            />
+          </label>
+          <label className="block">
+            <span className="text-slate-500">Actor</span>
+            <input
+              value={draft.actor}
+              onChange={(e) => setDraft({ ...draft, actor: e.target.value })}
+              className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+            />
+          </label>
+          <label className="block">
+            <span className="text-slate-500">Target</span>
+            <input
+              value={draft.target}
+              onChange={(e) => setDraft({ ...draft, target: e.target.value })}
+              className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+            />
+          </label>
+        </div>
+        <label className="block">
+          <span className="text-slate-500">Detail</span>
+          <textarea
+            value={draft.detail}
+            onChange={(e) => setDraft({ ...draft, detail: e.target.value })}
+            rows={2}
+            className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+          />
+        </label>
+        <div className="flex gap-2">
+          <button onClick={save} disabled={saving} className="btn-primary text-xs px-3 py-1">
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button onClick={() => setEditing(false)} disabled={saving} className="btn-secondary text-xs px-3 py-1">
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-start gap-2 group py-1">
+      <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${DOMAIN_COLORS[ev.domain] ?? DOMAIN_COLORS.other}`}>
+        {ev.type.replace(/_/g, ' ')}
+      </span>
+      <span className="text-xs text-slate-600 leading-relaxed flex-1">
+        {ev.actor && <span className="font-medium">{ev.actor}</span>}
+        {ev.actor && ev.target && <span className="text-slate-400"> → </span>}
+        {ev.target && <span className="font-medium">{ev.target}</span>}
+        {ev.detail && <span className="text-slate-500">{ev.actor || ev.target ? '  ' : ''}{ev.detail}</span>}
+      </span>
+      {ev.event_date && (
+        <span className="text-[10px] text-slate-400 flex-shrink-0">{formatDate(ev.event_date)}</span>
+      )}
+      <button
+        onClick={() => setEditing(true)}
+        className="text-xs text-slate-400 hover:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+        title="Edit event"
+      >
+        ✎
+      </button>
+      <button
+        onClick={remove}
+        className="text-xs text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+        title="Delete event"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+function ThreadEventsSection({ threadId }: { threadId: string }) {
+  const eventTypes = useContext(EventTypesContext);
+  const [events, setEvents] = useState<EventLedgerEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showEvents, setShowEvents] = useState(false);
+  const [addingNew, setAddingNew] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [newDraft, setNewDraft] = useState({
+    type: eventTypes[0] ?? '',
+    actor: '',
+    target: '',
+    event_date: '',
+    detail: '',
+  });
+
+  // Update default type when eventTypes loads
+  useEffect(() => {
+    if (!newDraft.type && eventTypes.length > 0) {
+      setNewDraft((d) => ({ ...d, type: eventTypes[0] }));
+    }
+  }, [eventTypes, newDraft.type]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.getThreadEvents(threadId)
+      .then((data) => {
+        setEvents(data.events);
+        // Auto-expand if there are events
+        if (data.events.length > 0) setShowEvents(true);
+      })
+      .catch(() => setEvents([]))
+      .finally(() => setLoading(false));
+  }, [threadId]);
+
+  // Load on first mount
+  useEffect(() => { load(); }, [load]);
+
+  const refresh = () => load();
+
+  async function addEvent() {
+    if (!newDraft.type) return;
+    setSaving(true);
+    try {
+      const created = await api.createThreadEvent(threadId, {
+        type: newDraft.type,
+        actor: newDraft.actor || undefined,
+        target: newDraft.target || undefined,
+        event_date: newDraft.event_date || undefined,
+        detail: newDraft.detail || undefined,
+      });
+      setEvents((prev) => [...(prev ?? []), created]);
+      setShowEvents(true);
+      setAddingNew(false);
+      setNewDraft({ type: eventTypes[0] ?? '', actor: '', target: '', event_date: '', detail: '' });
+    } catch (e) {
+      alert(`Add failed: ${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const count = events?.length ?? 0;
+
+  return (
+    <div className="mt-3 border-t border-slate-100 pt-3">
+      <div className="flex items-center gap-2 mb-2">
+        <button
+          onClick={() => setShowEvents(!showEvents)}
+          className="text-xs font-medium text-slate-600 hover:text-slate-800 flex items-center gap-1"
+        >
+          <span>{showEvents ? '▼' : '▶'}</span>
+          <span>Events ({loading ? '…' : count})</span>
+        </button>
+      </div>
+
+      {showEvents && (
+        <div className="space-y-1">
+          {loading ? (
+            <div className="animate-pulse space-y-1">
+              <div className="h-3 bg-slate-200 rounded w-3/4" />
+              <div className="h-3 bg-slate-200 rounded w-1/2" />
+            </div>
+          ) : events && events.length > 0 ? (
+            events.map((ev) => (
+              <ThreadEventRow key={ev.id} ev={ev} onRefresh={refresh} />
+            ))
+          ) : (
+            <p className="text-xs text-slate-400">No events recorded for this thread.</p>
+          )}
+
+          {addingNew ? (
+            <div className="border border-slate-200 rounded-lg p-3 bg-slate-50 space-y-2 mt-2 text-xs">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="text-slate-500">Type</span>
+                  {eventTypes.length > 0 ? (
+                    <select
+                      value={newDraft.type}
+                      onChange={(e) => setNewDraft({ ...newDraft, type: e.target.value })}
+                      className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                    >
+                      {eventTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      value={newDraft.type}
+                      onChange={(e) => setNewDraft({ ...newDraft, type: e.target.value })}
+                      className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                      placeholder="event type"
+                    />
+                  )}
+                </label>
+                <label className="block">
+                  <span className="text-slate-500">Date</span>
+                  <input
+                    type="date"
+                    value={newDraft.event_date}
+                    onChange={(e) => setNewDraft({ ...newDraft, event_date: e.target.value })}
+                    className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-slate-500">Actor</span>
+                  <input
+                    value={newDraft.actor}
+                    onChange={(e) => setNewDraft({ ...newDraft, actor: e.target.value })}
+                    className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-slate-500">Target</span>
+                  <input
+                    value={newDraft.target}
+                    onChange={(e) => setNewDraft({ ...newDraft, target: e.target.value })}
+                    className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                  />
+                </label>
+              </div>
+              <label className="block">
+                <span className="text-slate-500">Detail</span>
+                <textarea
+                  value={newDraft.detail}
+                  onChange={(e) => setNewDraft({ ...newDraft, detail: e.target.value })}
+                  rows={2}
+                  className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                />
+              </label>
+              <div className="flex gap-2">
+                <button onClick={addEvent} disabled={saving || !newDraft.type} className="btn-primary text-xs px-3 py-1">
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+                <button onClick={() => setAddingNew(false)} disabled={saving} className="btn-secondary text-xs px-3 py-1">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAddingNew(true)}
+              className="text-xs text-blue-600 hover:text-blue-800 mt-1"
+            >
+              + Add event
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ThreadRow({ thread }: { thread: CompanyThread }) {
   const [expanded, setExpanded] = useState(false);
   const [emails, setEmails] = useState<ThreadEmail[] | null>(null);
@@ -429,6 +769,7 @@ function ThreadRow({ thread }: { thread: CompanyThread }) {
           ) : (
             <p className="text-xs text-slate-400 py-2">No emails found</p>
           )}
+          <ThreadEventsSection threadId={thread.thread_id} />
         </div>
       )}
     </div>
@@ -496,6 +837,7 @@ export default function CompanyDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [showHomepage, setShowHomepage] = useState(false);
   const [labelConfig, setLabelConfig] = useState<LabelConfig[]>([]);
+  const [eventTypes, setEventTypes] = useState<string[]>([]);
   const activeTab = (searchParams.get('tab') as Tab) || 'overview';
   const setTab = (tab: Tab) => setSearchParams(tab === 'overview' ? {} : { tab });
 
@@ -514,10 +856,13 @@ export default function CompanyDetailPage() {
     Promise.all([
       api.getCompany(parseInt(id, 10)),
       api.getMeta(),
+      api.getConfigCategories(),
     ])
-      .then(([company, meta]) => {
+      .then(([company, meta, catResp]) => {
         setData(company);
         setLabelConfig(meta.labelConfig ?? []);
+        const types = catResp.categories.flatMap((c) => (c.event_types ?? []).map((et) => et.name));
+        setEventTypes(types);
       })
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
@@ -549,6 +894,7 @@ export default function CompanyDetailPage() {
   }
 
   return (
+    <EventTypesContext.Provider value={eventTypes}>
     <div className="p-4 sm:p-8 max-w-5xl">
       <Breadcrumbs
         current={data.name}
@@ -753,5 +1099,6 @@ export default function CompanyDetailPage() {
         <HomepageModal companyId={data.id} onClose={() => setShowHomepage(false)} />
       )}
     </div>
+    </EventTypesContext.Provider>
   );
 }

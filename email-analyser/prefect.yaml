@@ -77,19 +77,135 @@ deployments:
       batch_size: 10
       random_sample: true
 
-  # ── AI analysis: interpret dirty companies ───────────────────────────────────
-  - name: ai-analysis
-    entrypoint: email_manager.scheduler.flows:ai_flow
-    description: "Run AI pipeline stages for companies with new data"
+  # ── AI stage flows: one deployment per pipeline stage ───────────────────────
+  #
+  # Each stage runs independently on its own schedule. Eligibility is keyed on
+  # processing_runs: a company enters a stage's batch when its prerequisite has
+  # a more recent successful run. The memory-heavy concurrency slot (limit=1)
+  # ensures stages never overlap with each other or with enrich_flow.
+  #
+  # Schedule offsets:
+  #   extract_events     */20 * * * *    :00, :20, :40
+  #   discover           3,23,43         :03, :23, :43
+  #   analyse            7,27,47         :07, :27, :47
+  #   propose            12,32,52        :12, :32, :52
+  #   contact_memory     17 */2 * * *    every 2 h
+
+  - name: ai-extract-events
+    entrypoint: email_manager.scheduler.flows:extract_events_flow
+    description: "Extract events from threads for companies with new email data"
+    concurrency_limit: 1
     work_pool:
       name: default-process
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
     schedules:
-      - cron: "5 * * * *"   # Top of each hour (+5 min offset from enrich); seeds pending analysis
+      - cron: "*/20 * * * *"
         timezone: "UTC"
         active: true
+    parameters:
+      batch_size: 10
+      label_filter:
+        - investor
+        - cro
+        - pharma
+        - clinic
+
+  - name: ai-discover-discussions
+    entrypoint: email_manager.scheduler.flows:discover_discussions_flow
+    description: "Discover discussions for companies where extract_events completed more recently"
+    concurrency_limit: 1
+    work_pool:
+      name: default-process
+      job_variables:
+        env:
+          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+    schedules:
+      - cron: "3,23,43 * * * *"
+        timezone: "UTC"
+        active: true
+    parameters:
+      batch_size: 10
+      label_filter:
+        - investor
+        - cro
+        - pharma
+        - clinic
+
+  - name: ai-analyse-discussions
+    entrypoint: email_manager.scheduler.flows:analyse_discussions_flow
+    description: "Analyse discussions for companies where discover_discussions completed more recently"
+    concurrency_limit: 1
+    work_pool:
+      name: default-process
+      job_variables:
+        env:
+          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+    schedules:
+      - cron: "7,27,47 * * * *"
+        timezone: "UTC"
+        active: true
+    parameters:
+      batch_size: 10
+      label_filter:
+        - investor
+        - cro
+        - pharma
+        - clinic
+
+  - name: ai-propose-actions
+    entrypoint: email_manager.scheduler.flows:propose_actions_flow
+    description: "Propose actions for companies where analyse_discussions completed more recently"
+    concurrency_limit: 1
+    work_pool:
+      name: default-process
+      job_variables:
+        env:
+          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+    schedules:
+      - cron: "12,32,52 * * * *"
+        timezone: "UTC"
+        active: true
+    parameters:
+      batch_size: 10
+      label_filter:
+        - investor
+        - cro
+        - pharma
+        - clinic
+
+  - name: ai-contact-memory
+    entrypoint: email_manager.scheduler.flows:contact_memory_flow
+    description: "Build contact memories for companies where propose_actions completed more recently"
+    concurrency_limit: 1
+    work_pool:
+      name: default-process
+      job_variables:
+        env:
+          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+    schedules:
+      - cron: "17 */2 * * *"
+        timezone: "UTC"
+        active: true
+    parameters:
+      batch_size: 10
+      label_filter:
+        - investor
+        - cro
+        - pharma
+        - clinic
+
+  # ── AI analysis (legacy): full pipeline in one flow — manual trigger only ────
+  - name: ai-analysis
+    entrypoint: email_manager.scheduler.flows:ai_flow
+    description: "Run all AI stages in one flow (manual backfill / one-shot refresh only)"
+    work_pool:
+      name: default-process
+      job_variables:
+        env:
+          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+    schedules: []   # No schedule — trigger manually for backfills
     parameters:
       event_budget: 100
       solo_threshold: 50
