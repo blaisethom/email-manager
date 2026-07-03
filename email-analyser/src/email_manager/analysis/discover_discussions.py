@@ -504,16 +504,10 @@ def _save_discussion(
         )
         disc_id = existing_id
     else:
-        # Resolve company_id from domain if provided
+        # Always store the discussion under the company being analysed (company_id).
+        # disc["company_domain"] is the *counterparty* domain returned by the LLM — it
+        # should not determine ownership of the discussion, only the category.
         resolved_company_id = company_id
-        if disc.get("company_domain"):
-            row = fetchone(
-                conn,
-                "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE",
-                (disc["company_domain"],),
-            )
-            if row:
-                resolved_company_id = row["id"]
 
         # Validate parent_id: must exist, belong to same company, not be self
         parent_id = disc.get("parent_id")
