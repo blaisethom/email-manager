@@ -348,12 +348,16 @@ def _run_stage_flow(
 @flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=1200)
 def extract_events_flow(
     label_filter: list[str] | None = None,
-    batch_size: int = 10,
+    token_budget: int = 150_000,
 ) -> dict:
     """Extract events for companies with new emails since their last run.
 
     Eligibility: staleness_status='stale', emails after last extract_events
     cutoff date, or never processed.
+
+    Companies are selected greedily up to token_budget (based on each company's
+    last-run input_tokens), so runs with small companies process more of them
+    while a single large company can fill a run on its own.
 
     Clears staleness_status='up_to_date' after successful processing so the
     company doesn't re-enter the batch before new emails arrive.
@@ -362,7 +366,7 @@ def extract_events_flow(
     _label_filter = label_filter if label_filter is not None else _DEFAULT_ANALYSIS_LABELS
 
     batch = get_companies_for_extract_events(
-        label_filter=_label_filter, batch_size=batch_size
+        label_filter=_label_filter, token_budget=token_budget
     )
     succeeded, failed = _run_stage_flow("extract_events", batch, log)
 
@@ -390,7 +394,7 @@ def extract_events_flow(
 @flow(name="email-manager-discover-discussions", log_prints=True, timeout_seconds=1200)
 def discover_discussions_flow(
     label_filter: list[str] | None = None,
-    batch_size: int = 10,
+    token_budget: int = 150_000,
 ) -> dict:
     """Discover discussions for companies where extract_events has run more recently.
 
@@ -403,7 +407,7 @@ def discover_discussions_flow(
         stage="discover_discussions",
         prerequisite="extract_events",
         label_filter=_label_filter,
-        batch_size=batch_size,
+        token_budget=token_budget,
     )
     succeeded, failed = _run_stage_flow("discover_discussions", batch, log)
     summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
@@ -414,7 +418,7 @@ def discover_discussions_flow(
 @flow(name="email-manager-analyse-discussions", log_prints=True, timeout_seconds=1200)
 def analyse_discussions_flow(
     label_filter: list[str] | None = None,
-    batch_size: int = 10,
+    token_budget: int = 250_000,
 ) -> dict:
     """Analyse discussions for companies where discover_discussions has run more recently.
 
@@ -427,7 +431,7 @@ def analyse_discussions_flow(
         stage="analyse_discussions",
         prerequisite="discover_discussions",
         label_filter=_label_filter,
-        batch_size=batch_size,
+        token_budget=token_budget,
     )
     succeeded, failed = _run_stage_flow("analyse_discussions", batch, log)
     summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
@@ -438,7 +442,7 @@ def analyse_discussions_flow(
 @flow(name="email-manager-propose-actions", log_prints=True, timeout_seconds=1200)
 def propose_actions_flow(
     label_filter: list[str] | None = None,
-    batch_size: int = 10,
+    token_budget: int = 250_000,
 ) -> dict:
     """Propose actions for companies where analyse_discussions has run more recently.
 
@@ -451,7 +455,7 @@ def propose_actions_flow(
         stage="propose_actions",
         prerequisite="analyse_discussions",
         label_filter=_label_filter,
-        batch_size=batch_size,
+        token_budget=token_budget,
     )
     succeeded, failed = _run_stage_flow("propose_actions", batch, log)
     summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}
@@ -462,7 +466,7 @@ def propose_actions_flow(
 @flow(name="email-manager-contact-memory", log_prints=True, timeout_seconds=1200)
 def contact_memory_flow(
     label_filter: list[str] | None = None,
-    batch_size: int = 10,
+    token_budget: int = 150_000,
 ) -> dict:
     """Build contact memories for companies where propose_actions has run more recently.
 
@@ -477,7 +481,7 @@ def contact_memory_flow(
         stage="contact_memory",
         prerequisite="propose_actions",
         label_filter=_label_filter,
-        batch_size=batch_size,
+        token_budget=token_budget,
     )
     succeeded, failed = _run_stage_flow("contact_memory", batch, log)
     summary = {"processed": len(succeeded), "failed": len(failed), "total": len(batch)}

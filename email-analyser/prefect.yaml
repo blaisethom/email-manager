@@ -105,7 +105,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 10
+      token_budget: 150000
       label_filter:
         - investor
         - cro
@@ -126,7 +126,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 10
+      token_budget: 150000
       label_filter:
         - investor
         - cro
@@ -147,7 +147,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 10
+      token_budget: 250000
       label_filter:
         - investor
         - cro
@@ -168,7 +168,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 10
+      token_budget: 250000
       label_filter:
         - investor
         - cro
@@ -189,7 +189,7 @@ deployments:
         timezone: "UTC"
         active: true
     parameters:
-      batch_size: 10
+      token_budget: 150000
       label_filter:
         - investor
         - cro

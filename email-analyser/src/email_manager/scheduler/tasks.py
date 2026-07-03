@@ -23,6 +23,26 @@ def _cfg_and_conn():
     return config, conn
 
 
+def _select_by_budget(
+    rows: list,  # each row: (domain, estimated_tokens)
+    token_budget: int,
+) -> tuple[list[str], int]:
+    """Greedily pick companies from rows until token_budget is exhausted.
+
+    Always includes at least one company even if it exceeds the budget alone,
+    so very large companies are never permanently skipped.
+    Returns (selected_domains, total_estimated_tokens).
+    """
+    selected: list[str] = []
+    total = 0
+    for domain, est in rows:
+        if selected and total + est > token_budget:
+            break
+        selected.append(domain)
+        total += est
+    return selected, total
+
+
 # ── Ingestion tasks ──────────────────────────────────────────────────────────
 
 
@@ -413,18 +433,29 @@ def seed_change_journal(label_filter: list[str]) -> int:
 @task(name="get-companies-for-extract-events", retries=1, retry_delay_seconds=30)
 def get_companies_for_extract_events(
     label_filter: list[str],
-    batch_size: int = 10,
+    token_budget: int = 150_000,
+    first_run_estimate: int = 30_000,
 ) -> list[str]:
     """Companies needing extract_events: never processed, new emails since last cutoff, or stale.
 
     Uses the indexed from_domain column for the email date check (not LIKE scans).
+    Selects companies greedily until the token_budget (based on last-run input_tokens) is
+    exhausted, so a run processes more small companies or fewer large ones automatically.
     """
     log = get_run_logger()
     _, conn = _cfg_and_conn()
     try:
         placeholders_l = ",".join("?" for _ in label_filter)
+        # Fetch up to 50 candidates with their last-run token estimate
         rows = conn.execute(
-            f"""SELECT DISTINCT c.domain
+            f"""SELECT DISTINCT c.domain,
+                       COALESCE((
+                           SELECT pr.input_tokens FROM processing_runs pr
+                           WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                             AND pr.mode = 'staged:extract_events'
+                             AND pr.error IS NULL
+                           ORDER BY pr.id DESC LIMIT 1
+                       ), ?) AS estimated_tokens
                 FROM companies c
                 JOIN company_labels cl ON cl.company_id = c.id
                 WHERE LOWER(cl.label) IN ({placeholders_l})
@@ -450,12 +481,16 @@ def get_companies_for_extract_events(
                         ), '')
                     )
                   )
-                LIMIT ?""",
-            [lbl.lower() for lbl in label_filter] + [batch_size],
+                ORDER BY estimated_tokens ASC
+                LIMIT 50""",
+            [first_run_estimate] + [lbl.lower() for lbl in label_filter],
         ).fetchall()
-        domains = [r[0] for r in rows]
-        log.info("%d companies need extract_events", len(domains))
-        return domains
+        selected, total = _select_by_budget(rows, token_budget)
+        log.info(
+            "%d companies selected for extract_events (est. %d tokens, budget %d)",
+            len(selected), total, token_budget,
+        )
+        return selected
     finally:
         conn.close()
 
@@ -465,7 +500,8 @@ def get_companies_for_stage(
     stage: str,
     prerequisite: str,
     label_filter: list[str],
-    batch_size: int = 10,
+    token_budget: int = 250_000,
+    first_run_estimate: int = 30_000,
 ) -> list[str]:
     """Companies where prerequisite has a more recent successful run than stage.
 
@@ -474,6 +510,9 @@ def get_companies_for_stage(
     - stage has never run successfully, OR the latest successful prerequisite run
       has a higher id than the latest successful stage run (id is monotonically
       increasing, so higher id = more recent).
+
+    Selects companies greedily until token_budget (based on last-run input_tokens) is
+    exhausted, favouring smaller companies first so more get through per run.
     """
     log = get_run_logger()
     _, conn = _cfg_and_conn()
@@ -482,7 +521,13 @@ def get_companies_for_stage(
         prereq_mode = f"staged:{prerequisite}"
         stage_mode = f"staged:{stage}"
         rows = conn.execute(
-            f"""SELECT DISTINCT c.domain
+            f"""SELECT DISTINCT c.domain,
+                       COALESCE((
+                           SELECT pr.input_tokens FROM processing_runs pr
+                           WHERE LOWER(pr.company_domain) = LOWER(c.domain)
+                             AND pr.mode = ? AND pr.error IS NULL
+                           ORDER BY pr.id DESC LIMIT 1
+                       ), ?) AS estimated_tokens
                 FROM companies c
                 JOIN company_labels cl ON cl.company_id = c.id
                 WHERE LOWER(cl.label) IN ({placeholders_l})
@@ -510,13 +555,18 @@ def get_companies_for_stage(
                         AND pr.mode = ? AND pr.error IS NULL
                     )
                   )
-                LIMIT ?""",
-            [lbl.lower() for lbl in label_filter]
-            + [prereq_mode, stage_mode, prereq_mode, stage_mode, batch_size],
+                ORDER BY estimated_tokens ASC
+                LIMIT 50""",
+            [stage_mode, first_run_estimate]
+            + [lbl.lower() for lbl in label_filter]
+            + [prereq_mode, stage_mode, prereq_mode, stage_mode],
         ).fetchall()
-        domains = [r[0] for r in rows]
-        log.info("%d companies need %s (prerequisite=%s)", len(domains), stage, prerequisite)
-        return domains
+        selected, total = _select_by_budget(rows, token_budget)
+        log.info(
+            "%d companies selected for %s (est. %d tokens, budget %d, prerequisite=%s)",
+            len(selected), stage, total, token_budget, prerequisite,
+        )
+        return selected
     finally:
         conn.close()
 
