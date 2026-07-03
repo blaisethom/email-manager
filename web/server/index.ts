@@ -436,6 +436,16 @@ app.get('/api/companies', async (req: Request, res: Response) => {
   });
 });
 
+// ── /api/companies/by-domain/:domain ───────────────────────────────────────
+
+app.get('/api/companies/by-domain/:domain', async (req: Request, res: Response) => {
+  const company = await db.queryOne<{ id: number; name: string; domain: string }>(
+    'SELECT id, name, domain FROM companies WHERE LOWER(domain) = LOWER(?)', req.params.domain
+  );
+  if (!company) { res.status(404).json({ error: 'Company not found' }); return; }
+  res.json(company);
+});
+
 // ── /api/companies/:id ─────────────────────────────────────────────────────
 
 app.get('/api/companies/:id', async (req: Request, res: Response) => {

@@ -40,6 +40,21 @@ function formatDuration(startedAt: string | null, completedAt: string | null): s
   return `${hr}h ${remMin}m`;
 }
 
+function CompanyLink({ domain }: { domain: string }) {
+  const [companyId, setCompanyId] = useState<number | null>(null);
+
+  useEffect(() => {
+    api.getCompanyByDomain(domain)
+      .then(c => setCompanyId(c.id))
+      .catch(() => {});
+  }, [domain]);
+
+  if (companyId !== null) {
+    return <Link to={`/companies/${companyId}`} className="text-blue-600 hover:underline">{domain}</Link>;
+  }
+  return <span>{domain}</span>;
+}
+
 function ConfigSummary({ config }: { config: JobConfig }) {
   if (config.job_type === 'sync') {
     return <span className="text-sm text-slate-600">Sync emails from all accounts</span>;
@@ -54,7 +69,7 @@ function ConfigSummary({ config }: { config: JobConfig }) {
           : 'all stages'
         }
       </div>
-      {config.company && <div><span className="font-medium">Company:</span> {config.company}</div>}
+      {config.company && <div><span className="font-medium">Company:</span> <CompanyLink domain={config.company} /></div>}
       {config.label && <div><span className="font-medium">Label:</span> {config.label}</div>}
       {(config.force || config.clean || config.per_company || config.new_emails || config.stale_model || config.stale_prompt) && (
         <div className="flex gap-1.5 flex-wrap">

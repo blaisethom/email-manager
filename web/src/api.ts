@@ -151,6 +151,10 @@ export const api = {
     return fetchJson<CompanyDetail>(`${BASE}/companies/${id}`);
   },
 
+  getCompanyByDomain(domain: string): Promise<{ id: number; name: string; domain: string }> {
+    return fetchJson(`${BASE}/companies/by-domain/${encodeURIComponent(domain)}`);
+  },
+
   getCompanyHomepage(id: number): Promise<{ content: string; domain: string; fetched_at: string }> {
     return fetchJson(`${BASE}/companies/${id}/homepage`);
   },
