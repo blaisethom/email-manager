@@ -13,13 +13,22 @@ logger = logging.getLogger(__name__)
 _RETRY_DELAYS = [30, 60, 120, 180, 240]  # seconds between retries on 429
 
 
+def _prefect_log_warning(msg: str) -> None:
+    """Log via Prefect's run logger when inside a flow, otherwise fall back to stdlib logging."""
+    try:
+        from prefect.logging import get_run_logger
+        get_run_logger().warning(msg)
+    except Exception:
+        logger.warning(msg)
+
+
 def _with_retry(fn):
     """Call fn(), retrying up to len(_RETRY_DELAYS) times on RateLimitError."""
     for attempt, delay in enumerate(_RETRY_DELAYS, start=1):
         try:
             return fn()
         except anthropic.RateLimitError:
-            logger.warning("Rate limit hit, retrying in %ds (attempt %d/%d)", delay, attempt, len(_RETRY_DELAYS))
+            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)})")
             time.sleep(delay)
     return fn()  # final attempt — let it raise
 
@@ -31,7 +40,7 @@ async def _with_retry_async(fn):
         try:
             return await fn()
         except anthropic.RateLimitError:
-            logger.warning("Rate limit hit, retrying in %ds (attempt %d/%d)", delay, attempt, len(_RETRY_DELAYS))
+            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)})")
             await asyncio.sleep(delay)
     return await fn()
 
