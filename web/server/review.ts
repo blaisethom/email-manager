@@ -287,7 +287,11 @@ export function registerReviewRoutes(app: Express, db: Database): void {
     );
 
     const companyLabel = company.name ?? company.domain ?? String(companyId);
-    const ruleText = `For ${companyLabel}: ${feedback.trim()}`;
+    const prefix = `For ${companyLabel}: `;
+    const trimmedFeedback = feedback.trim();
+    const ruleText = trimmedFeedback.toLowerCase().startsWith(prefix.toLowerCase())
+      ? trimmedFeedback
+      : `${prefix}${trimmedFeedback}`;
 
     const result = await db.queryOne<{ id: number }>(
       `INSERT INTO learned_rules (layer, category, rule_text, active, created_at)
