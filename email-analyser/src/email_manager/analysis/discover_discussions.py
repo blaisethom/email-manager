@@ -59,6 +59,7 @@ def _build_discover_prompt(
     existing_discussions: list[dict] | None = None,
     account_owner: str | None = None,
     sub_discussion_categories: list[str] | None = None,
+    company_instructions: list[str] | None = None,
 ) -> str:
     owner_line = f"\nAccount owner: {account_owner}" if account_owner else ""
 
@@ -81,11 +82,17 @@ def _build_discover_prompt(
             "Set their parent_id to the ID of the related parent discussion."
         )
 
+    company_instructions_block = ""
+    if company_instructions:
+        company_instructions_block = "\n\nIMPORTANT — specific instructions for this company:\n" + "\n".join(
+            f"- {instr}" for instr in company_instructions
+        )
+
     return f"""Group these business events into discussions for this company.
 {owner_line}
 Company: {company_name}
 Domain: {domain}
-{existing_block}{sub_disc_block}
+{existing_block}{sub_disc_block}{company_instructions_block}
 Events:
 {events_text}
 
@@ -868,6 +875,10 @@ def discover_discussions(
             on_progress(i, len(companies),
                         f"{company['name']} ({len(all_events)} events, {len(event_batches)} batches)")
 
+        from email_manager.analysis.feedback import format_rules_block, get_company_rules
+        company_rules = get_company_rules(conn, "discussions", company["id"])
+        company_instructions = [r["rule_text"] for r in company_rules] if company_rules else None
+
         for batch_idx, batch_events in enumerate(event_batches):
             existing = _get_existing_discussions_for_company(conn, company["id"])
             event_cluster_map = _build_event_cluster_map(batch_events, terminal_event_types) if terminal_event_types else {}
@@ -878,6 +889,7 @@ def discover_discussions(
                 existing_discussions=existing,
                 account_owner=account_owner,
                 sub_discussion_categories=sub_discussion_categories or None,
+                company_instructions=company_instructions,
             )
 
             if on_progress:
@@ -891,16 +903,28 @@ def discover_discussions(
                             len(batch_events), len(existing))
 
             try:
-                from email_manager.analysis.feedback import format_rules_block
-                rules_block = format_rules_block(conn, "discussions")
+                # Global rules only in the system prompt — company-specific rules are
+                # already in the user prompt via company_instructions to avoid duplication.
+                rules_block = format_rules_block(conn, "discussions", global_only=True)
                 system = DISCOVER_SYSTEM + rules_block
 
-                # Print context so it appears in Prefect/job logs
+                batch_label = (f"batch {batch_idx + 1}/{len(event_batches)}"
+                               if len(event_batches) > 1 else "")
+                header = f"{company['name']}{' ' + batch_label if batch_label else ''}"
+
+                # Print system prompt summary
+                print(f"\n=== SYSTEM PROMPT ({header}) ===")
+                print(DISCOVER_SYSTEM[:400].rstrip())
                 if rules_block.strip():
-                    print(f"\n=== Feedback rules injected for {company['name']} ===")
-                    print(rules_block.strip())
-                    print("=" * 50)
-                print(f"\n=== Sending {len(batch_events)} events to AI ({company['name']}) ===")
+                    print(f"\n[Global rules injected:]{rules_block}")
+                if company_instructions:
+                    print(f"\n[Company-specific instructions ({len(company_instructions)}):]")
+                    for instr in company_instructions:
+                        print(f"  - {instr}")
+                print("=" * 50)
+
+                # Print events being sent
+                print(f"\n=== USER PROMPT ({header}, {len(batch_events)} events) ===")
                 for ev in batch_events:
                     print(f"  [{ev['id']}] {ev.get('event_date','')} {ev.get('type','')} {ev.get('actor','')}")
                 print("=" * 50)
@@ -911,6 +935,17 @@ def discover_discussions(
                              company["domain"], batch_idx + 1, e)
                 raise  # propagate so the caller records the error in processing_runs
 
+            # Print AI raw response (thinking trace)
+            raw_response = getattr(backend, "last_raw_response", None)
+            if raw_response:
+                print(f"\n=== AI THINKING TRACE ({header}) ===")
+                if len(raw_response) > 4000:
+                    print(raw_response[:4000])
+                    print(f"... [+{len(raw_response) - 4000} chars truncated]")
+                else:
+                    print(raw_response)
+                print("=" * 50)
+
             # Print AI response summary
             batch_discussions = result.get("discussions", [])
             print(f"\n=== AI proposed {len(batch_discussions)} discussion(s) for {company['name']} ===")
@@ -918,7 +953,7 @@ def discover_discussions(
                 eid_count = len(d.get("event_ids", []))
                 existing_id = d.get("existing_id")
                 label = f"[update #{existing_id}]" if existing_id else "[new]"
-                print(f"  {label} \"{d.get('title','?')}\" ({eid_count} events)")
+                print(f"  {label} \"{d.get('title','?')}\" cat={d.get('category','?')} ({eid_count} events)")
             print("=" * 50)
             discussions.extend(batch_discussions)
 

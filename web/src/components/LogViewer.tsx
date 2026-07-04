@@ -125,8 +125,8 @@ function lineClassName(line: LogLine): string {
   if (/\d+\/\d+\s+(threads|companies|discussions)/.test(text)) {
     return 'text-cyan-300';
   }
-  // AI backend info
-  if (/Using AI backend:/i.test(text)) {
+  // AI backend info and prompt/trace section content
+  if (/Using AI backend:|^\[Global rules|^\[Company-specific instructions/i.test(text)) {
     return 'text-yellow-300';
   }
 

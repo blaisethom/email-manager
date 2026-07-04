@@ -79,8 +79,19 @@ def _run_stage(
         logger.info("Finished stage: %s — processed %d items", stage_name, count)
         return count
     except Exception as e:
-        console.print(f"  [red]{stage_name} failed: {e}[/red]")
+        import traceback as _tb
+        err_text = f"{stage_name} failed: {e}"
+        tb_text = _tb.format_exc()
+        console.print(f"  [red]{err_text}[/red]")
         logger.exception("Stage %s failed", stage_name)
+        # Log via Prefect's run logger so the error appears in the job pane
+        try:
+            from prefect.logging.loggers import get_run_logger
+            _plog = get_run_logger()
+            _plog.error(err_text)
+            _plog.error(tb_text)
+        except Exception:
+            pass
         # Record the error in processing_runs so we can see it later
         if company:
             from datetime import datetime, timezone

@@ -286,12 +286,9 @@ export function registerReviewRoutes(app: Express, db: Database): void {
       category,
     );
 
-    const companyLabel = company.name ?? company.domain ?? String(companyId);
-    const prefix = `For ${companyLabel}: `;
-    const trimmedFeedback = feedback.trim();
-    const ruleText = trimmedFeedback.toLowerCase().startsWith(prefix.toLowerCase())
-      ? trimmedFeedback
-      : `${prefix}${trimmedFeedback}`;
+    // Store the rule text as-is — company scope is tracked via the category field,
+    // so no "For Company: " prefix is needed in the text itself.
+    const ruleText = feedback.trim();
 
     const result = await db.queryOne<{ id: number }>(
       `INSERT INTO learned_rules (layer, category, rule_text, active, created_at)

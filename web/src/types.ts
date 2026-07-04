@@ -320,6 +320,7 @@ export interface ProcessingRun {
   output_tokens: number;
   llm_calls: number;
   total_llm_ms: number;
+  error: string | null;
 }
 
 export interface LlmCallsByStage {

@@ -36,19 +36,50 @@ def get_learned_rules(conn: sqlite3.Connection, layer: str) -> list[dict[str, An
     return [dict(r) for r in rows]
 
 
-def format_rules_block(conn: sqlite3.Connection, layer: str) -> str:
+def get_company_rules(conn: sqlite3.Connection, layer: str, company_id: int) -> list[dict[str, Any]]:
+    """Get active learned rules for a specific company (category = '__company_{id}__')."""
+    tag = f"__company_{company_id}__"
+    rows = fetchall(
+        conn,
+        "SELECT * FROM learned_rules WHERE layer = ? AND category = ? AND active = 1 ORDER BY id",
+        (layer, tag),
+    )
+    return [dict(r) for r in rows]
+
+
+def format_rules_block(
+    conn: sqlite3.Connection,
+    layer: str,
+    company_id: int | None = None,
+    global_only: bool = False,
+) -> str:
     """Build a prompt block with learned rules for injection into system prompts.
+
+    When global_only=True, returns only rules with no category (global rules).
+    When company_id is provided, returns global rules plus rules specific to that
+    company (category = '__company_{id}__'). Company-specific rules for other
+    companies are always excluded.
 
     Returns empty string if no rules exist for this layer.
     """
-    rules = get_learned_rules(conn, layer)
+    all_rules = get_learned_rules(conn, layer)
+    if not all_rules:
+        return ""
+
+    if global_only:
+        rules = [r for r in all_rules if not r.get("category")]
+    elif company_id is not None:
+        company_tag = f"__company_{company_id}__"
+        rules = [r for r in all_rules if not r.get("category") or r["category"] == company_tag]
+    else:
+        rules = all_rules
+
     if not rules:
         return ""
 
     lines = ["\n\nLearned corrections from past reviews:"]
     for rule in rules:
-        category_note = f" [{rule['category']}]" if rule.get("category") else ""
-        lines.append(f"- {rule['rule_text']}{category_note}")
+        lines.append(f"- {rule['rule_text']}")
 
     return "\n".join(lines)
 

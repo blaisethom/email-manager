@@ -57,6 +57,12 @@ class ClaudeBackend:
             self._prefill = True
         self._model = model
         self._tracker = TokenTracker()
+        self._last_raw_response: str = ""
+
+    @property
+    def last_raw_response(self) -> str:
+        """Raw text from the most recent complete_json call (before JSON parsing)."""
+        return self._last_raw_response
 
     @property
     def model_name(self) -> str:
@@ -99,6 +105,7 @@ class ClaudeBackend:
             output_tokens=response.usage.output_tokens,
         ))
         raw = ("{" + response.content[0].text) if self._prefill else response.content[0].text
+        self._last_raw_response = raw
         # Strip markdown fences if present
         cleaned = raw.strip()
         if cleaned.startswith("```"):
@@ -146,6 +153,7 @@ class ClaudeBackend:
             output_tokens=response.usage.output_tokens,
         ))
         raw = ("{" + response.content[0].text) if self._prefill else response.content[0].text
+        self._last_raw_response = raw
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             lines = cleaned.splitlines()

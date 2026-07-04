@@ -53,29 +53,40 @@ function RunRow({ run }: { run: ProcessingRun }) {
     : wallStr;
 
   return (
-    <tr className="border-b border-slate-100 last:border-0">
-      <td className="py-2 pr-4 text-sm text-slate-600">{formatDate(run.started_at)}</td>
-      <td className="py-2 pr-4">
-        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-          run.mode?.includes('agent') ? 'bg-purple-100 text-purple-700' :
-          run.mode?.includes('quick') ? 'bg-blue-100 text-blue-700' :
-          run.mode?.includes('staged') ? 'bg-amber-100 text-amber-700' :
-          'bg-slate-100 text-slate-600'
-        }`}>
-          {run.mode?.replace('staged:', '') ?? '—'}
-        </span>
-      </td>
-      <td className="py-2 pr-4 text-xs text-slate-500 truncate max-w-[150px]">{run.model ?? '—'}</td>
-      <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.events_created}</td>
-      <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.llm_calls || '—'}</td>
-      <td className="py-2 pr-4 text-sm text-slate-600 text-right">{formatTokens(totalTokens)}</td>
-      <td className="py-2 text-sm text-slate-500 text-right cursor-help" title={title}>
-        {wallStr}
-        {llmStr && wallMs > 0 && llmMs > wallMs * 1.1 && (
-          <span className="text-xs text-slate-400 ml-1">({llmStr} LLM)</span>
-        )}
-      </td>
-    </tr>
+    <>
+      <tr className={`border-b ${run.error ? 'border-red-100 bg-red-50/40' : 'border-slate-100'} last:border-0`}>
+        <td className="py-2 pr-4 text-sm text-slate-600">{formatDate(run.started_at)}</td>
+        <td className="py-2 pr-4">
+          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+            run.error ? 'bg-red-100 text-red-700' :
+            run.mode?.includes('agent') ? 'bg-purple-100 text-purple-700' :
+            run.mode?.includes('quick') ? 'bg-blue-100 text-blue-700' :
+            run.mode?.includes('staged') ? 'bg-amber-100 text-amber-700' :
+            'bg-slate-100 text-slate-600'
+          }`}>
+            {run.error && <span className="mr-1">✗</span>}
+            {run.mode?.replace('staged:', '') ?? '—'}
+          </span>
+        </td>
+        <td className="py-2 pr-4 text-xs text-slate-500 truncate max-w-[150px]">{run.model ?? '—'}</td>
+        <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.events_created}</td>
+        <td className="py-2 pr-4 text-sm text-slate-600 text-right">{run.llm_calls || '—'}</td>
+        <td className="py-2 pr-4 text-sm text-slate-600 text-right">{formatTokens(totalTokens)}</td>
+        <td className="py-2 text-sm text-slate-500 text-right cursor-help" title={title}>
+          {wallStr}
+          {llmStr && wallMs > 0 && llmMs > wallMs * 1.1 && (
+            <span className="text-xs text-slate-400 ml-1">({llmStr} LLM)</span>
+          )}
+        </td>
+      </tr>
+      {run.error && (
+        <tr className="border-b border-red-100 bg-red-50/40">
+          <td colSpan={7} className="pb-2 pr-4 pl-2">
+            <p className="text-xs text-red-600 font-mono break-all">{run.error}</p>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 

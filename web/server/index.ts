@@ -631,7 +631,7 @@ app.get('/api/companies/:id/insights', async (req: Request, res: Response) => {
   const runs = await db.query(
     `SELECT pr.id, pr.mode, pr.model, pr.started_at, pr.completed_at,
             pr.events_created, pr.discussions_created, pr.discussions_updated, pr.actions_proposed,
-            pr.input_tokens, pr.output_tokens, pr.llm_calls,
+            pr.input_tokens, pr.output_tokens, pr.llm_calls, pr.error,
             (SELECT COALESCE(SUM(lc.duration_ms), 0) FROM llm_calls lc WHERE lc.run_id = pr.id) AS total_llm_ms
      FROM processing_runs pr WHERE LOWER(pr.company_domain) = LOWER(?)
      ORDER BY pr.started_at DESC LIMIT 20`,
