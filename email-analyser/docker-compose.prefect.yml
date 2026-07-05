@@ -1,13 +1,14 @@
-# Docker Compose for the Prefect orchestration backend (server + metadata DB).
+# Docker Compose for the Prefect orchestration backend (server + metadata DB + worker).
 #
-# The worker runs directly on the host — NOT in Docker — so that the
-# Prokura transparent proxy can intercept and rewrite outbound HTTPS requests.
+# The worker container reaches the Prokura proxy at http://172.21.1.38:8080
+# (this dev container's IP on the Docker network). If that IP changes, update
+# HTTP_PROXY / HTTPS_PROXY in the prefect-worker service below.
 #
-# Start the server:
+# First-time setup (or after Dockerfile.worker changes):
+#   docker compose -f docker-compose.prefect.yml up -d --build prefect-worker
+#
+# Normal start:
 #   docker compose -f docker-compose.prefect.yml up -d
-#
-# Start the worker (on the host, separately):
-#   prefect worker start --pool default-process
 
 services:
 
@@ -45,6 +46,25 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # ── Prefect worker ──────────────────────────────────────────────────────────
+  prefect-worker:
+    image: ghcr.io/blaisethom/email-manager-prefect-worker:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Point at the server by service name (stable, no IP needed)
+      PREFECT_API_URL: "http://prefect-server:4200/api"
+      # Route outbound HTTPS through Prokura in the dev container.
+      # 172.21.1.38 is the dev container's IP on this Docker network.
+      # If it changes after a container restart, update these two lines.
+      HTTP_PROXY: "http://172.21.1.38:8080"
+      HTTPS_PROXY: "http://172.21.1.38:8080"
+      NO_PROXY: "localhost,127.0.0.1,prefect-server,prefect-db"
+    depends_on:
+      prefect-server:
+        condition: service_healthy
 
 volumes:
   prefect-db-data:
