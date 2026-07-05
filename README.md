@@ -567,3 +567,104 @@ uv sync --group dev
 # Run tests
 pytest tests/ -v
 ```
+
+## Prokura Proxy Environment
+
+When running inside a [Prokura](https://prokura.ai) container, authentication for external services (Gmail, Claude, GitHub) is handled by the proxy rather than local credential files.
+
+### How it works
+
+Prokura acts as a MITM proxy. When requests contain placeholder tokens (e.g. `GMAIL_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `GITHUB_TOKEN`), the proxy replaces them with real OAuth tokens from registered resources.
+
+The sidecar proxy runs at `127.0.0.1:8080` (localhost only). Set `HTTPS_PROXY=http://127.0.0.1:8080` for any process that needs external auth.
+
+### Configuration
+
+**`email-analyser/.env`** — use placeholder tokens; the proxy injects real credentials:
+```bash
+AI_BACKEND=claude
+CLAUDE_CODE_OAUTH_TOKEN=CLAUDE_CODE_OAUTH_TOKEN   # proxy replaces this
+DB_BACKEND=postgres
+DB_URL=postgresql://postgres:<password>@postgres.svc:5432/postgres
+PREFECT_API_URL=http://<prefect-server-ip>:4200/api
+```
+
+**`email-analyser/accounts.json`** — for Gmail, use the bearer token placeholder:
+```json
+[
+  {
+    "name": "personal-gmail",
+    "backend": "gmail",
+    "gmail_bearer_token": "GMAIL_TOKEN",
+    "gmail_labels": []
+  }
+]
+```
+
+**`web/.env`**:
+```bash
+DB_BACKEND=postgres
+DB_URL=postgresql://postgres:<password>@postgres.svc:5432/postgres
+PREFECT_API_URL=http://<prefect-server-ip>:4200/api
+```
+
+### Gmail token expiry
+
+Gmail tokens can expire. If you see "Token expired" errors, refresh the Gmail resource:
+```bash
+prokura resources refresh gmail
+```
+
+If that fails ("could not reach provider"), you need to re-authorise via the Prokura Hub UI. Check token expiry with `prokura resources describe gmail`.
+
+### Running the Prefect worker
+
+The Docker worker (`docker-compose.prefect.yml`) may not work in all Prokura environments because the worker container's Docker network has a transparent proxy that can inject invalid GitHub credentials. **Run the worker locally in the dev container instead:**
+
+```bash
+cd email-analyser
+PREFECT_API_URL=http://<prefect-server-ip>:4200/api \
+HTTPS_PROXY=http://127.0.0.1:8080 \
+HTTP_PROXY=http://127.0.0.1:8080 \
+NO_PROXY=localhost,127.0.0.1,prefect-server,postgres.svc \
+  uv run --extra scheduler prefect worker start --pool default-process
+```
+
+This uses the dev container's sidecar proxy, which correctly injects GitHub credentials for the code download step and Claude/Gmail credentials during flow execution.
+
+> **Note:** The vendored wheels in `vendor/` are built for x86_64. If you're on ARM64 (aarch64), `worker_bootstrap.py` will fail. The pull step in `prefect.yaml` handles this by copying only the `email_manager` source to `/tmp/em-deps` — dependencies are resolved from the uv venv (`sys.executable`).
+
+### Deploying flows and creating concurrency limits
+
+Run once after first setup or when `prefect.yaml` changes:
+
+```bash
+cd email-analyser
+PREFECT_API_URL=http://<prefect-server-ip>:4200/api uv run --extra scheduler prefect deploy --all
+```
+
+Then create the required **global** concurrency limits (Prefect v2 API — not the legacy tag-based limits):
+
+```python
+# Run with: uv run --extra scheduler python3
+from prefect.client.orchestration import get_client
+from prefect.client.schemas.actions import GlobalConcurrencyLimitCreate
+import asyncio
+
+async def setup():
+    async with get_client() as c:
+        await c.create_global_concurrency_limit(GlobalConcurrencyLimitCreate(name="memory-heavy", limit=1, active=True))
+        await c.create_global_concurrency_limit(GlobalConcurrencyLimitCreate(name="ai-llm", limit=3, active=True))
+
+asyncio.run(setup())
+```
+
+### Common setup gotchas
+
+| Problem | Fix |
+|---|---|
+| `psycopg2` not found | Run `uv sync --extra postgres` from `email-analyser/` directory (not the project root) |
+| Web server `DDL warning: column "doc_tsv" does not exist` | Expected on first run — the server adds TSVECTOR columns automatically via `ALTER TABLE` |
+| `PREFECT_API_URL` points to wrong IP | Check the Prefect server IP (`prokura resources describe prefect`) and update all `.env` files |
+| `ConcurrencySlotAcquisitionError: Concurrency limits ['memory-heavy'] must be created before acquiring slots` | Create global (v2) concurrency limits — see the Python snippet above (the `prefect concurrency-limit create` CLI creates the old v1 tag-based limits which don't work here) |
+| Worker can't download code (403/400 from GitHub) | The Docker worker's transparent proxy injects invalid GitHub App credentials. Run the worker locally in the dev container instead (see above) |

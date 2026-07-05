@@ -117,6 +117,7 @@ if (db.backend === 'postgres') {
       created_at      TEXT NOT NULL,
       updated_at      TEXT NOT NULL
   )`);
+  db.exec(`ALTER TABLE thread_search_docs ADD COLUMN IF NOT EXISTS doc_tsv TSVECTOR`);
   db.exec(`ALTER TABLE thread_search_docs ADD COLUMN IF NOT EXISTS doc_tsv_simple TSVECTOR`);
   db.exec(`ALTER TABLE thread_search_docs ADD COLUMN IF NOT EXISTS outreach_score DOUBLE PRECISION DEFAULT 0`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tsd_tsv ON thread_search_docs USING GIN(doc_tsv)`);
@@ -145,6 +146,9 @@ if (db.backend === 'postgres') {
       created_at      TEXT NOT NULL,
       updated_at      TEXT NOT NULL
   )`);
+  db.exec(`ALTER TABLE discussion_search_docs ADD COLUMN IF NOT EXISTS doc_tsv TSVECTOR`);
+  db.exec(`ALTER TABLE discussion_search_docs ADD COLUMN IF NOT EXISTS doc_tsv_simple TSVECTOR`);
+  db.exec(`ALTER TABLE discussion_search_docs ADD COLUMN IF NOT EXISTS current_state TEXT`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dsd_tsv ON discussion_search_docs USING GIN(doc_tsv)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dsd_tsv_simple ON discussion_search_docs USING GIN(doc_tsv_simple)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dsd_company ON discussion_search_docs(company_domain)`);
