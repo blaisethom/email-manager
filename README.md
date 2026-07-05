@@ -1,12 +1,14 @@
 # Email Manager
 
-A personal email data pipeline that syncs your emails into a local SQLite database, uses AI to extract business events, track discussions with milestones and workflow states, label company relationships, build contact memories, and provides an interactive chat agent and web dashboard for exploring your email data.
+A personal email data pipeline that syncs your emails into a local database, uses AI to extract business events, track discussions with milestones and workflow states, label company relationships, build contact memories, and provides an interactive chat agent and web dashboard for exploring your email data.
 
 All data stays local. You choose the AI backend.
 
 ## Quick Start
 
 ```bash
+cd email-analyser
+
 # Install
 uv sync
 
@@ -14,53 +16,52 @@ uv sync
 cp accounts.json.example accounts.json
 # Edit accounts.json with your email accounts
 
-# Configure AI
+# Configure environment
 cp .env.example .env
-# Edit .env with your AI backend settings
+# Edit .env — at minimum set AI_BACKEND and the matching API key
 
 # Sync emails
-email-manager sync
+email-analyser sync
 
 # Run base analysis (no AI needed)
-email-manager analyse --stage extract_base
+email-analyser analyse --stage extract_base
 
 # Run AI analysis
-email-manager analyse
+email-analyser analyse
 
 # Generate contact memories
-email-manager memory --all --limit 10
+email-analyser memory --all --limit 10
 
 # Explore interactively
-email-manager chat
+email-analyser chat
 ```
 
 ## Architecture
 
 ```
 ┌──────────────────┐     ┌──────────────┐     ┌──────────────────────────┐
-│  Email Accounts  │     │   SQLite     │     │  AI Backend              │
-│  Gmail / IMAP    │────>│   Database   │<───>│  (Claude/CLI/Ollama)     │
-│  Calendar        │     │              │     └──────────────────────────┘
-└──────────────────┘     │  emails      │              │
-                         │  event_ledger│     ┌────────┴─────────────────┐
-                         │  discussions │     │  Pipeline Stages         │
-                         │  milestones  │     │  1. Sync Calendar        │
-                         │  contacts    │     │  2. Extract Base (no AI) │
-                         │  companies   │     │  3. Fetch Homepages      │
-                         │  contact_    │     │  4. Label Companies      │
-                         │    memories  │     │  5. Extract Events       │
-                         │              │     │  6. Discover Discussions  │
-                         └──────────────┘     │  7. Analyse Discussions  │
-                               │              │  8. Contact Memory       │
-                    ┌──────────┴──────────┐   └──────────────────────────┘
-                    │  CLI / Web UI       │
-                    │  Chat Agent         │
-                    └─────────────────────┘
+│  Email Accounts  │     │   Database   │     │  AI Backend              │
+│  Gmail / IMAP    │────>│  SQLite or   │<───>│  (Claude API / CLI /     │
+│  Calendar        │     │  PostgreSQL  │     │   Ollama)                │
+└──────────────────┘     └──────┬───────┘     └──────────────────────────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │                       │
+          ┌─────────┴──────┐    ┌───────────┴──────────┐
+          │  CLI            │    │  Web Dashboard        │
+          │  email-analyser │    │  React + Express      │
+          │  chat agent     │    │  port 5173 / 3001     │
+          └────────────────┘    └──────────────────────┘
+                    │
+          ┌─────────┴──────────────────────┐
+          │  Prefect Scheduled Pipeline     │
+          │  ingest → enrich → label → AI  │
+          └────────────────────────────────┘
 ```
 
 ### Data Flow
 
-1. **Sync** — Emails are fetched from all configured accounts (Gmail API, IMAP) and stored in SQLite. Calendar events are also synced. Incremental sync means only new data is fetched on subsequent runs.
+1. **Sync** — Emails are fetched from all configured accounts (Gmail API, IMAP) and stored in the database. Calendar events are also synced. Incremental sync means only new data is fetched on subsequent runs.
 2. **Extract Base** — Contacts, companies, and co-email statistics are extracted from email headers. No AI needed.
 3. **Fetch Homepages** — Company homepage content is downloaded and converted to markdown for use by later stages. No AI needed.
 4. **Label Companies** — AI classifies each company's relationship to you (investor, customer, vendor, partner, etc.).
@@ -108,7 +109,7 @@ Uses the Gmail API with OAuth2. Supports incremental sync via Gmail's `historyId
 2. Create a project, enable the Gmail API
 3. Create OAuth 2.0 credentials (Desktop application type)
 4. Download the JSON file to `data/gmail_credentials.json`
-5. Run `email-manager sync` — a browser window will open for OAuth consent on first run. The token is saved locally for future use.
+5. Run `email-analyser sync` — a browser window will open for OAuth consent on first run. The token is saved locally for future use.
 
 ### IMAP
 
@@ -152,6 +153,107 @@ AI_BACKEND=ollama
 OLLAMA_MODEL=llama3.1:8b
 OLLAMA_URL=http://localhost:11434
 ```
+
+## Database
+
+Supports SQLite (default) and PostgreSQL. Both the CLI and web server read the same database.
+
+### SQLite (default)
+
+No setup required. The database is created at `data/email_manager.db` on first run.
+
+```bash
+# email-analyser/.env
+DB_BACKEND=sqlite
+DB_PATH=../data/email_manager.db   # relative to email-analyser/
+```
+
+### PostgreSQL
+
+Set these in `email-analyser/.env`:
+
+```bash
+DB_BACKEND=postgres
+DB_URL=postgresql://user:password@host:5432/email_manager
+```
+
+And in `web/.env`:
+
+```bash
+DB_BACKEND=postgres
+DB_URL=postgresql://user:password@host:5432/email_manager
+```
+
+The Python CLI runs migrations automatically on first connect. Make sure the database exists before running (`createdb email_manager`).
+
+### Key Tables
+
+| Table | Description |
+|---|---|
+| `emails` | Raw email data — message ID, headers, body, folder, timestamps. Immutable after insert. |
+| `sync_state` | Per-folder sync cursor (UIDVALIDITY + last UID for IMAP, historyId for Gmail). |
+| `contacts` | Aggregated contact info — name, company, email counts, first/last seen. |
+| `companies` | Companies extracted from email domains, with email counts and homepage fetch status. |
+| `company_labels` | AI-assigned relationship labels (investor, customer, vendor, etc.) with confidence and reasoning. |
+| `event_ledger` | Append-only business events extracted from emails — type, domain, actor, date, detail, confidence. |
+| `discussions` | Business discussions with category, workflow state, summary, participants. |
+| `milestones` | Per-discussion milestone achievements with dates, evidence event IDs, and confidence. |
+| `discussion_threads` | Maps discussions to email threads (many-to-many). |
+| `discussion_state_history` | State transition history for discussions. |
+| `calendar_events` | Synced Google Calendar events. |
+| `contact_memories` | AI-generated memory profiles — relationship, discussions, key facts. |
+| `feedback` | User corrections to events, milestones, and discussion classifications. |
+| `threads` | Thread groupings computed from References/In-Reply-To headers. |
+| `pipeline_runs` | Tracks which emails have been processed by which pipeline stage. |
+
+### Email Threading
+
+Threads are computed using a union-find algorithm:
+
+1. Emails linked via `References` and `In-Reply-To` headers are grouped together.
+2. Fallback: emails with the same normalised subject (stripped of Re:/Fwd: prefixes) within a 90-day window are grouped.
+
+## Web Dashboard
+
+A React + TypeScript frontend with an Express API server for browsing companies, contacts, discussions, actions, and calendar data.
+
+### Setup
+
+```bash
+cd web
+npm install
+cp .env.example .env   # or create web/.env manually
+```
+
+Minimum `web/.env` for SQLite:
+
+```bash
+DB_PATH=../data/email_manager.db   # path to the SQLite file, relative to web/
+```
+
+For PostgreSQL:
+
+```bash
+DB_BACKEND=postgres
+DB_URL=postgresql://user:password@host:5432/email_manager
+```
+
+To enable pipeline triggering from the UI (requires Prefect — see below):
+
+```bash
+PREFECT_API_URL=http://localhost:4200
+```
+
+### Running
+
+```bash
+cd web
+npm run dev
+```
+
+This starts both servers concurrently:
+- **Frontend** (Vite) — `http://localhost:5173`
+- **API server** (Express) — `http://localhost:3001`
 
 ## Pipeline
 
@@ -206,6 +308,52 @@ Categories and their event types, milestones, and workflow states are defined in
 | `--label` / `-l` | Scope to all companies with this label (e.g. `investor`) |
 | `--limit` / `-n` | Only process the N most recent items |
 
+## Scheduled Pipeline (Prefect)
+
+For continuous operation, the pipeline runs on a schedule via [Prefect](https://prefect.io). The Prefect server handles orchestration; a worker process executes the flows.
+
+### Infrastructure
+
+```
+docker compose -f email-analyser/docker-compose.prefect.yml up -d
+```
+
+This starts:
+- **Prefect server** — orchestration backend + UI at `http://localhost:4200`
+- **PostgreSQL** — Prefect metadata database
+- **Prefect worker** — pulls the latest code from GitHub and executes flows (image built automatically via CI)
+
+The worker image is built and pushed to GHCR on every push to `main` that modifies `Dockerfile.worker`. Pull the latest image before starting:
+
+```bash
+docker compose -f email-analyser/docker-compose.prefect.yml pull prefect-worker
+docker compose -f email-analyser/docker-compose.prefect.yml up -d
+```
+
+### Deploying flows
+
+Register all flow deployments with the Prefect server (run once, or after changing schedules in `prefect.yaml`):
+
+```bash
+cd email-analyser
+prefect deploy --all
+```
+
+### Default schedule
+
+| Flow | Schedule | What it does |
+|---|---|---|
+| `ingest` | every 20 min | Sync emails, calendar, HubSpot |
+| `enrich` | every 30 min | Build threads, labels, search index |
+| `label` | :15 and :45 | AI company labelling |
+| `ai-extract-events` | every 20 min | Extract events from new threads |
+| `ai-discover-discussions` | :03, :23, :43 | Cluster events into discussions |
+| `ai-analyse-discussions` | :07, :27, :47 | Evaluate milestones + summaries |
+| `ai-propose-actions` | :12, :32, :52 | Propose next actions |
+| `ai-contact-memory` | every 2 h | Build contact memories |
+
+Flows can also be triggered manually from the Prefect UI or from the web dashboard (set `PREFECT_API_URL` in `web/.env`).
+
 ## Contact Memory System
 
 The memory system generates AI-powered profiles for each contact, including:
@@ -230,11 +378,11 @@ Two independent abstractions:
 ### Usage
 
 ```bash
-email-manager memory                              # list all existing memories
-email-manager memory alice@example.com            # show or generate for one contact
-email-manager memory alice@example.com --force    # regenerate
-email-manager memory --all --limit 20             # top 20 contacts by email count
-email-manager memory --strategy detailed          # use detailed strategy
+email-analyser memory                              # list all existing memories
+email-analyser memory alice@example.com            # show or generate for one contact
+email-analyser memory alice@example.com --force    # regenerate
+email-analyser memory --all --limit 20             # top 20 contacts by email count
+email-analyser memory --strategy detailed          # use detailed strategy
 ```
 
 Memories are incremental — they detect when a contact's emails have changed and only regenerate when needed.
@@ -248,8 +396,8 @@ The `label_companies` stage classifies each company's relationship to you (custo
 1. **Run prerequisite stages** — company labelling works best when homepages have been fetched:
 
 ```bash
-email-manager analyse --stage extract_base
-email-manager analyse --stage fetch_homepages
+email-analyser analyse --stage extract_base
+email-analyser analyse --stage fetch_homepages
 ```
 
 2. **Configure labels** (optional) — copy the example config and customise:
@@ -279,8 +427,8 @@ The config is loaded from the first file found at: `company_labels.yaml`, `compa
 3. **Run the stage:**
 
 ```bash
-email-manager analyse --stage label_companies
-email-manager analyse --stage label_companies -n 50  # label top 50 companies by email count
+email-analyser analyse --stage label_companies
+email-analyser analyse --stage label_companies -n 50  # label top 50 companies by email count
 ```
 
 ### How it works
@@ -295,39 +443,8 @@ It assigns 1-3 labels with confidence scores and reasoning. Labels are stored in
 ### Viewing labels
 
 ```bash
-email-manager companies                         # shows companies with their labels
+email-analyser companies                         # shows companies with their labels
 ```
-
-## Database
-
-SQLite with WAL mode and 30-second busy timeout. Stored at `data/email_manager.db`.
-
-### Key Tables
-
-| Table | Description |
-|---|---|
-| `emails` | Raw email data — message ID, headers, body, folder, timestamps. Immutable after insert. |
-| `sync_state` | Per-folder sync cursor (UIDVALIDITY + last UID for IMAP, historyId for Gmail). |
-| `contacts` | Aggregated contact info — name, company, email counts, first/last seen. |
-| `companies` | Companies extracted from email domains, with email counts and homepage fetch status. |
-| `company_labels` | AI-assigned relationship labels (investor, customer, vendor, etc.) with confidence and reasoning. |
-| `event_ledger` | Append-only business events extracted from emails — type, domain, actor, date, detail, confidence. |
-| `discussions` | Business discussions with category, workflow state, summary, participants. |
-| `milestones` | Per-discussion milestone achievements with dates, evidence event IDs, and confidence. |
-| `discussion_threads` | Maps discussions to email threads (many-to-many). |
-| `discussion_state_history` | State transition history for discussions. |
-| `calendar_events` | Synced Google Calendar events. |
-| `contact_memories` | AI-generated memory profiles — relationship, discussions, key facts. |
-| `feedback` | User corrections to events, milestones, and discussion classifications. |
-| `threads` | Thread groupings computed from References/In-Reply-To headers. |
-| `pipeline_runs` | Tracks which emails have been processed by which pipeline stage. |
-
-### Email Threading
-
-Threads are computed using a union-find algorithm:
-
-1. Emails linked via `References` and `In-Reply-To` headers are grouped together.
-2. Fallback: emails with the same normalised subject (stripped of Re:/Fwd: prefixes) within a 90-day window are grouped.
 
 ## CLI Commands
 
@@ -361,7 +478,7 @@ email-analyser chat                              Interactive AI agent
 
 ## Interactive Chat Agent
 
-`email-manager chat` starts a conversational session where you can:
+`email-analyser chat` starts a conversational session where you can:
 
 - **Query your data** — "Show me all emails from Sarah in the last month", "What are my biggest projects?"
 - **Refine project structure** — "Merge 'Q4 Planning' and 'Q4 Budget Review' into one project", "Rename project X to Y"
@@ -379,6 +496,7 @@ email-analyser/src/email_manager/
 ├── cli.py                          CLI entrypoint (Click)
 ├── config.py                       Settings, multi-account config (Pydantic)
 ├── db.py                           SQLite schema, migrations, helpers
+├── db_postgres.py                  PostgreSQL schema, migrations, helpers
 ├── models.py                       Data models (Email, Contact, Thread)
 ├── ingestion/
 │   ├── imap_client.py              IMAP sync with Yahoo resilience
@@ -418,17 +536,31 @@ email-analyser/src/email_manager/
     ├── tools.py                    Agent tool definitions and handlers
     └── context.py                  Conversation memory management
 
+email-analyser/
+├── prefect.yaml                    Prefect deployment config (schedules, work pool)
+├── docker-compose.prefect.yml      Prefect server + worker infrastructure
+├── Dockerfile.worker               Prefect worker image (built via CI, pushed to GHCR)
+├── scripts/
+│   ├── worker-entrypoint.sh        Worker container startup (pool + deploy + start)
+│   └── worker_bootstrap.py         Per-run dependency installer (vendored wheels)
+└── vendor/                         Vendored Python wheels for offline worker installs
+
 web/
 ├── src/                            React + TypeScript frontend
 │   ├── pages/                      Companies, Contacts, Discussions, Actions, Calendar
 │   └── components/                 Badge, Pagination, SearchBar, Markdown, etc.
-├── server/                         Express API server (SQLite → JSON)
-└── discussion_categories.yaml      Category config (event types, milestones, states)
+└── server/                         Express API server (database → JSON)
+    ├── db.ts                       SQLite / PostgreSQL abstraction
+    ├── prefect.ts                  Prefect API client (optional pipeline triggering)
+    ├── jobs.ts                     Background job tracking
+    └── entities.ts                 Companies and contacts query layer
 ```
 
 ## Development
 
 ```bash
+cd email-analyser
+
 # Install with dev dependencies
 uv sync --group dev
 
