@@ -154,7 +154,7 @@ def label_flow(batch_size: int = 10, random_sample: bool = True) -> dict:
 _DEFAULT_ANALYSIS_LABELS = ["investor", "cro", "pharma", "clinic"]
 
 
-@flow(name="email-manager-ai", log_prints=True, timeout_seconds=1200)
+@flow(name="email-manager-ai", log_prints=True, timeout_seconds=1800)
 def ai_flow(
     event_budget: int = 100,
     solo_threshold: int = 50,
@@ -347,7 +347,7 @@ def _run_stage_flow(
     return succeeded, failed
 
 
-@flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=1200)
+@flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=1800)
 def extract_events_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 150_000,
@@ -393,7 +393,7 @@ def extract_events_flow(
     return summary
 
 
-@flow(name="email-manager-discover-discussions", log_prints=True, timeout_seconds=1200)
+@flow(name="email-manager-discover-discussions", log_prints=True, timeout_seconds=1800)
 def discover_discussions_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 150_000,
@@ -417,7 +417,7 @@ def discover_discussions_flow(
     return summary
 
 
-@flow(name="email-manager-analyse-discussions", log_prints=True, timeout_seconds=1200)
+@flow(name="email-manager-analyse-discussions", log_prints=True, timeout_seconds=1800)
 def analyse_discussions_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 250_000,
@@ -441,7 +441,7 @@ def analyse_discussions_flow(
     return summary
 
 
-@flow(name="email-manager-propose-actions", log_prints=True, timeout_seconds=1200)
+@flow(name="email-manager-propose-actions", log_prints=True, timeout_seconds=1800)
 def propose_actions_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 250_000,
@@ -465,7 +465,7 @@ def propose_actions_flow(
     return summary
 
 
-@flow(name="email-manager-contact-memory", log_prints=True, timeout_seconds=1200)
+@flow(name="email-manager-contact-memory", log_prints=True, timeout_seconds=1800)
 def contact_memory_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 150_000,

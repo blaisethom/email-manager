@@ -10,7 +10,7 @@ from email_manager.ai.base import TokenTracker, TokenUsage
 
 logger = logging.getLogger(__name__)
 
-_RETRY_DELAYS = [30, 60, 120, 180, 240]  # seconds between retries on 429
+_RETRY_DELAYS = [5, 15, 30, 60]  # seconds between retries on 429
 
 
 def _prefect_log_warning(msg: str) -> None:
