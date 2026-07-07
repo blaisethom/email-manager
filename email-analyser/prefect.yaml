@@ -16,21 +16,15 @@ push: null
 
 pull:
   # Worker clones fresh code from GitHub on each run.
-  # HTTPS_PROXY routes through the Prokura sidecar (127.0.0.1:8080) which injects
-  # GitHub credentials. The sidecar only accepts CONNECT from localhost — job_variables
-  # below set HTTPS_PROXY so the pull step uses the sidecar directly rather than
-  # relying on any container-level transparent proxy.
+  # git clone uses github.com (whitelisted) via the Prokura sidecar (HTTPS_PROXY=127.0.0.1:8080).
   # mktemp -d gives a unique clone dir per run so concurrent runs don't race.
   - prefect.deployments.steps.run_shell_script:
       id: clone_and_bootstrap
       stream_output: true
       shell: true
-      # Download archive from codeload.github.com via the Prokura sidecar (127.0.0.1:8080).
-      # The sidecar injects GITHUB_TOKEN with a real credential. Deps are in the venv
-      # (sys.executable), so we just copy the email_manager source to /tmp/em-deps.
-      # worker_bootstrap.py is skipped here because it installs vendored x86_64 wheels
-      # which break on ARM64; the local venv already has all deps for this platform.
-      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); HTTPS_PROXY=http://127.0.0.1:8080 curl -fsSL -H 'Authorization: Bearer GITHUB_TOKEN' https://codeload.github.com/blaisethom/email-manager/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C \"$CLONE_DIR\" && mkdir -p /tmp/em-deps && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"email_manager source copied to /tmp/em-deps\"; exit $STATUS"
+      # Shallow clone from github.com — Prokura sidecar handles auth via HTTPS_PROXY.
+      # Deps are in the venv; we just copy the email_manager source to /tmp/em-deps.
+      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && mkdir -p /tmp/em-deps && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"email_manager source copied to /tmp/em-deps\"; exit $STATUS"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
