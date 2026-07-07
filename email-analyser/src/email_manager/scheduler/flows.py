@@ -583,7 +583,9 @@ def maintenance_flow(max_age_seconds: int = 5400) -> dict:
         },
     }) or []
 
-    # Stale PENDING: created long ago, never got a start_time
+    # Stale PENDING: worker started a process (infrastructure_pid set) but
+    # the process died before reporting RUNNING. Distinguish from legitimate
+    # "AwaitingConcurrencySlot" flows which are PENDING with no infrastructure_pid.
     old_pending = _post("/flow_runs/filter", {
         "limit": 200,
         "flow_runs": {
@@ -592,7 +594,9 @@ def maintenance_flow(max_age_seconds: int = 5400) -> dict:
     }) or []
     stale_pending = [
         r for r in old_pending
-        if isinstance(r, dict) and not r.get("start_time")
+        if isinstance(r, dict)
+        and r.get("infrastructure_pid")          # worker actually started a process
+        and not r.get("start_time")              # but it never transitioned to RUNNING
         and r.get("created")
         and (now - datetime.fromisoformat(r["created"].replace("Z", "+00:00"))).total_seconds() > 900
     ]
