@@ -806,6 +806,26 @@ def _clean_discussions(
     return len(disc_ids)
 
 
+def _write_empty_discover_run(
+    conn: sqlite3.Connection, company_domain: str, backend: LLMBackend | None
+) -> None:
+    """Write a no-op processing_run so downstream stages know discover_discussions ran."""
+    from datetime import datetime, timezone
+    import json as _json
+    from email_manager.analysis.feedback import compute_prompt_hash
+    now_ts = datetime.now(timezone.utc).isoformat()
+    model = backend.model_name if backend is not None else "none"
+    p_hash = compute_prompt_hash(DISCOVER_SYSTEM)
+    empty = _json.dumps({"new_discussions": [], "event_assignments": [], "thread_links": []})
+    conn.execute(
+        """INSERT INTO processing_runs
+           (company_domain, mode, model, started_at, completed_at, proposed_changes_json, prompt_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (company_domain, "staged:discover_discussions", model, now_ts, now_ts, empty, p_hash),
+    )
+    conn.commit()
+
+
 def discover_discussions(
     conn: sqlite3.Connection,
     backend: LLMBackend,
@@ -851,6 +871,10 @@ def discover_discussions(
         company_label=company_label, force=force,
     )
     if not companies:
+        if company_domain:
+            # Write an empty run record so downstream stages (analyse_discussions etc.)
+            # know discover_discussions executed for this company, even with no events.
+            _write_empty_discover_run(conn, company_domain, backend)
         logger.info("No companies with unassigned events")
         return 0
 
@@ -864,6 +888,7 @@ def discover_discussions(
         DISCOVER_BATCH_SIZE = 30
         all_events = _get_events_for_company(conn, company["domain"], max_events=200)
         if not all_events:
+            _write_empty_discover_run(conn, company["domain"], backend)
             continue
 
         # Process in batches to avoid CLI timeout on large event sets
