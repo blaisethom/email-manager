@@ -24,7 +24,7 @@ pull:
       shell: true
       # Shallow clone from github.com — Prokura sidecar handles auth via HTTPS_PROXY.
       # Deps are in the venv; we just copy the email_manager source to /tmp/em-deps.
-      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && mkdir -p /tmp/em-deps && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/ && HTTPS_PROXY='' HTTP_PROXY='' https_proxy='' http_proxy='' uv pip install -q --python /opt/prefect/bin/python3 \"$CLONE_DIR/email-analyser[postgres,scheduler]\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"email_manager source copied to /tmp/em-deps\"; exit $STATUS"
+      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && mkdir -p /tmp/em-deps /tmp/em-packages && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/ && HTTPS_PROXY='' HTTP_PROXY='' https_proxy='' http_proxy='' uv pip install -q --target /tmp/em-packages \"$CLONE_DIR/email-analyser[postgres,scheduler]\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"packages installed to /tmp/em-packages\"; exit $STATUS"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
@@ -36,7 +36,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -54,7 +54,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -72,7 +72,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -106,7 +106,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -130,7 +130,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -154,7 +154,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -178,7 +178,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -202,7 +202,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -226,7 +226,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -249,7 +249,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -267,7 +267,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages:/opt/prefect/lib/python3.11/site-packages
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -283,7 +283,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps
+          PYTHONPATH: /tmp/em-deps:/tmp/em-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
