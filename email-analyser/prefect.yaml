@@ -24,7 +24,7 @@ pull:
       shell: true
       # Shallow clone from github.com — Prokura sidecar handles auth via HTTPS_PROXY.
       # Deps are in the venv; we just copy the email_manager source to /tmp/em-deps.
-      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && mkdir -p /tmp/em-deps && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"email_manager source copied to /tmp/em-deps\"; exit $STATUS"
+      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && mkdir -p /tmp/em-deps && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/ && HTTPS_PROXY='' HTTP_PROXY='' uv pip install -q --python /opt/prefect/bin/python3 \"$CLONE_DIR/email-analyser[postgres,scheduler]\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"email_manager source copied to /tmp/em-deps\"; exit $STATUS"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
