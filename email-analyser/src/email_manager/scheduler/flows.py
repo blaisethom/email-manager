@@ -518,17 +518,17 @@ def company_flow(domain: str, stages: list[str] | None = None, force: bool = Fal
 
 @flow(name="email-manager-maintenance", log_prints=True, timeout_seconds=120)
 def maintenance_flow(max_age_seconds: int = 5400) -> dict:
-    """Crash any flow runs that have been RUNNING for longer than max_age_seconds.
+    """Crash zombie RUNNING flows and release their stuck concurrency slots.
 
     Process workers don't detect orphaned child processes when the worker restarts,
     leaving flows stuck in RUNNING state indefinitely. This blocks deployment
     concurrency limits (concurrency_limit=1) so subsequent scheduled runs can't start.
+    Crashing flows via set_state alone is insufficient — deployment and global
+    concurrency leases (memory-heavy, ai-llm) aren't automatically released on crash,
+    so we reset them explicitly.
 
     Runs every 30 minutes. Default max_age_seconds=5400 (90 min) covers the
     longest legitimate flow (enrich, timeout=3600) plus a generous margin.
-
-    Set up with:
-        prefect deploy --name maintenance
     """
     import urllib.request
     import json
@@ -538,7 +538,7 @@ def maintenance_flow(max_age_seconds: int = 5400) -> dict:
     log = get_run_logger()
     api_url = os.environ.get("PREFECT_API_URL", "http://prefect-server:4200/api")
 
-    def _api(path: str, body: dict) -> list:
+    def _post(path: str, body: dict):
         req = urllib.request.Request(
             f"{api_url}{path}",
             data=json.dumps(body).encode(),
@@ -546,55 +546,95 @@ def maintenance_flow(max_age_seconds: int = 5400) -> dict:
             method="POST",
         )
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+            raw = resp.read()
+            return json.loads(raw) if raw else None
 
-    def _set_state(flow_run_id: str, state_type: str, message: str) -> None:
+    def _patch(path: str, body: dict) -> None:
         req = urllib.request.Request(
-            f"{api_url}/flow_runs/{flow_run_id}/set_state",
-            data=json.dumps({
-                "state": {"type": state_type, "name": state_type.capitalize(), "message": message},
-                "force": True,
-            }).encode(),
+            f"{api_url}{path}",
+            data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
-            method="POST",
+            method="PATCH",
         )
         urllib.request.urlopen(req)
 
+    def _set_state(flow_run_id: str, message: str) -> None:
+        _post(f"/flow_runs/{flow_run_id}/set_state", {
+            "state": {"type": "CRASHED", "name": "Crashed", "message": message},
+            "force": True,
+        })
+
+    # ── 1. Crash zombie flow runs ──────────────────────────────────────────────
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
     cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
 
-    running = _api("/flow_runs/filter", {
+    old_runs = _post("/flow_runs/filter", {
         "limit": 200,
         "flow_runs": {
             "state": {"type": {"any_": ["RUNNING", "PENDING"]}},
             "start_time": {"before_": cutoff_iso},
         },
-    })
+    }) or []
 
     crashed = 0
     skipped = 0
-    for run in running:
-        # Skip our own flow run
-        if run.get("name") == "maintenance_flow":
-            skipped += 1
+    crashed_dep_ids: set = set()
+    for run in old_runs:
+        if not isinstance(run, dict):
             continue
         age_sec = (datetime.now(timezone.utc) - datetime.fromisoformat(run["start_time"].replace("Z", "+00:00"))).total_seconds()
-        log.warning(
-            "Crashing zombie flow run %s (age=%.0fs, state=%s)",
-            run["id"], age_sec, run.get("state_type"),
-        )
+        log.warning("Crashing zombie %s (age=%.0fs)", run["id"], age_sec)
         try:
-            _set_state(run["id"], "CRASHED", f"Crashed by maintenance_flow: running for {age_sec:.0f}s > max {max_age_seconds}s")
+            _set_state(run["id"], f"Crashed by maintenance_flow: running {age_sec:.0f}s > max {max_age_seconds}s")
             crashed += 1
+            if run.get("deployment_id"):
+                crashed_dep_ids.add(run["deployment_id"])
         except Exception as exc:
             log.warning("Failed to crash %s: %s", run["id"], exc)
             skipped += 1
 
-    result = {"crashed": crashed, "skipped": skipped, "cutoff_age_seconds": max_age_seconds}
-    if crashed:
-        log.info("Maintenance complete — crashed %d zombie flows: %s", crashed, result)
-    else:
-        log.info("Maintenance complete — no zombies found: %s", result)
+    # ── 2. Release stuck concurrency slots ────────────────────────────────────
+    # After crashing, leases (deployment slots, memory-heavy, ai-llm) aren't
+    # auto-released. Find all slots where active > 0 and no flow is still running.
+    slots_reset = 0
+    try:
+        still_running = _post("/flow_runs/filter", {
+            "limit": 200,
+            "flow_runs": {"state": {"type": {"any_": ["RUNNING", "PENDING"]}}},
+        }) or []
+        running_dep_ids = {r["deployment_id"] for r in still_running if isinstance(r, dict) and r.get("deployment_id")}
+        running_state_types = {r.get("state_type") for r in still_running if isinstance(r, dict)}
+
+        all_limits = _post("/v2/concurrency_limits/filter", {"limit": 200}) or []
+        for lim in all_limits:
+            if not isinstance(lim, dict) or lim.get("active_slots", 0) == 0:
+                continue
+            name = lim["name"]
+            should_reset = False
+            if name.startswith("deployment:"):
+                dep_id = name.split(":", 1)[1]
+                # Reset if no running flow holds this deployment slot
+                should_reset = dep_id not in running_dep_ids
+            elif name in ("memory-heavy", "ai-llm"):
+                # Reset if no RUNNING stage flows exist (PENDING are pre-slot)
+                should_reset = "RUNNING" not in running_state_types
+            if should_reset:
+                log.warning("Resetting stuck concurrency slot: %s (active=%d)", name, lim["active_slots"])
+                try:
+                    _patch(f"/v2/concurrency_limits/{lim['id']}", {"active_slots": 0})
+                    slots_reset += 1
+                except Exception as exc:
+                    log.warning("Failed to reset slot %s: %s", name, exc)
+    except Exception as exc:
+        log.warning("Slot cleanup failed: %s", exc)
+
+    result = {
+        "crashed": crashed,
+        "skipped": skipped,
+        "slots_reset": slots_reset,
+        "cutoff_age_seconds": max_age_seconds,
+    }
+    log.info("Maintenance complete: %s", result)
     return result
 
 
