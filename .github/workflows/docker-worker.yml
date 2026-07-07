@@ -6,6 +6,7 @@ on:
     paths:
       - email-analyser/Dockerfile.worker
       - email-analyser/mitm-ca.crt
+      - email-analyser/pyproject.toml
 
 jobs:
   build-and-push:

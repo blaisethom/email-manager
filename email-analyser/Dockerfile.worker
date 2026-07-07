@@ -11,4 +11,13 @@ RUN update-ca-certificates
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
+# Install email-manager dependencies so flow processes can import them.
+# Source code is cloned fresh per run (PYTHONPATH=/tmp/em-deps) — this just
+# pre-bakes the deps so flows don't need to install packages at runtime.
+COPY pyproject.toml /tmp/build/pyproject.toml
+RUN mkdir -p /tmp/build/src/email_manager \
+    && touch /tmp/build/src/email_manager/__init__.py \
+    && pip install --no-cache-dir "/tmp/build[postgres,scheduler]" \
+    && rm -rf /tmp/build
+
 CMD ["prefect", "worker", "start", "--pool", "default-process"]
