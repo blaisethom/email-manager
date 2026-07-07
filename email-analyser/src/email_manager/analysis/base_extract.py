@@ -90,11 +90,11 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
         GROUP BY from_address
     """)
 
-    # Extract contacts from to_addresses and cc_addresses (stored as JSON arrays)
+    # Extract contacts from to_addresses and cc_addresses (stored as JSON arrays).
+    # Stream rows to avoid loading 212k rows into RAM at once.
     console.print("  [dim]Extracting contacts from to/cc addresses...[/dim]")
-    rows = fetchall(conn, "SELECT id, to_addresses, cc_addresses, date FROM emails")
     batch_rows = []
-    for row in rows:
+    for row in conn.execute("SELECT id, to_addresses, cc_addresses, date FROM emails"):
         for field in ("to_addresses", "cc_addresses"):
             raw = row[field]
             if not raw:
@@ -129,7 +129,8 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
             received_count = (SELECT COUNT(*) FROM emails WHERE from_address = contacts.email)
     """)
 
-    # Count sent/received and track dates in a single pass (avoids N*M LIKE scans)
+    # Count sent/received and track dates in a single pass (avoids N*M LIKE scans).
+    # Stream rows to avoid loading all emails into RAM.
     sent_counts: dict[str, int] = {}
     recv_counts: dict[str, int] = {}
     first_dates: dict[str, str] = {}
@@ -141,11 +142,9 @@ def _extract_contacts(conn: sqlite3.Connection, console: Console = None) -> int:
         if addr not in last_dates or date > last_dates[addr]:
             last_dates[addr] = date
 
-    email_rows = fetchall(conn, "SELECT from_address, to_addresses, cc_addresses, date FROM emails")
-
     with _make_progress(console) as progress:
-        task = progress.add_task("Counting sent/received", total=len(email_rows))
-        for row in email_rows:
+        task = progress.add_task("Counting sent/received", total=None)
+        for row in conn.execute("SELECT from_address, to_addresses, cc_addresses, date FROM emails"):
             addr = row["from_address"]
             date = row["date"]
             recv_counts[addr] = recv_counts.get(addr, 0) + 1
@@ -281,27 +280,37 @@ def _extract_companies(
 
 
 def _compute_co_email_stats(conn: sqlite3.Connection, console: Console = None) -> int:
-    """Compute co-emailing stats for every pair of addresses that appear on the same email."""
+    """Compute co-emailing stats for pairs of addresses that appear on the same email.
 
-    rows = fetchall(
+    Incremental: only processes emails with id > last processed id, then upserts
+    new pair counts into co_email_stats. This avoids loading all 212k emails and
+    rebuilding the entire O(n²) pairs table on every enrich cycle.
+    """
+    if console is None:
+        console = Console()
+
+    last_row = fetchone(
         conn,
-        "SELECT id, from_address, to_addresses, cc_addresses, date FROM emails",
+        "SELECT completed_at FROM pipeline_runs WHERE stage = 'co_email_stats_max_id' LIMIT 1",
     )
+    last_max_id = int(last_row["completed_at"]) if last_row and last_row["completed_at"] else 0
 
-    if not rows:
+    max_id_row = fetchone(conn, "SELECT MAX(id) as max_id FROM emails")
+    current_max = max_id_row["max_id"] if max_id_row else None
+    if current_max is None or current_max <= last_max_id:
+        if console:
+            console.print("  [dim]No new emails for co-email stats — skipping.[/dim]")
         return 0
 
-    # Clear and rebuild — this is fast enough for 10-100k emails
-    conn.execute("DELETE FROM co_email_stats")
-
-    # Accumulate pairs in memory then bulk insert
+    sql = """SELECT id, from_address, to_addresses, cc_addresses, date
+             FROM emails WHERE id > ? ORDER BY id"""
+    # Accumulate pairs for NEW emails only, then upsert
     pair_stats: dict[tuple[str, str], list] = {}  # (a, b) -> [count, first_date, last_date]
 
     with _make_progress(console) as progress:
-        task = progress.add_task("Computing co-email stats", total=len(rows))
+        task = progress.add_task("Computing co-email stats (new only)", total=None)
 
-        for row in rows:
-            # Collect all participants on this email
+        for row in conn.execute(sql, (last_max_id,)):
             participants = set()
             participants.add(row["from_address"].lower())
 
@@ -318,13 +327,12 @@ def _compute_co_email_stats(conn: sqlite3.Connection, console: Console = None) -
                     if addr and "@" in addr:
                         participants.add(addr)
 
-            # Generate all unique pairs (sorted so a < b, avoids duplicates)
-            participants = sorted(participants)
+            participants_sorted = sorted(participants)
             date = row["date"]
 
-            for i in range(len(participants)):
-                for j in range(i + 1, len(participants)):
-                    pair = (participants[i], participants[j])
+            for i in range(len(participants_sorted)):
+                for j in range(i + 1, len(participants_sorted)):
+                    pair = (participants_sorted[i], participants_sorted[j])
                     if pair not in pair_stats:
                         pair_stats[pair] = [0, date, date]
                     stats = pair_stats[pair]
@@ -336,23 +344,41 @@ def _compute_co_email_stats(conn: sqlite3.Connection, console: Console = None) -
 
             progress.advance(task)
 
-    # Bulk insert
+    if not pair_stats:
+        return 0
+
+    # Upsert — add counts for new emails without touching existing pairs
     with _make_progress(console) as progress:
         total_pairs = len(pair_stats)
-        task = progress.add_task("Writing co-email pairs", total=total_pairs)
+        task = progress.add_task("Upserting co-email pairs", total=total_pairs)
         inserted = 0
 
         for (email_a, email_b), (count, first_date, last_date) in pair_stats.items():
             conn.execute(
                 """INSERT INTO co_email_stats (email_a, email_b, co_email_count, first_co_email, last_co_email)
-                VALUES (?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (email_a, email_b) DO UPDATE SET
+                    co_email_count = co_email_stats.co_email_count + excluded.co_email_count,
+                    first_co_email = MIN(co_email_stats.first_co_email, excluded.first_co_email),
+                    last_co_email = MAX(co_email_stats.last_co_email, excluded.last_co_email)""",
                 (email_a, email_b, count, first_date, last_date),
             )
             inserted += 1
             if inserted % 1000 == 0:
+                conn.commit()
                 progress.update(task, completed=inserted)
 
         progress.update(task, completed=inserted)
+
+    conn.commit()
+
+    # Record the high-water mark so next run is incremental
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO pipeline_runs (stage, email_id, status, started_at, completed_at) VALUES ('co_email_stats_max_id', NULL, 'success', ?, ?)",
+        (now, str(current_max)),
+    )
+    conn.commit()
 
     return total_pairs
 

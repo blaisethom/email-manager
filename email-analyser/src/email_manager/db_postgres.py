@@ -245,6 +245,17 @@ class PostgresCursor:
         cols = [d[0] for d in self._cursor.description]
         return [PostgresRow(dict(zip(cols, row))) for row in rows]
 
+    def __iter__(self):
+        if not self._cursor.description:
+            return
+        cols = [d[0] for d in self._cursor.description]
+        while True:
+            batch = self._cursor.fetchmany(1000)
+            if not batch:
+                break
+            for row in batch:
+                yield PostgresRow(dict(zip(cols, row)))
+
 
 def _is_dead_connection(e: Exception) -> bool:
     msg = str(e).lower()
