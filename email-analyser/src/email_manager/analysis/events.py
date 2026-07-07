@@ -1121,9 +1121,10 @@ def extract_events_propose(
     if on_progress:
         on_progress(len(thread_ids), len(thread_ids))
 
-    if not all_events:
-        return None
-
+    # Return {"events": []} rather than None when threads were processed but
+    # no events found. This ensures apply_changes writes a processing_runs record
+    # with the current email_cutoff_date, preventing the company from being
+    # re-selected on every run.
     return {"events": all_events}
 
 
