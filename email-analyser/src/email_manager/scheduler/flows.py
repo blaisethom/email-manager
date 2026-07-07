@@ -565,16 +565,39 @@ def maintenance_flow(max_age_seconds: int = 5400) -> dict:
         })
 
     # ── 1. Crash zombie flow runs ──────────────────────────────────────────────
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    # Zombies come in two forms:
+    # a) RUNNING flows past max_age_seconds (process died after entering RUNNING)
+    # b) PENDING/Submitting flows created >15 min ago but never started (process
+    #    died during clone/startup before reporting RUNNING)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=max_age_seconds)
     cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+    pending_cutoff = now - timedelta(seconds=900)  # 15 min for stuck PENDING
+    pending_cutoff_iso = pending_cutoff.isoformat().replace("+00:00", "Z")
 
-    old_runs = _post("/flow_runs/filter", {
+    old_running = _post("/flow_runs/filter", {
         "limit": 200,
         "flow_runs": {
-            "state": {"type": {"any_": ["RUNNING", "PENDING"]}},
+            "state": {"type": {"any_": ["RUNNING"]}},
             "start_time": {"before_": cutoff_iso},
         },
     }) or []
+
+    # Stale PENDING: created long ago, never got a start_time
+    old_pending = _post("/flow_runs/filter", {
+        "limit": 200,
+        "flow_runs": {
+            "state": {"type": {"any_": ["PENDING"]}},
+        },
+    }) or []
+    stale_pending = [
+        r for r in old_pending
+        if isinstance(r, dict) and not r.get("start_time")
+        and r.get("created")
+        and (now - datetime.fromisoformat(r["created"].replace("Z", "+00:00"))).total_seconds() > 900
+    ]
+
+    old_runs = [r for r in old_running if isinstance(r, dict)] + stale_pending
 
     crashed = 0
     skipped = 0
@@ -582,10 +605,11 @@ def maintenance_flow(max_age_seconds: int = 5400) -> dict:
     for run in old_runs:
         if not isinstance(run, dict):
             continue
-        age_sec = (datetime.now(timezone.utc) - datetime.fromisoformat(run["start_time"].replace("Z", "+00:00"))).total_seconds()
-        log.warning("Crashing zombie %s (age=%.0fs)", run["id"], age_sec)
+        st = run.get("start_time") or run.get("created", "")
+        age_sec = (now - datetime.fromisoformat(st.replace("Z", "+00:00"))).total_seconds() if st else 0
+        log.warning("Crashing zombie %s (age=%.0fs state=%s)", run["id"], age_sec, run.get("state_type"))
         try:
-            _set_state(run["id"], f"Crashed by maintenance_flow: running {age_sec:.0f}s > max {max_age_seconds}s")
+            _set_state(run["id"], f"Crashed by maintenance_flow: age {age_sec:.0f}s, state={run.get('state_type')}")
             crashed += 1
             if run.get("deployment_id"):
                 crashed_dep_ids.add(run["deployment_id"])
