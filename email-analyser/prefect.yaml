@@ -15,19 +15,22 @@ build: null
 push: null
 
 pull:
-  # Stock Prefect worker clones fresh code from GitHub on each run.
-  # Public repo — no credentials needed.
+  # Worker clones fresh code from GitHub on each run.
+  # HTTPS_PROXY routes through the Prokura sidecar (127.0.0.1:8080) which injects
+  # GitHub credentials. The sidecar only accepts CONNECT from localhost — job_variables
+  # below set HTTPS_PROXY so the pull step uses the sidecar directly rather than
+  # relying on any container-level transparent proxy.
   # mktemp -d gives a unique clone dir per run so concurrent runs don't race.
-  # Both clone and bootstrap run in one shell so CLONE_DIR stays consistent.
   - prefect.deployments.steps.run_shell_script:
       id: clone_and_bootstrap
       stream_output: true
       shell: true
-      # Single line: shell: true runs each line in a separate sh -c, so variables
-      # set in one line are gone by the next. Chain with && to keep CLONE_DIR in scope.
-      # Post-cleanup removes the clone dir after bootstrap copies everything into /tmp/em-deps.
-      # Each run only removes its own unique dir (safe for concurrent runs).
-      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth 1 --branch main https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && python3 \"$CLONE_DIR/email-analyser/scripts/worker_bootstrap.py\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; exit $STATUS"
+      # Download archive from codeload.github.com via the Prokura sidecar (127.0.0.1:8080).
+      # The sidecar injects GITHUB_TOKEN with a real credential. Deps are in the venv
+      # (sys.executable), so we just copy the email_manager source to /tmp/em-deps.
+      # worker_bootstrap.py is skipped here because it installs vendored x86_64 wheels
+      # which break on ARM64; the local venv already has all deps for this platform.
+      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); HTTPS_PROXY=http://127.0.0.1:8080 curl -fsSL -H 'Authorization: Bearer GITHUB_TOKEN' https://codeload.github.com/blaisethom/email-manager/tar.gz/refs/heads/main | tar -xz --strip-components=1 -C \"$CLONE_DIR\" && mkdir -p /tmp/em-deps && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"email_manager source copied to /tmp/em-deps\"; exit $STATUS"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
@@ -39,7 +42,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "*/20 * * * *"
         timezone: "UTC"
@@ -54,7 +60,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -69,7 +78,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "15,45 * * * *"   # :15 and :45, offset 15 min after enrich (:00 and :30)
         timezone: "UTC"
@@ -100,7 +112,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "*/20 * * * *"
         timezone: "UTC"
@@ -121,7 +136,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "3,23,43 * * * *"
         timezone: "UTC"
@@ -142,7 +160,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "7,27,47 * * * *"
         timezone: "UTC"
@@ -163,7 +184,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "12,32,52 * * * *"
         timezone: "UTC"
@@ -184,7 +208,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "17 */2 * * *"
         timezone: "UTC"
@@ -205,7 +232,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules: []   # No schedule — trigger manually for backfills
     parameters:
       event_budget: 100
@@ -225,7 +255,10 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
@@ -256,5 +289,8 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps
+          HTTPS_PROXY: "http://127.0.0.1:8080"
+          HTTP_PROXY: "http://127.0.0.1:8080"
+          NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules: []   # No schedule — trigger manually
