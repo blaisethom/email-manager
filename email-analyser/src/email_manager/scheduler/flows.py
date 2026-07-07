@@ -87,7 +87,7 @@ def ingest_flow() -> dict:
 # ── Enrich flow ──────────────────────────────────────────────────────────────
 
 
-@flow(name="email-manager-enrich", log_prints=True)
+@flow(name="email-manager-enrich", log_prints=True, timeout_seconds=3600)
 def enrich_flow() -> dict:
     """Parse emails, fetch non-AI enrichment data, and rebuild the search index.
 
@@ -510,6 +510,91 @@ def company_flow(domain: str, stages: list[str] | None = None, force: bool = Fal
     log.info("Running company AI flow for %s (stages=%s force=%s clean=%s)", domain, stages or "all", force, clean)
     result = process_company_ai(domain, stages=stages or None, force=force, clean=clean)
     log.info("Company AI flow complete for %s: %s", domain, result)
+    return result
+
+
+# ── Maintenance: crash zombie RUNNING flows ───────────────────────────────────
+
+
+@flow(name="email-manager-maintenance", log_prints=True, timeout_seconds=120)
+def maintenance_flow(max_age_seconds: int = 5400) -> dict:
+    """Crash any flow runs that have been RUNNING for longer than max_age_seconds.
+
+    Process workers don't detect orphaned child processes when the worker restarts,
+    leaving flows stuck in RUNNING state indefinitely. This blocks deployment
+    concurrency limits (concurrency_limit=1) so subsequent scheduled runs can't start.
+
+    Runs every 30 minutes. Default max_age_seconds=5400 (90 min) covers the
+    longest legitimate flow (enrich, timeout=3600) plus a generous margin.
+
+    Set up with:
+        prefect deploy --name maintenance
+    """
+    import urllib.request
+    import json
+    import os
+    from datetime import datetime, timezone, timedelta
+
+    log = get_run_logger()
+    api_url = os.environ.get("PREFECT_API_URL", "http://prefect-server:4200/api")
+
+    def _api(path: str, body: dict) -> list:
+        req = urllib.request.Request(
+            f"{api_url}{path}",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+
+    def _set_state(flow_run_id: str, state_type: str, message: str) -> None:
+        req = urllib.request.Request(
+            f"{api_url}/flow_runs/{flow_run_id}/set_state",
+            data=json.dumps({
+                "state": {"type": state_type, "name": state_type.capitalize(), "message": message},
+                "force": True,
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+
+    running = _api("/flow_runs/filter", {
+        "limit": 200,
+        "flow_runs": {
+            "state": {"type": {"any_": ["RUNNING", "PENDING"]}},
+            "start_time": {"before_": cutoff_iso},
+        },
+    })
+
+    crashed = 0
+    skipped = 0
+    for run in running:
+        # Skip our own flow run
+        if run.get("name") == "maintenance_flow":
+            skipped += 1
+            continue
+        age_sec = (datetime.now(timezone.utc) - datetime.fromisoformat(run["start_time"].replace("Z", "+00:00"))).total_seconds()
+        log.warning(
+            "Crashing zombie flow run %s (age=%.0fs, state=%s)",
+            run["id"], age_sec, run.get("state_type"),
+        )
+        try:
+            _set_state(run["id"], "CRASHED", f"Crashed by maintenance_flow: running for {age_sec:.0f}s > max {max_age_seconds}s")
+            crashed += 1
+        except Exception as exc:
+            log.warning("Failed to crash %s: %s", run["id"], exc)
+            skipped += 1
+
+    result = {"crashed": crashed, "skipped": skipped, "cutoff_age_seconds": max_age_seconds}
+    if crashed:
+        log.info("Maintenance complete — crashed %d zombie flows: %s", crashed, result)
+    else:
+        log.info("Maintenance complete — no zombies found: %s", result)
     return result
 
 

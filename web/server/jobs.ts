@@ -307,6 +307,8 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
       if (config.stages?.length) parameters.stages = config.stages;
       if (config.force) parameters.force = true;
       if (config.clean) parameters.clean = true;
+      // Global ai-analysis runs: pass label as label_filter list
+      if (!config.company && config.label) parameters.label_filter = [config.label];
 
       const flowRun = await triggerDeployment(deployment.id, parameters);
       console.log(`[jobs] Dispatched to Prefect: deployment=${deploymentName} flow_run=${flowRun.id}`);
@@ -544,7 +546,7 @@ async function processQueue(): Promise<void> {
   if (activeJob) return; // already running one
 
   const next = await db.queryOne<PipelineJob>(
-    "SELECT * FROM pipeline_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+    "SELECT * FROM pipeline_jobs WHERE status = 'queued' AND prefect_flow_run_id IS NULL ORDER BY created_at ASC LIMIT 1"
   );
 
   if (next) {

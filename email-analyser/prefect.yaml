@@ -49,6 +49,7 @@ deployments:
   - name: enrich
     entrypoint: email_manager.scheduler.flows:enrich_flow
     description: "Extract threads, enrich company data, rebuild search index"
+    concurrency_limit: 1
     work_pool:
       name: default-process
       job_variables:
@@ -229,6 +230,23 @@ deployments:
     parameters:
       domain: ""
       stages: null
+
+  # ── Maintenance: crash zombie RUNNING flows ──────────────────────────────────
+  - name: maintenance
+    entrypoint: email_manager.scheduler.flows:maintenance_flow
+    description: "Crash zombie RUNNING flows that have exceeded max_age_seconds (default 90 min)"
+    concurrency_limit: 1
+    work_pool:
+      name: default-process
+      job_variables:
+        env:
+          PYTHONPATH: /tmp/em-deps:/opt/prefect/lib/python3.11/site-packages
+    schedules:
+      - cron: "*/30 * * * *"
+        timezone: "UTC"
+        active: true
+    parameters:
+      max_age_seconds: 5400
 
   # ── Full run: one-shot bootstrap / manual refresh ───────────────────────────
   - name: full-run
