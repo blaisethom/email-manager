@@ -275,13 +275,26 @@ function scheduleStaleRefresh(): void {
 
 // ── Job creation ──────────��────────────────────────────────────────────────
 
+// Stage → per-stage deployment name for global (non-company) runs.
+const STAGE_DEPLOYMENTS: Record<string, string> = {
+  extract_events: 'ai-extract-events',
+  discover_discussions: 'ai-discover-discussions',
+  analyse_discussions: 'ai-analyse-discussions',
+  propose_actions: 'ai-propose-actions',
+};
+
 // Maps local job configs to Prefect deployment names.
 // Returns null if the job should run locally.
 function resolvePrefectDeployment(config: JobConfig): string | null {
   if (!prefectEnabled()) return null;
   if (config.job_type === 'sync') return 'ingest';
   if (config.job_type === 'analyse') {
-    return config.company ? 'company-ai' : 'ai-analysis';
+    if (config.company) return 'company-ai';
+    // Single-stage global run → use the dedicated per-stage deployment.
+    // ai-analysis has enforce_parameter_schema=true and no 'stages' field,
+    // so passing stages to it causes an immediate validation crash.
+    if (config.stages?.length === 1) return STAGE_DEPLOYMENTS[config.stages[0]] ?? 'ai-analysis';
+    return 'ai-analysis';
   }
   return null;
 }
@@ -303,11 +316,13 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
 
     if (deployment) {
       const parameters: Record<string, unknown> = {};
+      const isPerStageDeployment = Object.values(STAGE_DEPLOYMENTS).includes(deploymentName);
       if (config.company) parameters.domain = config.company;
-      if (config.stages?.length) parameters.stages = config.stages;
+      // Per-stage deployments don't accept a 'stages' param — they are single-stage by design.
+      if (config.stages?.length && !isPerStageDeployment) parameters.stages = config.stages;
       if (config.force) parameters.force = true;
       if (config.clean) parameters.clean = true;
-      // Global ai-analysis runs: pass label as label_filter list
+      // Global runs: pass label as label_filter list
       if (!config.company && config.label) parameters.label_filter = [config.label];
 
       const flowRun = await triggerDeployment(deployment.id, parameters);

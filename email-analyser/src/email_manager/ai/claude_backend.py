@@ -26,21 +26,41 @@ def _prefect_log_warning(msg: str) -> None:
 
 def _rate_limit_detail(exc: anthropic.RateLimitError) -> str:
     """Extract the most useful detail from a RateLimitError for logging."""
+    parts: list[str] = []
     try:
-        body = exc.response.json() if hasattr(exc, "response") else {}
-        msg = body.get("error", {}).get("message", "") or str(exc)
-        hdrs = exc.response.headers if hasattr(exc, "response") else {}
+        # Try structured body first, then fall back to exc.message / str(exc)
+        body: dict = {}
+        if hasattr(exc, "body") and isinstance(exc.body, dict):
+            body = exc.body
+        elif hasattr(exc, "response") and exc.response is not None:
+            try:
+                body = exc.response.json()
+            except Exception:
+                pass
+        msg = (body.get("error", {}) or {}).get("message", "")
+        if not msg:
+            msg = getattr(exc, "message", None) or str(exc)
+        parts.append(msg)
+
+        hdrs = {}
+        if hasattr(exc, "response") and exc.response is not None:
+            hdrs = dict(exc.response.headers)
         reset = hdrs.get("x-ratelimit-reset-requests") or hdrs.get("x-ratelimit-reset-tokens") or ""
         limit_req = hdrs.get("x-ratelimit-limit-requests", "")
         limit_tok = hdrs.get("x-ratelimit-limit-tokens", "")
         remaining_req = hdrs.get("x-ratelimit-remaining-requests", "")
         remaining_tok = hdrs.get("x-ratelimit-remaining-tokens", "")
-        detail = f"{msg}"
         if limit_req or limit_tok:
-            detail += f" | limits: {limit_req}req/{limit_tok}tok remaining: {remaining_req}req/{remaining_tok}tok reset: {reset}"
-        return detail
-    except Exception:
-        return str(exc)
+            parts.append(f"limits={limit_req}req/{limit_tok}tok remaining={remaining_req}req/{remaining_tok}tok reset={reset}")
+        elif hdrs:
+            # Dump all x-ratelimit-* headers so we can see what the proxy sends
+            rl_hdrs = {k: v for k, v in hdrs.items() if "ratelimit" in k.lower()}
+            if rl_hdrs:
+                parts.append(str(rl_hdrs))
+    except Exception as inner:
+        parts.append(f"(detail extraction failed: {inner})")
+        parts.append(str(exc))
+    return " | ".join(parts)
 
 
 def _with_retry(fn):
