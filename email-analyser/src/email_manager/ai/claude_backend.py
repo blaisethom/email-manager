@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -11,6 +12,7 @@ from email_manager.ai.base import TokenTracker, TokenUsage
 logger = logging.getLogger(__name__)
 
 _RETRY_DELAYS = [5, 15, 30, 60]  # seconds between retries on 429
+_MIN_CALL_INTERVAL = 2.0  # minimum seconds between consecutive API calls
 
 
 def _prefect_log_warning(msg: str) -> None:
@@ -58,6 +60,8 @@ class ClaudeBackend:
         self._model = model
         self._tracker = TokenTracker()
         self._last_raw_response: str = ""
+        self._last_call_time: float = 0.0
+        self._async_lock = asyncio.Lock()
 
     @property
     def last_raw_response(self) -> str:
@@ -72,9 +76,27 @@ class ClaudeBackend:
     def token_tracker(self) -> TokenTracker:
         return self._tracker
 
+    # ── Throttle helpers ──────────────────────────────────────────────────
+
+    def _throttle(self) -> None:
+        """Sleep to maintain at least _MIN_CALL_INTERVAL between API calls."""
+        elapsed = time.monotonic() - self._last_call_time
+        if elapsed < _MIN_CALL_INTERVAL:
+            time.sleep(_MIN_CALL_INTERVAL - elapsed)
+        self._last_call_time = time.monotonic()
+
+    async def _athrottle(self) -> None:
+        """Async version: serialises calls and enforces _MIN_CALL_INTERVAL."""
+        async with self._async_lock:
+            elapsed = time.monotonic() - self._last_call_time
+            if elapsed < _MIN_CALL_INTERVAL:
+                await asyncio.sleep(_MIN_CALL_INTERVAL - elapsed)
+            self._last_call_time = time.monotonic()
+
     # ── Sync methods ──────────────────────────────────────────────────────
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        self._throttle()
         response = _with_retry(lambda: self._client.messages.create(
             model=self._model,
             max_tokens=4096,
@@ -89,6 +111,7 @@ class ClaudeBackend:
         return response.content[0].text
 
     def complete_json(self, system: str, user: str, temperature: float = 0.0) -> dict:
+        self._throttle()
         json_system = system + "\n\nYou MUST respond with valid JSON only. No other text."
         messages: list = [{"role": "user", "content": user}]
         if self._prefill:
@@ -123,6 +146,7 @@ class ClaudeBackend:
     # ── Async methods ─────────────────────────────────────────────────────
 
     async def acomplete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        await self._athrottle()
         response = await _with_retry_async(lambda: self._async_client.messages.create(
             model=self._model,
             max_tokens=4096,
@@ -137,6 +161,7 @@ class ClaudeBackend:
         return response.content[0].text
 
     async def acomplete_json(self, system: str, user: str, temperature: float = 0.0) -> dict:
+        await self._athrottle()
         json_system = system + "\n\nYou MUST respond with valid JSON only. No other text."
         messages: list = [{"role": "user", "content": user}]
         if self._prefill:
