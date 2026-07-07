@@ -574,7 +574,7 @@ def get_companies_for_stage(
 @task(
     name="process-company-ai",
     retries=1,
-    retry_delay_seconds=300,
+    retry_delay_seconds=60,
     task_run_name="{domain}",
 )
 def process_company_ai(

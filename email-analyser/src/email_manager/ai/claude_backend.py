@@ -88,19 +88,46 @@ async def _with_retry_async(fn):
 
 class ClaudeBackend:
     def __init__(self, api_key: str = "", auth_token: str = "", model: str = "claude-sonnet-4-6") -> None:
+        self._api_key = api_key
+        self._auth_token = auth_token
         if auth_token:
             self._client = anthropic.Anthropic(auth_token=auth_token, timeout=120.0, max_retries=0)
-            self._async_client = anthropic.AsyncAnthropic(auth_token=auth_token, timeout=120.0, max_retries=0)
             self._prefill = False  # OAuth route doesn't support assistant prefill
         else:
             self._client = anthropic.Anthropic(api_key=api_key, timeout=120.0, max_retries=0)
-            self._async_client = anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0, max_retries=0)
             self._prefill = True
+        self._async_client: anthropic.AsyncAnthropic | None = None  # created lazily
         self._model = model
         self._tracker = TokenTracker()
         self._last_raw_response: str = ""
         self._last_call_time: float = 0.0
         self._async_lock = asyncio.Lock()
+
+    def _get_async_client(self) -> anthropic.AsyncAnthropic:
+        if self._async_client is None:
+            if self._auth_token:
+                self._async_client = anthropic.AsyncAnthropic(auth_token=self._auth_token, timeout=120.0, max_retries=0)
+            else:
+                self._async_client = anthropic.AsyncAnthropic(api_key=self._api_key, timeout=120.0, max_retries=0)
+        return self._async_client
+
+    def close(self) -> None:
+        """Close underlying HTTP clients to release connections and memory."""
+        try:
+            self._client.close()
+        except Exception:
+            pass
+        if self._async_client is not None:
+            try:
+                import asyncio as _asyncio
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self._async_client.close())
+                else:
+                    loop.run_until_complete(self._async_client.close())
+            except Exception:
+                pass
+            self._async_client = None
 
     @property
     def last_raw_response(self) -> str:
@@ -186,7 +213,7 @@ class ClaudeBackend:
 
     async def acomplete(self, system: str, user: str, temperature: float = 0.3) -> str:
         await self._athrottle()
-        response = await _with_retry_async(lambda: self._async_client.messages.create(
+        response = await _with_retry_async(lambda: self._get_async_client().messages.create(
             model=self._model,
             max_tokens=4096,
             temperature=temperature,
@@ -205,7 +232,7 @@ class ClaudeBackend:
         messages: list = [{"role": "user", "content": user}]
         if self._prefill:
             messages.append({"role": "assistant", "content": "{"})
-        response = await _with_retry_async(lambda: self._async_client.messages.create(
+        response = await _with_retry_async(lambda: self._get_async_client().messages.create(
             model=self._model,
             max_tokens=4096,
             temperature=temperature,

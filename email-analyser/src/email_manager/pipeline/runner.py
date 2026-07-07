@@ -493,4 +493,9 @@ def run_pipeline(
 
     logger.info("Pipeline finished — results: %s", results)
     conn.close()
+    if backend is not None and hasattr(backend, "close"):
+        try:
+            backend.close()
+        except Exception:
+            pass
     return results
