@@ -61,6 +61,12 @@ services:
       HTTP_PROXY: "http://127.0.0.1:8080"
       HTTPS_PROXY: "http://127.0.0.1:8080"
       NO_PROXY: "localhost,127.0.0.1,prefect-server,prefect-db"
+      # Absolute paths to OAuth credential files mounted from the host data directory.
+      GMAIL_CREDENTIALS_PATH: /data/gmail_credentials.json
+      GMAIL_TOKEN_PATH: /data/gmail_token.json
+    volumes:
+      # Mount the host data directory so flows can read OAuth tokens and write DB.
+      - ../data:/data
     depends_on:
       prefect-server:
         condition: service_healthy
