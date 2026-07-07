@@ -59,8 +59,8 @@ services:
       # Route outbound HTTPS through Prokura in the dev container.
       # This is the dev container's IP on this Docker network.
       # Check with: ip addr show eth0 | grep "inet " — update if the container is restarted.
-      HTTP_PROXY: "http://172.21.1.15:8080"
-      HTTPS_PROXY: "http://172.21.1.15:8080"
+      HTTP_PROXY: "http://172.21.1.38:8080"
+      HTTPS_PROXY: "http://172.21.1.38:8080"
       NO_PROXY: "localhost,127.0.0.1,prefect-server,prefect-db"
     depends_on:
       prefect-server:
