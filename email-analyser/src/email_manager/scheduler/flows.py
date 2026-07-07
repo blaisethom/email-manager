@@ -347,7 +347,7 @@ def _run_stage_flow(
     return succeeded, failed
 
 
-@flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=1800)
+@flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=7200)
 def extract_events_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 150_000,
@@ -393,7 +393,7 @@ def extract_events_flow(
     return summary
 
 
-@flow(name="email-manager-discover-discussions", log_prints=True, timeout_seconds=1800)
+@flow(name="email-manager-discover-discussions", log_prints=True, timeout_seconds=7200)
 def discover_discussions_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 150_000,
@@ -417,7 +417,7 @@ def discover_discussions_flow(
     return summary
 
 
-@flow(name="email-manager-analyse-discussions", log_prints=True, timeout_seconds=1800)
+@flow(name="email-manager-analyse-discussions", log_prints=True, timeout_seconds=7200)
 def analyse_discussions_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 250_000,
@@ -441,7 +441,7 @@ def analyse_discussions_flow(
     return summary
 
 
-@flow(name="email-manager-propose-actions", log_prints=True, timeout_seconds=1800)
+@flow(name="email-manager-propose-actions", log_prints=True, timeout_seconds=7200)
 def propose_actions_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 250_000,
@@ -465,7 +465,7 @@ def propose_actions_flow(
     return summary
 
 
-@flow(name="email-manager-contact-memory", log_prints=True, timeout_seconds=1800)
+@flow(name="email-manager-contact-memory", log_prints=True, timeout_seconds=7200)
 def contact_memory_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 150_000,
@@ -517,7 +517,7 @@ def company_flow(domain: str, stages: list[str] | None = None, force: bool = Fal
 
 
 @flow(name="email-manager-maintenance", log_prints=True, timeout_seconds=120)
-def maintenance_flow(max_age_seconds: int = 5400) -> dict:
+def maintenance_flow(max_age_seconds: int = 10800) -> dict:
     """Crash zombie RUNNING flows and release their stuck concurrency slots.
 
     Process workers don't detect orphaned child processes when the worker restarts,
@@ -527,8 +527,8 @@ def maintenance_flow(max_age_seconds: int = 5400) -> dict:
     concurrency leases (memory-heavy, ai-llm) aren't automatically released on crash,
     so we reset them explicitly.
 
-    Runs every 30 minutes. Default max_age_seconds=5400 (90 min) covers the
-    longest legitimate flow (enrich, timeout=3600) plus a generous margin.
+    Runs every 30 minutes. Default max_age_seconds=10800 (3 hours) covers the
+    longest legitimate flow (AI stages, timeout=7200) plus a generous margin.
     """
     import urllib.request
     import json
