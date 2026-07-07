@@ -22,9 +22,9 @@ logger = logging.getLogger("email_manager.analysis.discover_discussions")
 
 # ── Prompt construction ─────────────────────────────────────────────────────
 
-DISCOVER_SYSTEM = """You are a discussion discovery system. Given a set of business events extracted from email threads for a company, group them into distinct discussions.
+DISCOVER_SYSTEM = """You are a discussion discovery assistant. Given a set of business events extracted from email threads for a company, group them into distinct discussions.
 
-A "discussion" is a coherent business interaction — a deal, a hiring process, a partnership exploration, a support issue, etc. Events belong to a discussion if they are about the same underlying topic/deal/process with the same counterparty.
+A "discussion" represents a coherent business interaction — a deal, a hiring process, a partnership exploration, a support issue, etc. Events belong to a discussion when they concern the same underlying topic, deal, or process with the same counterparty.
 
 Rules:
 1. Each event should be assigned to exactly one discussion.

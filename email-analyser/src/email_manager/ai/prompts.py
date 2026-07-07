@@ -96,7 +96,7 @@ Respond with this exact JSON structure:
 }}"""
 
 
-EXTRACT_EVENTS_SYSTEM = """You are a business event extraction system. Given an email thread (and optionally related calendar events), your job is to:
+EXTRACT_EVENTS_SYSTEM = """You are a business event extraction assistant. Given an email thread (and optionally related calendar events), your task is to:
 
 1. Classify the business domain(s) present in the thread (e.g. investment, pharma-deal, hiring).
 2. Extract discrete, factual business events from the emails using the domain-specific event vocabulary.
@@ -108,14 +108,14 @@ Rules:
 2. If a thread covers multiple domains (e.g. an investment discussion AND scheduling), extract events for all relevant domains.
 3. The "actor" is the person who performed the action (use their email address, or "me" for the account owner).
 4. The "target" is the person the action was directed at (optional).
-5. The "detail" should be a brief factual description of what specifically happened.
+5. The "detail" should be a concise factual description of what specifically happened.
 6. Assign a confidence score (0.0-1.0) based on how clearly the email evidences the event.
 7. Use the email date as the event_date unless the email references a different date for the event.
 8. If calendar events are provided, extract events from those too (e.g. meeting_held from a past calendar event).
-9. Do NOT infer events that aren't evidenced. If you're unsure, skip it or use low confidence.
+9. Do NOT infer events that are not clearly evidenced. If you're unsure, skip it or assign low confidence.
 10. Do NOT extract events from automated notifications, newsletters, or marketing emails unless they evidence a real business event.
 11. Avoid duplicate events: if email 1 says "I'm sending the deck" and email 3 says "thanks for the deck", that is ONE deck_shared event — extract it from the earliest email. Do NOT re-extract the same event from later emails that merely reference it.
-12. IMPORTANT: Examine EVERY email in the thread for new events. Replies often contain critical new events — a response to a pitch may be a "passed" or "interest_expressed" event; a reply accepting terms is a new event; a follow-up scheduling a meeting is a new event. These are DIFFERENT events from the original action, not duplicates. Each email's date should be the event_date for events it introduces.
+12. IMPORTANT: Examine EVERY email in the thread for new events. Replies often introduce critical new events — a response to a pitch may be a "passed" or "interest_expressed" event; a reply accepting terms is a new event; a follow-up scheduling a meeting is a new event. These are DIFFERENT events from the original action, not duplicates. Each email's date should be the event_date for events it introduces.
 13. Set source_email_index to the index of the email where the event FIRST appears or is FIRST evidenced.
 
 Respond with JSON only."""
@@ -151,7 +151,7 @@ Respond with this exact JSON structure:
 If no business events are found, return {{"domains": [], "events": []}}."""
 
 
-EXTRACT_EVENTS_BATCH_SYSTEM = """You are a business event extraction system. You will be given MULTIPLE short email threads at once. For each thread, your job is to:
+EXTRACT_EVENTS_BATCH_SYSTEM = """You are a business event extraction assistant. You will be given MULTIPLE short email threads at once. For each thread, your task is to:
 
 1. Classify the business domain(s) present (e.g. investment, pharma-deal, hiring).
 2. Extract discrete, factual business events using the domain-specific event vocabulary.
@@ -162,13 +162,13 @@ Rules:
 1. Each event must have a type from the provided vocabulary for its domain.
 2. The "actor" is the person who performed the action (use their email address, or "me" for the account owner).
 3. The "target" is the person the action was directed at (optional).
-4. The "detail" should be a brief factual description.
+4. The "detail" should be a concise factual description.
 5. Assign a confidence score (0.0-1.0) based on how clearly the email evidences the event.
 6. Use the email date as the event_date unless the email references a different date.
-7. Do NOT infer events that aren't evidenced.
+7. Do NOT infer events that are not clearly evidenced.
 8. Do NOT extract events from automated notifications, newsletters, or marketing emails unless they evidence a real business event.
 9. Avoid duplicate events within each thread.
-10. IMPORTANT: Examine EVERY email in each thread for events. Replies often contain critical new events.
+10. IMPORTANT: Examine EVERY email in each thread for events. Replies often introduce critical new events.
 11. Set source_email_index to the index of the email WITHIN THAT THREAD (starting from 0).
 
 Process each thread independently. Do NOT cross-reference events between threads.

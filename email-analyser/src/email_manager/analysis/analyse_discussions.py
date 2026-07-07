@@ -57,18 +57,18 @@ def _get_category_config(categories: list[dict], category_name: str) -> dict | N
 
 # ── Prompt construction ─────────────────────────────────────────────────────
 
-ANALYSE_SYSTEM = """You are a discussion analysis system. Given a discussion's event history, you must:
+ANALYSE_SYSTEM = """You are a discussion analysis assistant. Given a discussion's event history, your tasks are:
 
 1. Evaluate which milestones have been achieved based on the events.
 2. Infer the current workflow state from the milestone profile.
 3. Generate a concise narrative summary of the discussion's arc.
 
 Rules:
-1. A milestone is "achieved" only if the events clearly evidence it. Cite the event IDs.
-2. Assign a confidence score (0.0-1.0) for each milestone based on evidence strength.
+1. A milestone is "achieved" only if the events clearly evidence it. Cite the relevant event IDs.
+2. Assign a confidence score (0.0-1.0) for each milestone based on the strength of evidence.
 3. The workflow state should reflect where the discussion currently stands, not where it's been.
 4. The summary should be 2-4 sentences covering the arc from first contact to current status.
-5. If a discussion seems stalled (no recent activity), mention that in the summary.
+5. If a discussion appears stalled (no recent activity), mention that in the summary.
 6. Only use the "stale" state (where available) for discussions with NO activity in the last 3+ months AND no explicit terminal outcome (passed, signed, etc.). A few weeks of inactivity is normal — not stale.
 
 Respond with JSON only."""

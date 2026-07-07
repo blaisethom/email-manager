@@ -55,15 +55,15 @@ def _get_category_config(categories: list[dict], name: str) -> dict | None:
 
 # ── Prompt ──────────────────────────────────────────────────────────────────
 
-PROPOSE_SYSTEM = """You are a business advisor assistant. Given a discussion's current state, milestones, and recent event history, propose the most important next action the user should take.
+PROPOSE_SYSTEM = """You are a business advisor assistant. Given a discussion's current state, milestones, and recent event history, suggest the most important next action for the user to take.
 
 Rules:
 1. Be specific and actionable — "Send follow-up email to John at john@acme.com asking for NDA status" not "Follow up".
 2. If the right action is to wait (e.g. waiting for a response, waiting for a scheduled meeting), say so and specify a wait_until date (YYYY-MM-DD) after which to check in.
-3. Consider the time since the last activity — if it's been a while, a follow-up or check-in may be appropriate.
+3. Consider the time elapsed since the last activity — if it's been a while, a follow-up or check-in may be appropriate.
 4. The priority should be "high" (needs action this week), "medium" (needs action soon), or "low" (can wait).
 5. If you can identify who should do it (from the participants), set the assignee email.
-6. Provide brief reasoning (1-2 sentences) explaining why this is the right next step.
+6. Provide concise reasoning (1-2 sentences) explaining why this is the right next step.
 7. Propose 1-3 actions, ordered by priority. Most discussions need just 1.
 
 Respond with JSON only."""

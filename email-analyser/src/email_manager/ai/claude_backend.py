@@ -24,11 +24,15 @@ def _prefect_log_warning(msg: str) -> None:
         logger.warning(msg)
 
 
-def _rate_limit_detail(exc: anthropic.RateLimitError) -> str:
-    """Extract the most useful detail from a RateLimitError for logging."""
+def _api_error_detail(exc: anthropic.APIError) -> str:
+    """Extract a human-readable detail string from any Anthropic API error."""
     parts: list[str] = []
     try:
-        # Try structured body first, then fall back to exc.message / str(exc)
+        status = getattr(exc, "status_code", None)
+        if status:
+            parts.append(f"HTTP {status}")
+        parts.append(type(exc).__name__)
+
         body: dict = {}
         if hasattr(exc, "body") and isinstance(exc.body, dict):
             body = exc.body
@@ -40,23 +44,24 @@ def _rate_limit_detail(exc: anthropic.RateLimitError) -> str:
         msg = (body.get("error", {}) or {}).get("message", "")
         if not msg:
             msg = getattr(exc, "message", None) or str(exc)
-        parts.append(msg)
+        if msg:
+            parts.append(msg)
 
-        hdrs = {}
-        if hasattr(exc, "response") and exc.response is not None:
-            hdrs = dict(exc.response.headers)
-        reset = hdrs.get("x-ratelimit-reset-requests") or hdrs.get("x-ratelimit-reset-tokens") or ""
-        limit_req = hdrs.get("x-ratelimit-limit-requests", "")
-        limit_tok = hdrs.get("x-ratelimit-limit-tokens", "")
-        remaining_req = hdrs.get("x-ratelimit-remaining-requests", "")
-        remaining_tok = hdrs.get("x-ratelimit-remaining-tokens", "")
-        if limit_req or limit_tok:
-            parts.append(f"limits={limit_req}req/{limit_tok}tok remaining={remaining_req}req/{remaining_tok}tok reset={reset}")
-        elif hdrs:
-            # Dump all x-ratelimit-* headers so we can see what the proxy sends
-            rl_hdrs = {k: v for k, v in hdrs.items() if "ratelimit" in k.lower()}
-            if rl_hdrs:
-                parts.append(str(rl_hdrs))
+        if isinstance(exc, anthropic.RateLimitError):
+            hdrs = {}
+            if hasattr(exc, "response") and exc.response is not None:
+                hdrs = dict(exc.response.headers)
+            reset = hdrs.get("x-ratelimit-reset-requests") or hdrs.get("x-ratelimit-reset-tokens") or ""
+            limit_req = hdrs.get("x-ratelimit-limit-requests", "")
+            limit_tok = hdrs.get("x-ratelimit-limit-tokens", "")
+            remaining_req = hdrs.get("x-ratelimit-remaining-requests", "")
+            remaining_tok = hdrs.get("x-ratelimit-remaining-tokens", "")
+            if limit_req or limit_tok:
+                parts.append(f"limits={limit_req}req/{limit_tok}tok remaining={remaining_req}req/{remaining_tok}tok reset={reset}")
+            elif hdrs:
+                rl_hdrs = {k: v for k, v in hdrs.items() if "ratelimit" in k.lower()}
+                if rl_hdrs:
+                    parts.append(str(rl_hdrs))
     except Exception as inner:
         parts.append(f"(detail extraction failed: {inner})")
         parts.append(str(exc))
@@ -69,8 +74,11 @@ def _with_retry(fn):
         try:
             return fn()
         except anthropic.RateLimitError as e:
-            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)}): {_rate_limit_detail(e)}")
+            _prefect_log_warning(f"Rate limit hit (attempt {attempt}/{len(_RETRY_DELAYS)}), retrying in {delay}s: {_api_error_detail(e)}")
             time.sleep(delay)
+        except anthropic.APIError as e:
+            _prefect_log_warning(f"API error on attempt {attempt}/{len(_RETRY_DELAYS)}, not retrying: {_api_error_detail(e)}")
+            raise
     return fn()  # final attempt — let it raise
 
 
@@ -81,8 +89,11 @@ async def _with_retry_async(fn):
         try:
             return await fn()
         except anthropic.RateLimitError as e:
-            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)}): {_rate_limit_detail(e)}")
+            _prefect_log_warning(f"Rate limit hit (attempt {attempt}/{len(_RETRY_DELAYS)}), retrying in {delay}s: {_api_error_detail(e)}")
             await asyncio.sleep(delay)
+        except anthropic.APIError as e:
+            _prefect_log_warning(f"API error on attempt {attempt}/{len(_RETRY_DELAYS)}, not retrying: {_api_error_detail(e)}")
+            raise
     return await fn()
 
 
