@@ -24,13 +24,32 @@ def _prefect_log_warning(msg: str) -> None:
         logger.warning(msg)
 
 
+def _rate_limit_detail(exc: anthropic.RateLimitError) -> str:
+    """Extract the most useful detail from a RateLimitError for logging."""
+    try:
+        body = exc.response.json() if hasattr(exc, "response") else {}
+        msg = body.get("error", {}).get("message", "") or str(exc)
+        hdrs = exc.response.headers if hasattr(exc, "response") else {}
+        reset = hdrs.get("x-ratelimit-reset-requests") or hdrs.get("x-ratelimit-reset-tokens") or ""
+        limit_req = hdrs.get("x-ratelimit-limit-requests", "")
+        limit_tok = hdrs.get("x-ratelimit-limit-tokens", "")
+        remaining_req = hdrs.get("x-ratelimit-remaining-requests", "")
+        remaining_tok = hdrs.get("x-ratelimit-remaining-tokens", "")
+        detail = f"{msg}"
+        if limit_req or limit_tok:
+            detail += f" | limits: {limit_req}req/{limit_tok}tok remaining: {remaining_req}req/{remaining_tok}tok reset: {reset}"
+        return detail
+    except Exception:
+        return str(exc)
+
+
 def _with_retry(fn):
     """Call fn(), retrying up to len(_RETRY_DELAYS) times on RateLimitError."""
     for attempt, delay in enumerate(_RETRY_DELAYS, start=1):
         try:
             return fn()
-        except anthropic.RateLimitError:
-            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)})")
+        except anthropic.RateLimitError as e:
+            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)}): {_rate_limit_detail(e)}")
             time.sleep(delay)
     return fn()  # final attempt — let it raise
 
@@ -41,8 +60,8 @@ async def _with_retry_async(fn):
     for attempt, delay in enumerate(_RETRY_DELAYS, start=1):
         try:
             return await fn()
-        except anthropic.RateLimitError:
-            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)})")
+        except anthropic.RateLimitError as e:
+            _prefect_log_warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)}): {_rate_limit_detail(e)}")
             await asyncio.sleep(delay)
     return await fn()
 
