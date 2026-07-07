@@ -37,8 +37,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "*/20 * * * *"
@@ -55,8 +55,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "*/30 * * * *"
@@ -73,8 +73,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "15,45 * * * *"   # :15 and :45, offset 15 min after enrich (:00 and :30)
@@ -107,8 +107,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "*/20 * * * *"
@@ -131,8 +131,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "3,23,43 * * * *"
@@ -155,8 +155,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "7,27,47 * * * *"
@@ -179,8 +179,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "12,32,52 * * * *"
@@ -203,8 +203,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules:
       - cron: "17 */2 * * *"
@@ -227,8 +227,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules: []   # No schedule — trigger manually for backfills
     parameters:
@@ -250,8 +250,8 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules: []   # No schedule — triggered on demand
     parameters:
@@ -284,7 +284,7 @@ deployments:
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
-          HTTPS_PROXY: "http://127.0.0.1:8080"
-          HTTP_PROXY: "http://127.0.0.1:8080"
+          HTTPS_PROXY: "http://172.21.1.38:8080"
+          HTTP_PROXY: "http://172.21.1.38:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
     schedules: []   # No schedule — trigger manually
