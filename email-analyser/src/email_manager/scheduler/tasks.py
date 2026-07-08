@@ -254,7 +254,7 @@ def run_build_search_index(force: bool = False, skip_embeddings: bool = False) -
 
 
 def _filter_domains_by_label(conn, domains: list[str], label_filter: list[str]) -> list[str]:
-    """Filter a list of domains to only those whose top label is in label_filter."""
+    """Filter a list of domains to only those whose top label (>=50% confidence) is in label_filter."""
     if not domains or not label_filter:
         return domains
     placeholders_d = ",".join("?" for _ in domains)
@@ -267,6 +267,7 @@ def _filter_domains_by_label(conn, domains: list[str], label_filter: list[str]) 
                   SELECT LOWER(cl.label)
                   FROM company_labels cl
                   WHERE cl.company_id = c.id
+                    AND COALESCE(cl.confidence, 0) >= 0.5
                   ORDER BY COALESCE(cl.confidence, 0) DESC, cl.assigned_at DESC
                   LIMIT 1
               ) IN ({placeholders_l})""",
@@ -374,6 +375,7 @@ def seed_change_journal(label_filter: list[str]) -> int:
             f"""SELECT DISTINCT c.domain FROM companies c
                 JOIN company_labels cl ON cl.company_id = c.id
                 WHERE LOWER(cl.label) IN ({placeholders_l})
+                  AND COALESCE(cl.confidence, 0) >= 0.5
                   AND c.domain IS NOT NULL
                   AND NOT EXISTS (
                     SELECT 1 FROM change_journal cj
@@ -459,6 +461,7 @@ def get_companies_for_extract_events(
                 FROM companies c
                 JOIN company_labels cl ON cl.company_id = c.id
                 WHERE LOWER(cl.label) IN ({placeholders_l})
+                  AND COALESCE(cl.confidence, 0) >= 0.5
                   AND c.domain IS NOT NULL
                   AND (
                     c.staleness_status = 'stale'
@@ -531,6 +534,7 @@ def get_companies_for_stage(
                 FROM companies c
                 JOIN company_labels cl ON cl.company_id = c.id
                 WHERE LOWER(cl.label) IN ({placeholders_l})
+                  AND COALESCE(cl.confidence, 0) >= 0.5
                   AND c.domain IS NOT NULL
                   AND EXISTS (
                     SELECT 1 FROM processing_runs pr
