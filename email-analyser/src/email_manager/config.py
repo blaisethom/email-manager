@@ -93,11 +93,12 @@ class Config(BaseSettings):
     gmail_labels: list[str] = Field(default_factory=list)
 
     # AI
-    ai_backend: str = "claude"  # "claude", "claude-cli", or "ollama"
+    ai_backend: str = "claude"  # "claude", "claude-cli", "codex", or "ollama"
     anthropic_api_key: str = ""
     claude_code_oauth_token: str = ""  # OAuth token placeholder; set to CLAUDE_CODE_OAUTH_TOKEN, proxy fills the real value
     claude_model: str = ""
-    extract_events_model: str = ""  # model override for extract_events stage (e.g. claude-sonnet-4-6)
+    extract_events_model: str = ""  # model override for extract_events stage
+    codex_model: str = "gpt-5.4-mini"  # model for AI_BACKEND=codex (codex exec CLI)
     ollama_model: str = "llama3.1:8b"
     ollama_url: str = "http://localhost:11434"
     ai_batch_size: int = 10

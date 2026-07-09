@@ -233,6 +233,7 @@ def run_extract_events(conn: sqlite3.Connection, backend: LLMBackend, config: Co
             ai_backend=config.ai_backend,
             anthropic_api_key=config.anthropic_api_key,
             claude_model=extract_model,
+            codex_model=extract_model,
             ollama_model=config.ollama_model,
             ollama_url=config.ollama_url,
         )

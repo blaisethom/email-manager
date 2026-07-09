@@ -11,6 +11,13 @@ def _claude_cli_available() -> bool:
     return shutil.which("claude") is not None
 
 
+def _codex_cli_available() -> bool:
+    """Check whether the ``codex`` CLI is on PATH."""
+    import shutil
+
+    return shutil.which("codex") is not None
+
+
 def get_backend(config: Config) -> LLMBackend:
     if config.ai_backend == "claude":
         from email_manager.ai.claude_backend import ClaudeBackend
@@ -30,6 +37,12 @@ def get_backend(config: Config) -> LLMBackend:
         from email_manager.ai.claude_cli_backend import ClaudeCLIBackend
 
         return ClaudeCLIBackend(model=config.claude_model if config.claude_model else None)
+    elif config.ai_backend == "codex":
+        from email_manager.ai.codex_cli_backend import CodexCLIBackend
+
+        if not _codex_cli_available():
+            raise ValueError("codex CLI not found on PATH. Install it or set AI_BACKEND to something else.")
+        return CodexCLIBackend(model=config.codex_model)
     elif config.ai_backend == "ollama":
         from email_manager.ai.ollama_backend import OllamaBackend
 
