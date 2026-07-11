@@ -326,12 +326,13 @@ def _refresh_outreach_scores_sql(conn: sqlite3.Connection, console: Console) -> 
         outreach AS (
             SELECT LOWER(r.value) AS addr, COUNT(*) AS cnt
             FROM emails e
-            JOIN me_addrs m ON LOWER(e.from_address) = m.addr
             CROSS JOIN LATERAL json_array_elements_text(
                 CASE WHEN e.to_addresses IS NOT NULL AND LEFT(TRIM(e.to_addresses), 1) = '['
                      THEN e.to_addresses::json ELSE '[]'::json END
             ) r(value)
-            WHERE r.value <> ''
+            WHERE e.folder IN ({folder_list})
+              AND LOWER(e.from_address) IN (SELECT addr FROM me_addrs)
+              AND r.value <> ''
               AND LOWER(r.value) NOT IN (SELECT addr FROM me_addrs)
             GROUP BY LOWER(r.value)
         ),
@@ -345,7 +346,6 @@ def _refresh_outreach_scores_sql(conn: sqlite3.Connection, console: Console) -> 
             ) p(email)
             LEFT JOIN outreach o ON o.addr = LOWER(p.email)
             WHERE p.email <> ''
-              AND LOWER(p.email) NOT IN (SELECT addr FROM me_addrs)
             GROUP BY t.thread_id
         )
         UPDATE thread_search_docs tsd
