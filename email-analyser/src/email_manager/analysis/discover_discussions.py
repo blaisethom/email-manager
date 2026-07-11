@@ -1115,12 +1115,32 @@ def discover_discussions(
                     (resolved_parent, saved_ids[idx]),
                 )
 
-        # Complete the processing run
+        # Complete the processing run — flush token tracker
+        _total_input = _total_output = _total_calls = 0
+        from email_manager.ai.base import TokenTracker
+        _tracker = getattr(backend, "token_tracker", None)
+        if isinstance(_tracker, TokenTracker):
+            _calls = _tracker.snapshot()
+            _tracker.reset()
+            _total_input = sum(u.input_tokens for u in _calls)
+            _total_output = sum(u.output_tokens for u in _calls)
+            _total_calls = len(_calls)
+            now_llm = datetime.now(timezone.utc).isoformat()
+            for _u in _calls:
+                conn.execute(
+                    """INSERT INTO llm_calls (run_id, stage, model, input_tokens, output_tokens, duration_ms, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (snapshot_run_id, "staged:discover_discussions", backend.model_name,
+                     _u.input_tokens, _u.output_tokens, _u.duration_ms, now_llm),
+                )
         conn.execute(
-            """UPDATE processing_runs SET completed_at = ?, discussions_created = ?
+            """UPDATE processing_runs
+               SET completed_at = ?, discussions_created = ?,
+                   input_tokens = ?, output_tokens = ?, llm_calls = ?
                WHERE id = ?""",
-            (datetime.now(timezone.utc).isoformat(), len([d for d in discussions if not d.get("existing_id")]),
-             snapshot_run_id),
+            (datetime.now(timezone.utc).isoformat(),
+             len([d for d in discussions if not d.get("existing_id")]),
+             _total_input, _total_output, _total_calls, snapshot_run_id),
         )
 
         conn.commit()

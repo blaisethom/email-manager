@@ -15,16 +15,17 @@ build: null
 push: null
 
 pull:
-  # Worker clones fresh code from GitHub on each run.
-  # git clone uses github.com (whitelisted) via the Prokura sidecar (HTTPS_PROXY=127.0.0.1:8080).
-  # mktemp -d gives a unique clone dir per run so concurrent runs don't race.
+  # Worker copies code from the local workspace or falls back to GitHub clone.
+  # When running on the development machine, use local code directly (faster, no proxy needed).
+  # On remote workers, fall back to GitHub clone via the Prokura sidecar proxy.
+  #
+  # NOTE: run_shell_script executes each line as a separate subprocess, so the
+  # entire if/else/fi must be on a single line to share shell state.
   - prefect.deployments.steps.run_shell_script:
       id: clone_and_bootstrap
       stream_output: true
       shell: true
-      # Shallow clone from github.com — Prokura sidecar handles auth via HTTPS_PROXY.
-      # Deps are in the venv; we just copy the email_manager source to /tmp/em-deps.
-      script: "CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" && mkdir -p /tmp/em-deps && cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/ && (test -d /tmp/em-venv || uv venv /tmp/em-venv --python /opt/prefect/bin/python3) && HTTPS_PROXY='' HTTP_PROXY='' https_proxy='' http_proxy='' uv pip install --python /tmp/em-venv/bin/python \"$CLONE_DIR/email-analyser[postgres,scheduler]\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; echo \"venv ready at /tmp/em-venv\"; exit $STATUS"
+      script: "LOCAL_SRC=/home/node/workspace/email-manager/email-analyser; LOCAL_VENV=$LOCAL_SRC/.venv; mkdir -p /tmp/em-deps; if [ -d \"$LOCAL_SRC/src/email_manager\" ] && [ -d \"$LOCAL_VENV\" ]; then cp -r \"$LOCAL_SRC/src/email_manager\" /tmp/em-deps/; rm -rf /tmp/em-venv; ln -s \"$LOCAL_VENV\" /tmp/em-venv; cp -f \"$LOCAL_SRC/exclude-cos.txt\" /tmp/exclude-cos.txt 2>/dev/null; echo \"Using local workspace; /tmp/em-venv -> $LOCAL_VENV\"; else CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" || exit 1; cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/; test -d /tmp/em-venv || uv venv /tmp/em-venv --python /opt/prefect/bin/python3; HTTPS_PROXY='' HTTP_PROXY='' https_proxy='' http_proxy='' uv pip install --python /tmp/em-venv/bin/python \"$CLONE_DIR/email-analyser[postgres,scheduler]\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; exit $STATUS; fi"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
@@ -40,6 +41,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/20 * * * *"
         timezone: "UTC"
@@ -58,6 +63,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -76,6 +85,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "15,45 * * * *"   # :15 and :45, offset 15 min after enrich (:00 and :30)
         timezone: "UTC"
@@ -110,6 +123,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/20 * * * *"
         timezone: "UTC"
@@ -134,6 +151,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "3,23,43 * * * *"
         timezone: "UTC"
@@ -158,6 +179,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "7,27,47 * * * *"
         timezone: "UTC"
@@ -182,6 +207,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "12,32,52 * * * *"
         timezone: "UTC"
@@ -206,6 +235,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "17 */2 * * *"
         timezone: "UTC"
@@ -230,6 +263,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules: []   # No schedule — trigger manually for backfills
     parameters:
       event_budget: 100
@@ -253,6 +290,10 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
@@ -261,19 +302,23 @@ deployments:
   # ── Maintenance: crash zombie RUNNING flows ──────────────────────────────────
   - name: maintenance
     entrypoint: email_manager.scheduler.flows:maintenance_flow
-    description: "Crash zombie RUNNING flows that have exceeded max_age_seconds (default 90 min)"
+    description: "Crash zombie RUNNING flows that have exceeded max_age_seconds (default 7h)"
     concurrency_limit: 1
     work_pool:
       name: default-process
       job_variables:
         env:
           PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages:/opt/prefect/lib/python3.11/site-packages
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
         active: true
     parameters:
-      max_age_seconds: 5400
+      max_age_seconds: 25200
 
   # ── Full run: one-shot bootstrap / manual refresh ───────────────────────────
   - name: full-run
@@ -287,4 +332,8 @@ deployments:
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
+          AI_BACKEND: "codex"
+          CODEX_MODEL: "gpt-5.4-mini"
+          EXTRACT_EVENTS_MODEL: "gpt-5.5"
+          PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules: []   # No schedule — trigger manually

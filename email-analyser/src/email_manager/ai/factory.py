@@ -13,7 +13,15 @@ def _claude_cli_available() -> bool:
 
 def _codex_cli_available() -> bool:
     """Check whether the ``codex`` CLI is on PATH."""
+    import os
     import shutil
+
+    # Prefect's multiprocessing.spawn flow subprocesses don't inherit job_variables.env,
+    # so /usr/local/bin (where codex/node live) may be absent.  Fix it here, inside the
+    # function, so the same os.environ is used by all subsequent subprocess.Popen calls.
+    _local_bin = "/usr/local/bin"
+    if _local_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _local_bin + ":" + os.environ.get("PATH", "/usr/bin:/bin")
 
     return shutil.which("codex") is not None
 

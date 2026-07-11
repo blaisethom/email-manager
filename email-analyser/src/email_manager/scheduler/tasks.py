@@ -6,11 +6,22 @@ commits, and closes. Tasks never share connections across task boundaries.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from prefect import get_run_logger, task
 
 logger = logging.getLogger("email_manager.scheduler.tasks")
+
+_EXCLUDE_FILE = Path(__file__).parents[3] / "exclude-cos.txt"
+
+
+def _load_excluded_domains() -> list[str]:
+    """Read exclude-cos.txt and return lowercased domain list."""
+    if not _EXCLUDE_FILE.exists():
+        return []
+    lines = _EXCLUDE_FILE.read_text().splitlines()
+    return [l.strip().lower() for l in lines if l.strip() and not l.startswith("#")]
 
 
 def _cfg_and_conn():
@@ -447,7 +458,10 @@ def get_companies_for_extract_events(
     log = get_run_logger()
     _, conn = _cfg_and_conn()
     try:
+        excluded = _load_excluded_domains()
         placeholders_l = ",".join("?" for _ in label_filter)
+        placeholders_e = ",".join("?" for _ in excluded) if excluded else "NULL"
+        exclude_clause = f"AND LOWER(c.domain) NOT IN ({placeholders_e})" if excluded else ""
         # Fetch up to 50 candidates with their last-run token estimate
         rows = conn.execute(
             f"""SELECT DISTINCT c.domain,
@@ -463,6 +477,7 @@ def get_companies_for_extract_events(
                 WHERE LOWER(cl.label) IN ({placeholders_l})
                   AND COALESCE(cl.confidence, 0) >= 0.5
                   AND c.domain IS NOT NULL
+                  {exclude_clause}
                   AND (
                     c.staleness_status = 'stale'
                     OR NOT EXISTS (
@@ -486,7 +501,7 @@ def get_companies_for_extract_events(
                   )
                 ORDER BY estimated_tokens ASC
                 LIMIT 50""",
-            [first_run_estimate] + [lbl.lower() for lbl in label_filter],
+            [first_run_estimate] + [lbl.lower() for lbl in label_filter] + excluded,
         ).fetchall()
         selected, total = _select_by_budget(rows, token_budget)
         log.info(
@@ -520,7 +535,10 @@ def get_companies_for_stage(
     log = get_run_logger()
     _, conn = _cfg_and_conn()
     try:
+        excluded = _load_excluded_domains()
         placeholders_l = ",".join("?" for _ in label_filter)
+        placeholders_e = ",".join("?" for _ in excluded) if excluded else "NULL"
+        exclude_clause = f"AND LOWER(c.domain) NOT IN ({placeholders_e})" if excluded else ""
         prereq_mode = f"staged:{prerequisite}"
         stage_mode = f"staged:{stage}"
         rows = conn.execute(
@@ -536,6 +554,7 @@ def get_companies_for_stage(
                 WHERE LOWER(cl.label) IN ({placeholders_l})
                   AND COALESCE(cl.confidence, 0) >= 0.5
                   AND c.domain IS NOT NULL
+                  {exclude_clause}
                   AND EXISTS (
                     SELECT 1 FROM processing_runs pr
                     WHERE LOWER(pr.company_domain) = LOWER(c.domain)
@@ -563,6 +582,7 @@ def get_companies_for_stage(
                 LIMIT 50""",
             [stage_mode, first_run_estimate]
             + [lbl.lower() for lbl in label_filter]
+            + excluded
             + [prereq_mode, stage_mode, prereq_mode, stage_mode],
         ).fetchall()
         selected, total = _select_by_budget(rows, token_budget)

@@ -788,8 +788,13 @@ def extract_events_propose(
     company_label: str | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     concurrency: int = 1,
+    commit_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any] | None:
     """Run LLM calls and return a ProposedChanges-compatible dict without writing to DB.
+
+    If commit_fn is provided (sequential path only), events are committed after each
+    batch via commit_fn instead of accumulating in memory. The return value will have
+    an empty events list in this case (events are already persisted).
 
     Returns None if there's nothing to do.
     """
@@ -1089,7 +1094,11 @@ def extract_events_propose(
                 conn, backend, batch, categories_config, domains_block, account_owner,
                 system_prompt=batch_system_prompt,
             )
-            all_events.extend(events)
+            if commit_fn is not None:
+                if events:
+                    commit_fn(events)
+            else:
+                all_events.extend(events)
 
             if events:
                 logger.info(
@@ -1107,7 +1116,11 @@ def extract_events_propose(
                 conn, backend, thread_id, categories_config, domains_block, account_owner,
                 system_prompt=system_prompt, company_domain=company_domain,
             )
-            all_events.extend(events)
+            if commit_fn is not None:
+                if events:
+                    commit_fn(events)
+            else:
+                all_events.extend(events)
 
             if events:
                 logger.info(
@@ -1152,23 +1165,54 @@ def extract_events(
     from email_manager.analysis.feedback import compute_prompt_hash, format_rules_block, LAYER_EVENTS
 
     _started = datetime.now(timezone.utc).isoformat()
+
+    # For sequential single-company runs, commit each batch immediately so work
+    # survives a flow timeout. _get_threads_to_process skips threads already in
+    # event_ledger, so the next run continues from where this one stopped.
+    commit_fn = None
+    _incremental_count: list[int] = [0]
+    _cid: int | None = None
+    _p_hash: str | None = None
+
+    if company_domain and concurrency == 1:
+        rules_block_pre = format_rules_block(conn, LAYER_EVENTS)
+        _p_hash = compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + rules_block_pre)
+        row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (company_domain,))
+        _cid = row["id"] if row else 0
+
+        def _commit_fn(events: list[dict[str, Any]]) -> None:
+            n = _save_events(conn, events)
+            _incremental_count[0] += n
+            logger.info("Checkpoint: committed %d events (running total: %d)", n, _incremental_count[0])
+        commit_fn = _commit_fn
+
     proposed_dict = extract_events_propose(
         conn, backend, categories_config=categories_config,
         config_path=config_path, limit=limit, force=force, clean=clean,
         company_domain=company_domain, company_label=company_label,
         on_progress=on_progress, concurrency=concurrency,
+        commit_fn=commit_fn,
     )
     if not proposed_dict:
         return 0
 
     # Compute prompt hash for versioning (matches what extract_events_propose used)
     rules_block = format_rules_block(conn, LAYER_EVENTS)
-    p_hash = compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + rules_block)
+    p_hash = _p_hash or compute_prompt_hash(EXTRACT_EVENTS_SYSTEM + rules_block)
 
     all_events = proposed_dict.get("events", [])
 
     # If already scoped to one company, apply directly
     if company_domain:
+        if commit_fn is not None:
+            # Incremental path: events already in DB — just write the processing_run
+            apply_changes(
+                conn, ProposedChanges({"events": []}), _cid or 0, company_domain,
+                mode="staged:extract_events", model=backend.model_name,
+                token_tracker=getattr(backend, "token_tracker", None),
+                prompt_hash=p_hash, started_at=_started,
+            )
+            return _incremental_count[0]
         proposed = ProposedChanges(proposed_dict)
         row = fetchone(conn, "SELECT id FROM companies WHERE domain = ? COLLATE NOCASE", (company_domain,))
         cid = row["id"] if row else 0

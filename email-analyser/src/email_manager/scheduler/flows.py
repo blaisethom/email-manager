@@ -347,7 +347,7 @@ def _run_stage_flow(
     return succeeded, failed
 
 
-@flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=7200)
+@flow(name="email-manager-extract-events", log_prints=True, timeout_seconds=21600)
 def extract_events_flow(
     label_filter: list[str] | None = None,
     token_budget: int = 150_000,
