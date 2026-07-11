@@ -328,7 +328,8 @@ def _refresh_outreach_scores_sql(conn: sqlite3.Connection, console: Console) -> 
             FROM emails e
             JOIN me_addrs m ON LOWER(e.from_address) = m.addr
             CROSS JOIN LATERAL json_array_elements_text(
-                COALESCE(NULLIF(e.to_addresses, ''), '[]')::json
+                CASE WHEN e.to_addresses IS NOT NULL AND LEFT(TRIM(e.to_addresses), 1) = '['
+                     THEN e.to_addresses::json ELSE '[]'::json END
             ) r(value)
             WHERE r.value <> ''
               AND LOWER(r.value) NOT IN (SELECT addr FROM me_addrs)
@@ -339,7 +340,8 @@ def _refresh_outreach_scores_sql(conn: sqlite3.Connection, console: Console) -> 
                    SUM(LN(1.0 + COALESCE(o.cnt, 0))) AS score
             FROM threads t
             CROSS JOIN LATERAL json_array_elements_text(
-                COALESCE(NULLIF(t.participants, ''), '[]')::json
+                CASE WHEN t.participants IS NOT NULL AND LEFT(TRIM(t.participants), 1) = '['
+                     THEN t.participants::json ELSE '[]'::json END
             ) p(email)
             LEFT JOIN outreach o ON o.addr = LOWER(p.email)
             WHERE p.email <> ''
