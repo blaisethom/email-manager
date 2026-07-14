@@ -31,6 +31,7 @@ from .tasks import (
     run_fetch_homepages,
     run_hubspot_task_enrichment,
     run_label_companies,
+    run_refresh_outreach_scores,
     seed_change_journal,
     sync_calendar,
     sync_email_account,
@@ -92,12 +93,14 @@ def enrich_flow() -> dict:
     """Parse emails, fetch non-AI enrichment data, and rebuild the search index.
 
     Stage order:
-      1. extract_base  — parse raw emails into threads/contacts/companies
-      2. hubspot_task_enrichment + fetch_homepages — parallel, no AI calls
-      3. build_search_index — incremental text index (no embeddings)
+      1. extract_base  — parse raw emails into threads/contacts/companies  (memory-heavy)
+      2. hubspot_task_enrichment + fetch_homepages — parallel, no AI calls  (memory-heavy)
+      3. build_search_index — incremental text index, no embeddings  (outside slot)
 
-    Holds the 'memory-heavy' concurrency slot (limit=1) for its full duration
-    so it never overlaps with ai_flow and causes OOM.
+    The memory-heavy slot covers only the email-parsing stages (1+2), which load
+    all raw emails into memory. The search index rebuild (3) is I/O-bound and
+    does not need the slot, so releasing it early lets AI stage flows start as
+    soon as email parsing is done rather than waiting for the full index rebuild.
     """
     from prefect.concurrency.sync import concurrency as prefect_concurrency
 
@@ -114,7 +117,12 @@ def enrich_flow() -> dict:
         hs_result = hs_future.result(raise_on_failure=False)
         hp_result = hp_future.result(raise_on_failure=False)
 
-        si_count = run_build_search_index(skip_embeddings=True)
+    # Search index rebuild runs outside the memory-heavy slot so a slow/stuck
+    # index rebuild never blocks AI stage flows. Outreach scores are refreshed
+    # by the dedicated refresh-outreach-scores flow (every 6 h) rather than here,
+    # since that SQL query takes 90+ min and would starve the Prefect worker's
+    # asyncio loop if run on every 30-min enrich cycle.
+    si_count = run_build_search_index(skip_embeddings=True, refresh_outreach=False)
 
     result = {
         "extract_base": base_count,
@@ -146,6 +154,21 @@ def label_flow(batch_size: int = 10, random_sample: bool = True) -> dict:
     result = {"label_companies": lc_result}
     log.info("Label complete: %s", result)
     return result
+
+
+# ── Refresh outreach scores flow ─────────────────────────────────────────────
+
+
+@flow(name="email-manager-refresh-outreach-scores", log_prints=True, timeout_seconds=7200)
+def refresh_outreach_scores_flow() -> None:
+    """Recompute outreach scores for search ranking.
+
+    Runs the slow CROSS JOIN LATERAL SQL query that scores threads by how much
+    the user has emailed each participant. Separated from enrich_flow because it
+    takes 90+ min on a large mailbox and would starve the Prefect worker's asyncio
+    loop if run every 30 minutes.
+    """
+    run_refresh_outreach_scores()
 
 
 # ── AI flow ──────────────────────────────────────────────────────────────────

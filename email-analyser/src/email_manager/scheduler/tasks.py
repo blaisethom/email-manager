@@ -230,7 +230,11 @@ def run_label_companies(limit: int | None = None, random_sample: bool = False) -
 
 
 @task(name="run-build-search-index", retries=1, retry_delay_seconds=60)
-def run_build_search_index(force: bool = False, skip_embeddings: bool = False) -> int:
+def run_build_search_index(
+    force: bool = False,
+    skip_embeddings: bool = False,
+    refresh_outreach: bool = True,
+) -> int:
     """Rebuild the thread and discussion search index and optionally embeddings."""
     log = get_run_logger()
     config, conn = _cfg_and_conn()
@@ -242,7 +246,7 @@ def run_build_search_index(force: bool = False, skip_embeddings: bool = False) -
             generate_embeddings,
         )
 
-        count = build_search_index(conn, force=force)
+        count = build_search_index(conn, force=force, refresh_outreach=refresh_outreach)
         count += build_discussion_search_index(conn, force=force)
 
         if not skip_embeddings:
@@ -257,6 +261,18 @@ def run_build_search_index(force: bool = False, skip_embeddings: bool = False) -
         conn.commit()
         log.info("build_search_index: %d items indexed", count)
         return count
+    finally:
+        conn.close()
+
+
+@task(name="run-refresh-outreach-scores", retries=1, retry_delay_seconds=120)
+def run_refresh_outreach_scores() -> None:
+    """Recompute outreach scores for all threads (slow SQL; run infrequently)."""
+    _, conn = _cfg_and_conn()
+    try:
+        from email_manager.search.indexer import refresh_outreach_scores
+        refresh_outreach_scores(conn)
+        conn.commit()
     finally:
         conn.close()
 

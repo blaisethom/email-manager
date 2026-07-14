@@ -81,11 +81,22 @@ def _compute_hash(emails: list[dict]) -> str:
     return h.hexdigest()
 
 
+def refresh_outreach_scores(
+    conn: sqlite3.Connection,
+    console: Console | None = None,
+) -> None:
+    """Refresh outreach scores for all threads. Safe to call independently."""
+    console = console or Console()
+    is_postgres = type(conn).__name__ == "PostgresConnection"
+    _refresh_outreach_scores(conn, console, is_postgres)
+
+
 def build_search_index(
     conn: sqlite3.Connection,
     console: Console | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     force: bool = False,
+    refresh_outreach: bool = True,
 ) -> int:
     """Build or update the search index for all threads.
 
@@ -235,9 +246,8 @@ def build_search_index(
     else:
         console.print(f"  [dim]build_search_index: all {total} threads up to date[/dim]")
 
-    # Refresh outreach scores across all threads (always — new sent emails change scores
-    # regardless of whether the doc_text changed).
-    _refresh_outreach_scores(conn, console, is_postgres)
+    if refresh_outreach:
+        _refresh_outreach_scores(conn, console, is_postgres)
 
     return updated
 
