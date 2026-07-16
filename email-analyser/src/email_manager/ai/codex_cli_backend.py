@@ -235,8 +235,13 @@ class CodexCLIBackend:
             stderr = proc.stderr.read() if proc.stderr else ""
 
             if proc.returncode != 0:
+                # Show head + tail so the real error isn't hidden behind prompt echo
+                if len(stderr) > 800:
+                    err_excerpt = f"{stderr[:200]}\n...[{len(stderr)} chars total]...\n{stderr[-600:]}"
+                else:
+                    err_excerpt = stderr
                 raise RuntimeError(
-                    f"Codex CLI failed (exit {proc.returncode}): {stderr[:400]}"
+                    f"Codex CLI failed (exit {proc.returncode}): {err_excerpt}"
                 )
 
             output_path = Path(output_file)

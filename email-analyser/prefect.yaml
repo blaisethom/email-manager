@@ -17,7 +17,10 @@ push: null
 pull:
   # Worker copies code from the local workspace or falls back to GitHub clone.
   # When running on the development machine, use local code directly (faster, no proxy needed).
-  # On remote workers, fall back to GitHub clone via the Prokura sidecar proxy.
+  # On remote workers (Docker), clone via Prokura sidecar proxy on the dev container.
+  #
+  # Remote path: deps are pre-installed in the Docker image at /opt/em-deps (see Dockerfile.worker),
+  # so only the email_manager source needs to be cloned — no pip install at runtime.
   #
   # NOTE: run_shell_script executes each line as a separate subprocess, so the
   # entire if/else/fi must be on a single line to share shell state.
@@ -25,7 +28,7 @@ pull:
       id: clone_and_bootstrap
       stream_output: true
       shell: true
-      script: "LOCAL_SRC=/home/node/workspace/email-manager/email-analyser; LOCAL_VENV=$LOCAL_SRC/.venv; mkdir -p /tmp/em-deps; if [ -d \"$LOCAL_SRC/src/email_manager\" ] && [ -d \"$LOCAL_VENV\" ]; then cp -r \"$LOCAL_SRC/src/email_manager\" /tmp/em-deps/; rm -rf /tmp/em-venv; ln -s \"$LOCAL_VENV\" /tmp/em-venv; cp -f \"$LOCAL_SRC/exclude-cos.txt\" /tmp/exclude-cos.txt 2>/dev/null; echo \"Using local workspace; /tmp/em-venv -> $LOCAL_VENV\"; else CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" || exit 1; cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/; cp -f \"$CLONE_DIR/email-analyser/exclude-cos.txt\" /tmp/exclude-cos.txt 2>/dev/null || true; test -d /tmp/em-venv || uv venv /tmp/em-venv --python /opt/prefect/bin/python3; HTTPS_PROXY='' HTTP_PROXY='' https_proxy='' http_proxy='' uv pip install --python /tmp/em-venv/bin/python \"$CLONE_DIR/email-analyser[postgres,scheduler]\"; STATUS=$?; rm -rf \"$CLONE_DIR\"; command -v codex 2>/dev/null || (NODE_ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/'); NODE_VER=v22.23.1; test -f /usr/local/bin/node || (HTTPS_PROXY='' HTTP_PROXY='' https_proxy='' http_proxy='' curl -fsSL \"https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-linux-${NODE_ARCH}.tar.xz\" | tar -xJ -C /usr/local --strip-components=1); HTTPS_PROXY='' HTTP_PROXY='' https_proxy='' http_proxy='' npm install -g \"@openai/codex@0.143.0\") 2>&1 || true; exit $STATUS; fi"
+      script: "LOCAL_SRC=/home/node/workspace/email-manager/email-analyser; LOCAL_VENV=$LOCAL_SRC/.venv; mkdir -p /tmp/em-deps; if [ -d \"$LOCAL_SRC/src/email_manager\" ] && [ -d \"$LOCAL_VENV\" ]; then cp -r \"$LOCAL_SRC/src/email_manager\" /tmp/em-deps/; rm -rf /tmp/em-venv; ln -s \"$LOCAL_VENV\" /tmp/em-venv; cp -f \"$LOCAL_SRC/exclude-cos.txt\" /tmp/exclude-cos.txt 2>/dev/null; echo \"Using local workspace; /tmp/em-venv -> $LOCAL_VENV\"; else CLONE_DIR=$(mktemp -d /tmp/em-XXXXXX); git clone --depth=1 https://github.com/blaisethom/email-manager.git \"$CLONE_DIR\" || exit 1; cp -r \"$CLONE_DIR/email-analyser/src/email_manager\" /tmp/em-deps/; cp -f \"$CLONE_DIR/email-analyser/exclude-cos.txt\" /tmp/exclude-cos.txt 2>/dev/null || true; rm -rf \"$CLONE_DIR\"; fi"
 
 deployments:
   # ── Ingest: pull raw data from all sources ──────────────────────────────────
@@ -37,7 +40,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -45,6 +48,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "*/20 * * * *"
         timezone: "UTC"
@@ -59,7 +63,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -67,6 +71,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -81,7 +86,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -89,6 +94,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "15,45 * * * *"   # :15 and :45, offset 15 min after enrich (:00 and :30)
         timezone: "UTC"
@@ -106,7 +112,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -114,6 +120,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "0 */6 * * *"
         timezone: "UTC"
@@ -141,7 +148,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -149,6 +156,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "*/20 * * * *"
         timezone: "UTC"
@@ -169,7 +177,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -177,6 +185,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "3,23,43 * * * *"
         timezone: "UTC"
@@ -197,7 +206,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -205,6 +214,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "7,27,47 * * * *"
         timezone: "UTC"
@@ -225,7 +235,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -233,6 +243,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "12,32,52 * * * *"
         timezone: "UTC"
@@ -253,7 +264,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -261,6 +272,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "17 */2 * * *"
         timezone: "UTC"
@@ -281,7 +293,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -289,6 +301,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules: []   # No schedule — trigger manually for backfills
     parameters:
       event_budget: 100
@@ -308,7 +321,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -316,6 +329,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
@@ -330,11 +344,12 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages:/opt/prefect/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           AI_BACKEND: "codex"
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules:
       - cron: "*/30 * * * *"
         timezone: "UTC"
@@ -350,7 +365,7 @@ deployments:
       name: default-process
       job_variables:
         env:
-          PYTHONPATH: /tmp/em-deps:/tmp/em-venv/lib/python3.11/site-packages
+          PYTHONPATH: /tmp/em-deps:/opt/em-deps:/tmp/em-venv/lib/python3.11/site-packages
           HTTPS_PROXY: "http://127.0.0.1:8080"
           HTTP_PROXY: "http://127.0.0.1:8080"
           NO_PROXY: "localhost,127.0.0.1,prefect-server,postgres.svc"
@@ -358,4 +373,5 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           PATH: "/usr/local/bin:/usr/bin:/bin"
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt"
     schedules: []   # No schedule — trigger manually
