@@ -50,7 +50,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/20 * * * *"
@@ -74,7 +74,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/30 * * * *"
@@ -98,7 +98,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "15,45 * * * *"   # :15 and :45, offset 15 min after enrich (:00 and :30)
@@ -125,7 +125,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "0 */6 * * *"
@@ -162,7 +162,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/20 * * * *"
@@ -192,7 +192,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "3,23,43 * * * *"
@@ -222,7 +222,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "7,27,47 * * * *"
@@ -252,7 +252,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "12,32,52 * * * *"
@@ -282,7 +282,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "17 */2 * * *"
@@ -312,7 +312,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules: []   # No schedule — trigger manually for backfills
     parameters:
@@ -341,12 +341,13 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules: []   # No schedule — triggered on demand
     parameters:
       domain: ""
       stages: null
+      force: false
 
   # ── Maintenance: crash zombie RUNNING flows ──────────────────────────────────
   - name: maintenance
@@ -362,7 +363,7 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules:
       - cron: "*/30 * * * *"
@@ -387,6 +388,6 @@ deployments:
           CODEX_MODEL: "gpt-5.4-mini"
           EXTRACT_EVENTS_MODEL: "gpt-5.5"
           CODEX_HOME: "/tmp/codex-home"
-          CODEX_SOCKS_PROXY: "socks5://172.21.1.38:8090"
+          CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
           PATH: "/usr/local/bin:/usr/bin:/bin"
     schedules: []   # No schedule — trigger manually
