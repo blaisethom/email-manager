@@ -200,30 +200,56 @@ class CodexCLIBackend:
         return env
 
     def _call_via_http_relay(self, prompt: str) -> str:
-        """POST prompt to the dev-container HTTP relay and return codex output."""
+        """Submit prompt to the dev-container HTTP relay and poll for result.
+
+        Uses a job-polling pattern (POST → job_id, then GET /codex/{job_id})
+        so HTTP connections are short-lived — avoids proxy connection timeouts
+        that occur when codex runs for 5-15 minutes.
+        """
         relay_base = os.environ["CODEX_HTTP_RELAY"].rstrip("/")
-        url = f"{relay_base}/codex"
+        # Bypass HTTP_PROXY — relay is on a local IP, not an external service
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        # Submit job
         payload = json.dumps({"prompt": prompt, "model": self._model}).encode()
         req = urllib.request.Request(
-            url,
+            f"{relay_base}/codex",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        # Bypass HTTP_PROXY for this internal call — relay is on a local IP
-        proxy_handler = urllib.request.ProxyHandler({})
-        opener = urllib.request.build_opener(proxy_handler)
-        with opener.open(req, timeout=1800) as resp:
-            data = json.loads(resp.read())
-        output = data.get("output", "")
-        if not output:
-            stderr = data.get("stderr", "")
-            err = data.get("error", "")
-            raise RuntimeError(
-                f"Codex HTTP relay produced no output. "
-                f"exit={data.get('exit_code')} error={err!r} stderr={stderr[:400]}"
-            )
-        return output.strip()
+        with opener.open(req, timeout=30) as resp:
+            job_data = json.loads(resp.read())
+        job_id = job_data["job_id"]
+
+        # Poll until done
+        poll_url = f"{relay_base}/codex/{job_id}"
+        deadline = time.monotonic() + MAX_TOTAL_TIMEOUT
+        while True:
+            time.sleep(30)
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"Codex HTTP relay job {job_id} timed out after {MAX_TOTAL_TIMEOUT}s"
+                )
+            poll_req = urllib.request.Request(poll_url, method="GET")
+            with opener.open(poll_req, timeout=30) as poll_resp:
+                result = json.loads(poll_resp.read())
+
+            status = result.get("status")
+            if status == "done":
+                output = result.get("output", "")
+                if not output:
+                    stderr = result.get("stderr", "")
+                    raise RuntimeError(
+                        f"Codex HTTP relay produced no output. "
+                        f"exit={result.get('exit_code')} stderr={stderr[:400]}"
+                    )
+                return output.strip()
+            elif status == "error":
+                raise RuntimeError(
+                    f"Codex HTTP relay job error: {result.get('error', 'unknown')}"
+                )
+            # else "running" — keep polling
 
     def _call_sync(self, prompt: str) -> str:
         if os.environ.get("CODEX_HTTP_RELAY"):
