@@ -56,17 +56,21 @@ services:
     environment:
       # Point at the server by service name (stable, no IP needed)
       PREFECT_API_URL: "http://prefect-server:4200/api"
-      # Route outbound HTTPS through the Prokura sidecar inside the worker container.
-      # The sidecar listens at localhost:8080 and injects GitHub credentials.
+      # Route outbound HTTPS through the Prokura sidecar running inside the container.
+      # The sidecar listens at localhost:8080 and injects credentials for GitHub,
+      # ChatGPT/Codex, and other services into intercepted HTTPS traffic.
       HTTP_PROXY: "http://127.0.0.1:8080"
       HTTPS_PROXY: "http://127.0.0.1:8080"
-      NO_PROXY: "localhost,127.0.0.1,prefect-server,prefect-db"
+      NO_PROXY: "localhost,127.0.0.1,prefect-server,prefect-db,postgres.svc"
       # Absolute paths to OAuth credential files mounted from the host data directory.
       GMAIL_CREDENTIALS_PATH: /data/gmail_credentials.json
       GMAIL_TOKEN_PATH: /data/gmail_token.json
     volumes:
       # Mount the host data directory so flows can read OAuth tokens and write DB.
       - ../data:/data
+      # Mount Prokura's Codex auth file so the Codex CLI authenticates via the proxy.
+      # Mounted at /tmp/codex-home (world-accessible) so the non-root prefect user can read it.
+      - ~/.codex:/tmp/codex-home:rw
     depends_on:
       prefect-server:
         condition: service_healthy
