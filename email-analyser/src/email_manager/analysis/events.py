@@ -843,7 +843,12 @@ def extract_events_propose(
     )
     if not thread_ids:
         logger.info("No threads to process for event extraction")
-        return None
+        # Return empty dict (not None) when processing a specific company so that
+        # extract_events() calls apply_changes and writes a staged:extract_events
+        # processing_run record. Without this, companies whose threads are already
+        # fully processed (e.g. via the old ai_flow) would be re-selected every cycle
+        # and never advance to discover_discussions.
+        return {"events": []} if company_domain else None
 
     logger.info("Extracting events from %d threads", len(thread_ids))
 
