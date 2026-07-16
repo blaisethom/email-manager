@@ -160,7 +160,7 @@ class CodexCLIBackend:
     # ── Sync subprocess ───────────────────────────────────────────────────
 
     def _build_cmd(self, output_file: str) -> list[str]:
-        return ["codex", "exec", "--output-last-message", output_file, "-m", self._model, "-"]
+        return ["codex", "exec", "--skip-git-repo-check", "--output-last-message", output_file, "-m", self._model, "-"]
 
     def _run_sync(self, prompt: str) -> str:
         with _sync_concurrency():
