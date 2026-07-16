@@ -178,6 +178,25 @@ class CodexCLIBackend:
                         raise
             return self._call_sync(prompt)  # final attempt
 
+    @staticmethod
+    def _codex_env() -> dict:
+        """Build env for the codex subprocess.
+
+        If CODEX_SOCKS_PROXY is set, route all codex traffic through that SOCKS5
+        proxy and clear HTTP_PROXY/HTTPS_PROXY so reqwest doesn't try to use the
+        worker's Prokura sidecar (which lacks chatgpt.com cookie injection).
+        """
+        import os
+        env = dict(os.environ)
+        socks = os.environ.get("CODEX_SOCKS_PROXY", "")
+        if socks:
+            env["ALL_PROXY"] = socks
+            env.pop("HTTP_PROXY", None)
+            env.pop("HTTPS_PROXY", None)
+            env.pop("http_proxy", None)
+            env.pop("https_proxy", None)
+        return env
+
     def _call_sync(self, prompt: str) -> str:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             output_file = f.name
@@ -189,6 +208,7 @@ class CodexCLIBackend:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=self._codex_env(),
             )
 
             proc.stdin.write(prompt)
@@ -282,6 +302,7 @@ class CodexCLIBackend:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._codex_env(),
             )
 
             last_activity = asyncio.get_event_loop().time()
