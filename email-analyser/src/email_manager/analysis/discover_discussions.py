@@ -167,6 +167,14 @@ def _get_companies_with_unassigned_events(
             cutoff_clause = "AND el.created_at > ?"
             cutoff_params = [last_discover["completed_at"]]
 
+        # When force=True, skip the run_id ownership check so we can pick up
+        # events created by other companies' runs (e.g. old ai_flow grouped
+        # multiple companies into one run). Normally we restrict to events
+        # created by this company's own extract_events runs to avoid
+        # cross-contaminating shared threads.
+        run_id_clause = "" if force else "AND (el.run_id IS NULL OR el.run_id IN (SELECT id FROM processing_runs WHERE company_domain = ?))"
+        run_id_params: list = [] if force else [company_domain]
+
         like = f"%@{company_domain}%"
         cnt = fetchone(
             conn,
@@ -178,10 +186,8 @@ def _get_companies_with_unassigned_events(
                      SELECT DISTINCT e.thread_id FROM emails e
                      WHERE e.from_address LIKE ? OR e.to_addresses LIKE ?
                  )
-                 AND (el.run_id IS NULL OR el.run_id IN (
-                     SELECT id FROM processing_runs WHERE company_domain = ?
-                 ))""",
-            (*cutoff_params, like, like, company_domain),
+                 {run_id_clause}""",
+            (*cutoff_params, like, like, *run_id_params),
         )
         return [{"id": row["id"], "name": row["name"], "domain": row["domain"],
                  "event_count": cnt[0]}] if cnt[0] > 0 else []
@@ -228,6 +234,7 @@ def _get_companies_with_unassigned_events(
 
 def _get_events_for_company(
     conn: sqlite3.Connection, company_domain: str, max_events: int = 50,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     """Get unassigned events related to a company domain, limited to avoid huge prompts.
 
@@ -235,22 +242,39 @@ def _get_events_for_company(
     events with source_email_id=NULL are not silently excluded.
     """
     like_pattern = f"%@{company_domain}%"
-    rows = fetchall(
-        conn,
-        """SELECT DISTINCT el.*
-           FROM event_ledger el
-           WHERE el.discussion_id IS NULL
-             AND el.thread_id IN (
-                 SELECT DISTINCT e.thread_id FROM emails e
-                 WHERE e.from_address LIKE ? OR e.to_addresses LIKE ? OR e.cc_addresses LIKE ?
-             )
-             AND (el.run_id IS NULL OR el.run_id IN (
-                 SELECT id FROM processing_runs WHERE company_domain = ?
-             ))
-           ORDER BY el.event_date DESC
-           LIMIT ?""",
-        (like_pattern, like_pattern, like_pattern, company_domain, max_events),
-    )
+    # When force=True, skip run_id ownership check so events created by other
+    # companies' runs (e.g. old ai_flow) are included.
+    if force:
+        rows = fetchall(
+            conn,
+            """SELECT DISTINCT el.*
+               FROM event_ledger el
+               WHERE el.discussion_id IS NULL
+                 AND el.thread_id IN (
+                     SELECT DISTINCT e.thread_id FROM emails e
+                     WHERE e.from_address LIKE ? OR e.to_addresses LIKE ? OR e.cc_addresses LIKE ?
+                 )
+               ORDER BY el.event_date DESC
+               LIMIT ?""",
+            (like_pattern, like_pattern, like_pattern, max_events),
+        )
+    else:
+        rows = fetchall(
+            conn,
+            """SELECT DISTINCT el.*
+               FROM event_ledger el
+               WHERE el.discussion_id IS NULL
+                 AND el.thread_id IN (
+                     SELECT DISTINCT e.thread_id FROM emails e
+                     WHERE e.from_address LIKE ? OR e.to_addresses LIKE ? OR e.cc_addresses LIKE ?
+                 )
+                 AND (el.run_id IS NULL OR el.run_id IN (
+                     SELECT id FROM processing_runs WHERE company_domain = ?
+                 ))
+               ORDER BY el.event_date DESC
+               LIMIT ?""",
+            (like_pattern, like_pattern, like_pattern, company_domain, max_events),
+        )
     # Return in chronological order
     result = [dict(r) for r in rows]
     result.sort(key=lambda x: x.get("event_date") or "")
@@ -886,7 +910,7 @@ def discover_discussions(
             on_progress(i, len(companies), company["name"])
 
         DISCOVER_BATCH_SIZE = 30
-        all_events = _get_events_for_company(conn, company["domain"], max_events=200)
+        all_events = _get_events_for_company(conn, company["domain"], max_events=200, force=force)
         if not all_events:
             _write_empty_discover_run(conn, company["domain"], backend)
             continue
