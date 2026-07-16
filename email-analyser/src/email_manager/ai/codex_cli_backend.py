@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
@@ -187,13 +189,6 @@ class CodexCLIBackend:
 
     @staticmethod
     def _codex_env() -> dict:
-        """Build env for the codex subprocess.
-
-        If CODEX_SOCKS_PROXY is set, route all codex traffic through that SOCKS5
-        proxy and clear HTTP_PROXY/HTTPS_PROXY so reqwest doesn't try to use the
-        worker's Prokura sidecar (which lacks chatgpt.com cookie injection).
-        """
-        import os
         env = dict(os.environ)
         socks = os.environ.get("CODEX_SOCKS_PROXY", "")
         if socks:
@@ -204,7 +199,35 @@ class CodexCLIBackend:
             env.pop("https_proxy", None)
         return env
 
+    def _call_via_http_relay(self, prompt: str) -> str:
+        """POST prompt to the dev-container HTTP relay and return codex output."""
+        relay_base = os.environ["CODEX_HTTP_RELAY"].rstrip("/")
+        url = f"{relay_base}/codex"
+        payload = json.dumps({"prompt": prompt, "model": self._model}).encode()
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        # Bypass HTTP_PROXY for this internal call — relay is on a local IP
+        proxy_handler = urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(proxy_handler)
+        with opener.open(req, timeout=1800) as resp:
+            data = json.loads(resp.read())
+        output = data.get("output", "")
+        if not output:
+            stderr = data.get("stderr", "")
+            err = data.get("error", "")
+            raise RuntimeError(
+                f"Codex HTTP relay produced no output. "
+                f"exit={data.get('exit_code')} error={err!r} stderr={stderr[:400]}"
+            )
+        return output.strip()
+
     def _call_sync(self, prompt: str) -> str:
+        if os.environ.get("CODEX_HTTP_RELAY"):
+            return self._call_via_http_relay(prompt)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             output_file = f.name
         try:
@@ -317,6 +340,9 @@ class CodexCLIBackend:
             return await self._call_async(prompt)  # final attempt
 
     async def _call_async(self, prompt: str) -> str:
+        if os.environ.get("CODEX_HTTP_RELAY"):
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._call_via_http_relay, prompt)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             output_file = f.name
         try:

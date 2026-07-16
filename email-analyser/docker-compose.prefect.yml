@@ -61,7 +61,10 @@ services:
       # ChatGPT/Codex, and other services into intercepted HTTPS traffic.
       HTTP_PROXY: "http://127.0.0.1:8080"
       HTTPS_PROXY: "http://127.0.0.1:8080"
-      NO_PROXY: "localhost,127.0.0.1,prefect-server,prefect-db,postgres.svc"
+      NO_PROXY: "localhost,127.0.0.1,172.21.1.38,prefect-server,prefect-db,postgres.svc"
+      # HTTP relay on the dev container — codex runs there (where chatgpt.com auth works)
+      # and the worker POSTs prompts to it, avoiding SOCKS5/MCP-transport issues.
+      CODEX_HTTP_RELAY: "http://172.21.1.38:8091"
       # Absolute paths to OAuth credential files mounted from the host data directory.
       GMAIL_CREDENTIALS_PATH: /data/gmail_credentials.json
       GMAIL_TOKEN_PATH: /data/gmail_token.json
