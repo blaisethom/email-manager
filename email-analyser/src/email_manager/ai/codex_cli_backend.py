@@ -16,8 +16,8 @@ from email_manager.ai.base import TokenTracker, TokenUsage
 #   prefect gcl create codex-calls --limit 5
 _CONCURRENCY_SLOT = "codex-calls"
 
-MAX_TOTAL_TIMEOUT = 1200  # 20 minutes hard ceiling
-ACTIVITY_TIMEOUT = 600    # 10 minutes of no stdout → assume stuck
+MAX_TOTAL_TIMEOUT = 1800  # 30 minutes hard ceiling
+ACTIVITY_TIMEOUT = 900    # 15 minutes of no stdout → assume stuck
 CHARS_PER_TOKEN = 4       # rough estimate for token tracking
 
 logger = logging.getLogger("email_manager.ai.codex_cli")
@@ -59,6 +59,13 @@ async def _async_concurrency():
 
 def _is_rate_limit_error(stderr: str) -> bool:
     return '"status":429' in stderr or '"status": 429' in stderr or "rate_limit" in stderr.lower()
+
+
+def _is_retriable_error(msg: str) -> bool:
+    return ('"status":429' in msg or '"status": 429' in msg
+            or "rate_limit" in msg.lower()
+            or "inactivity" in msg.lower()
+            or "no stdout" in msg.lower())
 
 
 class CodexCLIBackend:
@@ -168,10 +175,10 @@ class CodexCLIBackend:
                 try:
                     return self._call_sync(prompt)
                 except RuntimeError as e:
-                    if "429" in str(e) or "rate_limit" in str(e).lower():
+                    if _is_retriable_error(str(e)):
                         _prefect_log_warning(
-                            f"Codex rate limit (attempt {attempt}/{len(_RETRY_DELAYS)}), "
-                            f"retrying in {delay}s: {e}"
+                            f"Codex retriable error (attempt {attempt}/{len(_RETRY_DELAYS)}), "
+                            f"retrying in {delay}s: {str(e)[:200]}"
                         )
                         time.sleep(delay)
                     else:
@@ -217,6 +224,7 @@ class CodexCLIBackend:
             # Drain stdout (contains token counts / banner noise)
             last_activity = time.monotonic()
             read_done = threading.Event()
+            stderr_chunks: list[str] = []
 
             def _reader():
                 nonlocal last_activity
@@ -227,8 +235,17 @@ class CodexCLIBackend:
                     last_activity = time.monotonic()
                 read_done.set()
 
+            def _stderr_reader():
+                while True:
+                    chunk = proc.stderr.read(4096)
+                    if not chunk:
+                        break
+                    stderr_chunks.append(chunk)
+
             reader_thread = threading.Thread(target=_reader, daemon=True)
+            stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
             reader_thread.start()
+            stderr_thread.start()
 
             start = time.monotonic()
             while not read_done.is_set():
@@ -239,20 +256,27 @@ class CodexCLIBackend:
                 if elapsed > MAX_TOTAL_TIMEOUT:
                     proc.kill()
                     reader_thread.join(timeout=5)
+                    stderr_thread.join(timeout=5)
+                    stderr_so_far = "".join(stderr_chunks)
                     raise RuntimeError(
-                        f"Codex CLI killed after {elapsed:.0f}s total (max {MAX_TOTAL_TIMEOUT}s)."
+                        f"Codex CLI killed after {elapsed:.0f}s total (max {MAX_TOTAL_TIMEOUT}s). "
+                        f"stderr: {stderr_so_far[-400:]}"
                     )
                 if idle > ACTIVITY_TIMEOUT and elapsed > 30:
                     proc.kill()
                     reader_thread.join(timeout=5)
+                    stderr_thread.join(timeout=5)
+                    stderr_so_far = "".join(stderr_chunks)
                     raise RuntimeError(
-                        f"Codex CLI killed after {idle:.0f}s of inactivity ({elapsed:.0f}s total)."
+                        f"Codex CLI killed after {idle:.0f}s of inactivity ({elapsed:.0f}s total). "
+                        f"stderr: {stderr_so_far[-400:]}"
                     )
 
             reader_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
             proc.wait(timeout=10)
 
-            stderr = proc.stderr.read() if proc.stderr else ""
+            stderr = "".join(stderr_chunks)
 
             if proc.returncode != 0:
                 # Show head + tail so the real error isn't hidden behind prompt echo
@@ -282,10 +306,10 @@ class CodexCLIBackend:
                 try:
                     return await self._call_async(prompt)
                 except RuntimeError as e:
-                    if "429" in str(e) or "rate_limit" in str(e).lower():
+                    if _is_retriable_error(str(e)):
                         _prefect_log_warning(
-                            f"Codex rate limit (attempt {attempt}/{len(_RETRY_DELAYS)}), "
-                            f"retrying in {delay}s: {e}"
+                            f"Codex retriable error (attempt {attempt}/{len(_RETRY_DELAYS)}), "
+                            f"retrying in {delay}s: {str(e)[:200]}"
                         )
                         await asyncio.sleep(delay)
                     else:
