@@ -1,173 +1,516 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import type { PipelineJob, JobConfig, PrefectDeployment, PrefectFlowRun } from '../types';
-import Pagination from '../components/Pagination';
+import type {
+  PipelineJob, JobConfig, PrefectDeployment, PrefectFlowRun,
+  ProcessingRunSummary, PipelineRunsStats,
+} from '../types';
 import EmptyState from '../components/EmptyState';
 import JobLauncher from '../components/JobLauncher';
 import { formatDateTime } from '../utils';
 
-const LIMIT = 25;
+const LIMIT = 50;
 
-const STATUS_STYLES: Record<string, string> = {
-  queued: 'bg-slate-100 text-slate-700',
-  running: 'bg-blue-100 text-blue-700',
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+function fmtDuration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return `${m}m ${rem}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function fmtWallDuration(startedAt: string | null, completedAt: string | null): string {
+  if (!startedAt) return '—';
+  const start = new Date(startedAt).getTime();
+  const end = completedAt ? new Date(completedAt).getTime() : Date.now();
+  return fmtDuration(end - start);
+}
+
+function fmtTokens(n: number): string {
+  if (!n) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function shortStage(mode: string): string {
+  return mode.replace('staged:', '').replace(/_/g, ' ');
+}
+
+// ── Status badges ─────────────────────────────────────────────────────────────
+
+const LOCAL_STATUS_STYLES: Record<string, string> = {
+  queued:    'bg-slate-100 text-slate-700',
+  running:   'bg-blue-100 text-blue-700',
   completed: 'bg-green-100 text-green-800',
-  failed: 'bg-red-100 text-red-800',
+  failed:    'bg-red-100 text-red-800',
   cancelled: 'bg-amber-100 text-amber-800',
 };
 
-function StatusBadge({ status }: { status: string }) {
-  const style = STATUS_STYLES[status] ?? 'bg-slate-100 text-slate-700';
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${style}`}>
-      {status === 'running' && (
-        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mr-1.5 animate-pulse" />
-      )}
-      {status}
-    </span>
-  );
+const PREFECT_STATUS_STYLES: Record<string, string> = {
+  COMPLETED:  'bg-green-100 text-green-800',
+  FAILED:     'bg-red-100 text-red-800',
+  CRASHED:    'bg-red-100 text-red-800',
+  CANCELLED:  'bg-amber-100 text-amber-800',
+  CANCELLING: 'bg-amber-100 text-amber-800',
+  RUNNING:    'bg-blue-100 text-blue-700',
+  SCHEDULED:  'bg-slate-100 text-slate-700',
+  PENDING:    'bg-slate-100 text-slate-700',
+};
+
+function StatusDot({ running }: { running: boolean }) {
+  if (!running) return null;
+  return <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mr-1.5 animate-pulse inline-block" />;
 }
+
+// ── Activity tab: unified Prefect + local jobs ────────────────────────────────
+
+type ActivityItem =
+  | { kind: 'prefect'; run: PrefectFlowRun; time: number }
+  | { kind: 'local';   job: PipelineJob;    time: number };
 
 function describeJob(job: PipelineJob): string {
   let config: JobConfig;
-  try {
-    config = JSON.parse(job.config_json);
-  } catch {
-    return job.job_type;
-  }
-
+  try { config = JSON.parse(job.config_json); } catch { return job.job_type; }
   if (config.job_type === 'sync') return 'Sync emails';
-
   const parts: string[] = [];
-
-  if (config.stages && config.stages.length > 0) {
-    if (config.stages.length <= 3) {
-      parts.push(config.stages.map(s => s.replace(/_/g, ' ')).join(', '));
-    } else {
-      parts.push(`${config.stages.length} stages`);
-    }
+  if (config.stages?.length) {
+    parts.push(config.stages.length <= 3
+      ? config.stages.map(s => s.replace(/_/g, ' ')).join(', ')
+      : `${config.stages.length} stages`);
   } else {
     parts.push('all stages');
   }
-
   if (config.company) parts.push(config.company);
   if (config.label) parts.push(`label: ${config.label}`);
-
-  return parts.join(' - ');
+  return parts.join(' · ');
 }
 
-function formatDuration(startedAt: string | null, completedAt: string | null): string {
-  if (!startedAt) return '-';
-  const start = new Date(startedAt).getTime();
-  const end = completedAt ? new Date(completedAt).getTime() : Date.now();
-  const sec = Math.round((end - start) / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  const remSec = sec % 60;
-  if (min < 60) return `${min}m ${remSec}s`;
-  const hr = Math.floor(min / 60);
-  const remMin = min % 60;
-  return `${hr}h ${remMin}m`;
-}
-
-function ProgressBar({ job }: { job: PipelineJob }) {
-  if (job.status !== 'running' || !job.progress_total) return null;
-  const pct = Math.round((job.progress_done / job.progress_total) * 100);
-  return (
-    <div className="flex items-center gap-2 mt-1.5">
-      <div className="flex-1 h-1.5 bg-slate-200 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-blue-500 rounded-full transition-all duration-500"
-          style={{ width: `${pct}%` }}
-        />
+function ActivityRow({ item }: { item: ActivityItem }) {
+  if (item.kind === 'prefect') {
+    const r = item.run;
+    const style = PREFECT_STATUS_STYLES[r.state_type] ?? 'bg-slate-100 text-slate-600';
+    const running = r.state_type === 'RUNNING';
+    return (
+      <div className="flex items-center gap-3 py-3 border-b border-slate-100 last:border-0">
+        <div className="w-16 flex-shrink-0">
+          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${style}`}>
+            <StatusDot running={running} />
+            {r.state_name}
+          </span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs px-1 py-0.5 bg-purple-50 text-purple-600 border border-purple-200 rounded font-medium flex-shrink-0">prefect</span>
+            <span className="text-sm text-slate-800 font-medium truncate">{r.name}</span>
+          </div>
+          {r.parameters && Object.keys(r.parameters).length > 0 && (
+            <p className="text-xs text-slate-400 truncate mt-0.5">
+              {Object.entries(r.parameters)
+                .filter(([, v]) => v !== null && v !== undefined)
+                .map(([k, v]) => `${k}: ${Array.isArray(v) ? (v as string[]).join(', ') : String(v)}`)
+                .join(' · ')}
+            </p>
+          )}
+        </div>
+        <div className="text-right text-xs text-slate-400 flex-shrink-0 min-w-[90px]">
+          <div>{r.start_time ? formatDateTime(r.start_time) : '—'}</div>
+          <div className="mt-0.5 tabular-nums">{fmtWallDuration(r.start_time, r.end_time)}</div>
+        </div>
       </div>
-      <span className="text-xs text-slate-500 tabular-nums">{job.progress_done}/{job.progress_total}</span>
+    );
+  }
+
+  const j = item.job;
+  const style = LOCAL_STATUS_STYLES[j.status] ?? 'bg-slate-100 text-slate-700';
+  const running = j.status === 'running';
+  return (
+    <div className="flex items-center gap-3 py-3 border-b border-slate-100 last:border-0">
+      <div className="w-16 flex-shrink-0">
+        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${style}`}>
+          <StatusDot running={running} />
+          {j.status}
+        </span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-xs px-1 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded font-medium flex-shrink-0">local</span>
+          <span className="text-sm text-slate-800 font-medium truncate">{describeJob(j)}</span>
+        </div>
+        {j.status === 'running' && (j.current_stage || j.current_company) && (
+          <p className="text-xs text-slate-400 truncate mt-0.5">
+            {[j.current_stage?.replace(/_/g, ' '), j.current_company].filter(Boolean).join(' · ')}
+          </p>
+        )}
+        {j.error_message && j.status === 'failed' && (
+          <p className="text-xs text-red-500 truncate mt-0.5">{j.error_message}</p>
+        )}
+      </div>
+      <div className="text-right text-xs text-slate-400 flex-shrink-0 min-w-[90px]">
+        <div>{formatDateTime(j.created_at)}</div>
+        <div className="mt-0.5 tabular-nums">{fmtWallDuration(j.started_at, j.completed_at)}</div>
+      </div>
     </div>
   );
 }
 
-function JobCard({ job, onClick }: { job: PipelineJob; onClick: () => void }) {
-  const flags: string[] = [];
-  try {
-    const config: JobConfig = JSON.parse(job.config_json);
-    if (config.force) flags.push('force');
-    if (config.clean) flags.push('clean');
-    if (config.per_company) flags.push('per-company');
-    if (config.new_emails) flags.push('new-emails');
-  } catch { /* ignore */ }
+function ActivityTab({ prefectEnabled }: { prefectEnabled: boolean }) {
+  const [prefectRuns, setPrefectRuns] = useState<PrefectFlowRun[]>([]);
+  const [localJobs, setLocalJobs] = useState<PipelineJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [stateFilter, setStateFilter] = useState('');
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const load = useCallback(async () => {
+    const [jobs, runs] = await Promise.all([
+      api.getJobs({ limit: 50 }),
+      prefectEnabled ? api.getPrefectRuns(undefined, 100).catch(() => []) : Promise.resolve([]),
+    ]);
+    setLocalJobs(jobs.items);
+    setPrefectRuns(runs);
+    setLoading(false);
+  }, [prefectEnabled]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Auto-refresh when something is running
+  useEffect(() => {
+    const hasRunning = localJobs.some(j => j.status === 'running' || j.status === 'queued')
+      || prefectRuns.some(r => r.state_type === 'RUNNING' || r.state_type === 'SCHEDULED');
+    if (hasRunning) {
+      timerRef.current = setInterval(load, 8_000);
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [localJobs, prefectRuns, load]);
+
+  const items: ActivityItem[] = [
+    ...localJobs.map(j => ({
+      kind: 'local' as const,
+      job: j,
+      time: new Date(j.started_at ?? j.created_at).getTime(),
+    })),
+    ...prefectRuns.map(r => ({
+      kind: 'prefect' as const,
+      run: r,
+      time: r.start_time ? new Date(r.start_time).getTime() : 0,
+    })),
+  ]
+    .filter(item => {
+      if (!stateFilter) return true;
+      const state = item.kind === 'local' ? item.job.status : item.run.state_type.toLowerCase();
+      if (stateFilter === 'running') return state === 'running';
+      if (stateFilter === 'failed') return state === 'failed' || state === 'crashed';
+      if (stateFilter === 'completed') return state === 'completed';
+      return true;
+    })
+    .sort((a, b) => b.time - a.time);
+
+  if (loading) {
+    return <div className="animate-pulse space-y-2">{Array.from({ length: 5 }).map((_, i) => (
+      <div key={i} className="h-12 bg-slate-100 rounded" />
+    ))}</div>;
+  }
 
   return (
-    <div
-      onClick={onClick}
-      className="card p-4 hover:shadow-md hover:border-slate-300 transition-all cursor-pointer"
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <StatusBadge status={job.status} />
-            {job.prefect_deployment_name && (
-              <span className="text-xs px-1.5 py-0.5 bg-purple-50 text-purple-600 border border-purple-200 rounded font-medium">
-                prefect:{job.prefect_deployment_name}
-              </span>
-            )}
-            {job.status === 'running' && job.current_stage && (
-              <span className="text-xs text-blue-600 font-medium">
-                {job.current_stage.replace(/_/g, ' ')}
-              </span>
-            )}
-            {job.status === 'running' && job.current_company && (
-              <span className="text-xs text-slate-500">{job.current_company}</span>
-            )}
+    <div>
+      <div className="flex gap-2 mb-4">
+        {['', 'running', 'failed', 'completed'].map(f => (
+          <button
+            key={f}
+            onClick={() => setStateFilter(f)}
+            className={`px-3 py-1 text-xs rounded-full font-medium transition-colors ${
+              stateFilter === f
+                ? 'bg-slate-800 text-white'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            {f || 'All'}
+          </button>
+        ))}
+      </div>
+      {items.length === 0
+        ? <EmptyState message="No pipeline runs yet" />
+        : <div className="card divide-y divide-slate-100 p-0 overflow-hidden">
+            {items.map(item => (
+              <ActivityRow
+                key={item.kind === 'local' ? `local-${item.job.id}` : `prefect-${item.run.id}`}
+                item={item}
+              />
+            ))}
           </div>
-          <p className="text-sm font-medium text-slate-900">{describeJob(job)}</p>
-          {flags.length > 0 && (
-            <div className="flex gap-1 mt-1">
-              {flags.map(f => (
-                <span key={f} className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded">{f}</span>
-              ))}
+      }
+    </div>
+  );
+}
+
+// ── AI Runs tab: processing_runs ──────────────────────────────────────────────
+
+function StatsBar({ stats }: { stats: PipelineRunsStats }) {
+  const total = stats.by_stage.reduce((a, s) => ({
+    runs: a.runs + Number(s.run_count),
+    input: a.input + Number(s.total_input),
+    output: a.output + Number(s.total_output),
+    calls: a.calls + Number(s.total_llm_calls),
+    errors: a.errors + Number(s.error_count),
+  }), { runs: 0, input: 0, output: 0, calls: 0, errors: 0 });
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5">
+      {[
+        { label: 'Total runs', value: total.runs.toLocaleString() },
+        { label: 'Tokens in', value: fmtTokens(total.input) },
+        { label: 'Tokens out', value: fmtTokens(total.output) },
+        { label: 'LLM calls', value: total.calls.toLocaleString() },
+        { label: 'Errors', value: total.errors.toLocaleString(), red: total.errors > 0 },
+      ].map(({ label, value, red }) => (
+        <div key={label} className="card p-3 text-center">
+          <p className={`text-xl font-bold ${red ? 'text-red-600' : 'text-slate-800'}`}>{value}</p>
+          <p className="text-xs text-slate-400 mt-0.5">{label}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StageBreakdown({ stats }: { stats: PipelineRunsStats }) {
+  return (
+    <div className="card mb-5 overflow-hidden">
+      <div className="px-4 py-2.5 border-b border-slate-100 bg-slate-50">
+        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">By stage</p>
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-slate-100 text-slate-400 text-left">
+            <th className="px-4 py-2 font-medium">Stage</th>
+            <th className="px-3 py-2 font-medium text-right">Runs</th>
+            <th className="px-3 py-2 font-medium text-right">Tokens in</th>
+            <th className="px-3 py-2 font-medium text-right">Tokens out</th>
+            <th className="px-3 py-2 font-medium text-right">LLM calls</th>
+            <th className="px-3 py-2 font-medium text-right">Errors</th>
+          </tr>
+        </thead>
+        <tbody>
+          {stats.by_stage.map(s => (
+            <tr key={s.stage} className="border-b border-slate-50 hover:bg-slate-50">
+              <td className="px-4 py-2 font-mono text-slate-700">{shortStage(s.stage)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-slate-600">{Number(s.run_count).toLocaleString()}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtTokens(Number(s.total_input))}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtTokens(Number(s.total_output))}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-slate-600">{Number(s.total_llm_calls).toLocaleString()}</td>
+              <td className={`px-3 py-2 text-right tabular-nums font-medium ${Number(s.error_count) > 0 ? 'text-red-600' : 'text-slate-400'}`}>
+                {Number(s.error_count)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AiRunRow({ run }: { run: ProcessingRunSummary }) {
+  const [expanded, setExpanded] = useState(false);
+  const ok = !run.error;
+  const duration = run.total_llm_ms ? fmtDuration(run.total_llm_ms) : '—';
+  const wallTime = fmtWallDuration(run.started_at, run.completed_at);
+
+  return (
+    <>
+      <tr
+        className={`border-b border-slate-50 hover:bg-slate-50 cursor-pointer text-xs ${expanded ? 'bg-slate-50' : ''}`}
+        onClick={() => setExpanded(e => !e)}
+      >
+        <td className="px-4 py-2.5 text-slate-500 tabular-nums font-mono">{formatDateTime(run.started_at).split(' ')[0]}</td>
+        <td className="px-3 py-2.5 font-medium text-slate-800 max-w-[120px] truncate">{run.company_domain}</td>
+        <td className="px-3 py-2.5 font-mono text-slate-600">{shortStage(run.mode)}</td>
+        <td className="px-3 py-2.5 text-slate-500">{run.model ?? '—'}</td>
+        <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">{fmtTokens(run.input_tokens)}</td>
+        <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">{fmtTokens(run.output_tokens)}</td>
+        <td className="px-3 py-2.5 text-right tabular-nums text-slate-500">{run.llm_calls || '—'}</td>
+        <td className="px-3 py-2.5 text-right tabular-nums text-slate-500">{duration}</td>
+        <td className="px-3 py-2.5 text-right tabular-nums text-slate-400">{wallTime}</td>
+        <td className="px-4 py-2.5 text-center">
+          {ok
+            ? <span className="text-green-600">✓</span>
+            : <span className="text-red-500" title={run.error ?? ''}>✗</span>
+          }
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="bg-slate-50 border-b border-slate-100">
+          <td colSpan={10} className="px-4 pb-3 pt-1">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs text-slate-600">
+              <div><span className="font-medium text-slate-400 block">Events created</span>{run.events_created}</div>
+              <div><span className="font-medium text-slate-400 block">Discussions</span>{run.discussions_created} new · {run.discussions_updated} updated</div>
+              <div><span className="font-medium text-slate-400 block">Actions</span>{run.actions_proposed}</div>
+              <div><span className="font-medium text-slate-400 block">Prompt hash</span><span className="font-mono">{run.prompt_hash?.slice(0, 8) ?? '—'}</span></div>
+            </div>
+            {run.error && (
+              <div className="mt-2 text-xs text-red-600 bg-red-50 px-3 py-2 rounded border border-red-100">
+                {run.error}
+              </div>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+type InProgressItem = { company_domain: string; threads_done: number; events_committed: number; last_checkpoint: string };
+
+function AiRunsTab() {
+  const [runs, setRuns] = useState<ProcessingRunSummary[]>([]);
+  const [stats, setStats] = useState<PipelineRunsStats | null>(null);
+  const [inProgress, setInProgress] = useState<InProgressItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [stageFilter, setStageFilter] = useState('');
+  const [offset, setOffset] = useState(0);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [res, statsRes, ipRes] = await Promise.all([
+        api.getPipelineRuns({ stage: stageFilter || undefined, limit: LIMIT, offset }),
+        stats === null ? api.getPipelineRunStats() : Promise.resolve(null),
+        api.getPipelineRunsInProgress(),
+      ]);
+      setRuns(res.items);
+      setTotal(res.total);
+      if (statsRes) setStats(statsRes);
+      setInProgress(ipRes.items);
+    } finally {
+      setLoading(false);
+    }
+  }, [stageFilter, offset]);
+
+  useEffect(() => { setOffset(0); }, [stageFilter]);
+  useEffect(() => { load(); }, [load]);
+
+  // Auto-refresh while something is in progress
+  useEffect(() => {
+    if (inProgress.length === 0) return;
+    const t = setInterval(load, 15_000);
+    return () => clearInterval(t);
+  }, [inProgress.length, load]);
+
+  const stages = stats ? [...new Set(stats.by_stage.map(s => s.stage))] : [];
+  const page = Math.floor(offset / LIMIT) + 1;
+  const totalPages = Math.ceil(total / LIMIT);
+
+  return (
+    <div>
+      {stats && <StatsBar stats={stats} />}
+      {stats && stats.by_stage.length > 1 && <StageBreakdown stats={stats} />}
+
+      {inProgress.length > 0 && (
+        <div className="mb-4 card border-blue-200 bg-blue-50 p-3">
+          <p className="text-xs font-semibold text-blue-700 mb-2">In progress (incremental commits)</p>
+          <div className="space-y-1.5">
+            {inProgress.map(ip => (
+              <div key={ip.company_domain} className="flex items-center gap-3 text-xs">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />
+                <span className="font-medium text-blue-800">{ip.company_domain}</span>
+                <span className="text-blue-600">{ip.threads_done} threads · {ip.events_committed} events committed</span>
+                <span className="text-blue-400 ml-auto">last checkpoint {formatDateTime(ip.last_checkpoint)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Stage filter */}
+      <div className="flex gap-2 mb-4 flex-wrap">
+        {['', ...stages].map(s => (
+          <button
+            key={s}
+            onClick={() => setStageFilter(s)}
+            className={`px-3 py-1 text-xs rounded-full font-medium transition-colors ${
+              stageFilter === s
+                ? 'bg-slate-800 text-white'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            {s ? shortStage(s) : 'All stages'}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="animate-pulse space-y-1.5">{Array.from({ length: 8 }).map((_, i) => (
+          <div key={i} className="h-10 bg-slate-100 rounded" />
+        ))}</div>
+      ) : runs.length === 0 ? (
+        <EmptyState message="No AI runs yet" />
+      ) : (
+        <>
+          <div className="card overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 text-slate-400 text-left">
+                    <th className="px-4 py-2.5 font-medium">Date</th>
+                    <th className="px-3 py-2.5 font-medium">Company</th>
+                    <th className="px-3 py-2.5 font-medium">Stage</th>
+                    <th className="px-3 py-2.5 font-medium">Model</th>
+                    <th className="px-3 py-2.5 font-medium text-right">Tokens in</th>
+                    <th className="px-3 py-2.5 font-medium text-right">Tokens out</th>
+                    <th className="px-3 py-2.5 font-medium text-right">Calls</th>
+                    <th className="px-3 py-2.5 font-medium text-right">LLM time</th>
+                    <th className="px-3 py-2.5 font-medium text-right">Wall time</th>
+                    <th className="px-4 py-2.5 font-medium text-center">OK</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.map(r => <AiRunRow key={r.id} run={r} />)}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          {totalPages > 1 && (
+            <div className="mt-4 flex justify-center gap-2">
+              <button
+                disabled={page <= 1}
+                onClick={() => setOffset(o => Math.max(0, o - LIMIT))}
+                className="px-3 py-1 text-xs rounded bg-slate-100 text-slate-600 disabled:opacity-40"
+              >
+                ← Prev
+              </button>
+              <span className="px-3 py-1 text-xs text-slate-500">
+                {page} / {totalPages} ({total.toLocaleString()} total)
+              </span>
+              <button
+                disabled={page >= totalPages}
+                onClick={() => setOffset(o => o + LIMIT)}
+                className="px-3 py-1 text-xs rounded bg-slate-100 text-slate-600 disabled:opacity-40"
+              >
+                Next →
+              </button>
             </div>
           )}
-          <ProgressBar job={job} />
-        </div>
-        <div className="text-right text-xs text-slate-500 flex-shrink-0">
-          <div>{formatDateTime(job.created_at)}</div>
-          {job.started_at && (
-            <div className="mt-0.5">{formatDuration(job.started_at, job.completed_at)}</div>
-          )}
-        </div>
-      </div>
-      {job.error_message && job.status === 'failed' && (
-        <div className="mt-2 text-xs text-red-600 bg-red-50 px-2 py-1 rounded truncate">
-          {job.error_message}
-        </div>
+        </>
       )}
     </div>
   );
 }
 
-// ── Prefect panel ─────────────────────────────────────────────────────────────
-
-const PREFECT_STATE_STYLES: Record<string, string> = {
-  COMPLETED: 'bg-green-100 text-green-800',
-  FAILED: 'bg-red-100 text-red-800',
-  CRASHED: 'bg-red-100 text-red-800',
-  CANCELLED: 'bg-amber-100 text-amber-800',
-  CANCELLING: 'bg-amber-100 text-amber-800',
-  RUNNING: 'bg-blue-100 text-blue-700',
-  SCHEDULED: 'bg-slate-100 text-slate-700',
-  PENDING: 'bg-slate-100 text-slate-700',
-};
+// ── Deployments tab: manage Prefect deployments ───────────────────────────────
 
 function PrefectRunRow({ run }: { run: PrefectFlowRun }) {
-  const style = PREFECT_STATE_STYLES[run.state_type] ?? 'bg-slate-100 text-slate-600';
+  const style = PREFECT_STATUS_STYLES[run.state_type] ?? 'bg-slate-100 text-slate-600';
   const duration = run.start_time && run.end_time
     ? Math.round((new Date(run.end_time).getTime() - new Date(run.start_time).getTime()) / 1000)
     : null;
   return (
     <div className="flex items-center gap-3 py-2.5 border-b border-slate-100 last:border-0 text-sm">
       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${style}`}>
-        {run.state_type === 'RUNNING' && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mr-1.5 animate-pulse" />}
+        {run.state_type === 'RUNNING' && <StatusDot running />}
         {run.state_name}
       </span>
       <span className="text-slate-700 truncate flex-1">{run.name}</span>
@@ -180,9 +523,7 @@ function PrefectRunRow({ run }: { run: PrefectFlowRun }) {
 }
 
 function PrefectDeploymentCard({
-  deployment,
-  runs,
-  onTrigger,
+  deployment, runs, onTrigger,
 }: {
   deployment: PrefectDeployment;
   runs: PrefectFlowRun[];
@@ -190,8 +531,6 @@ function PrefectDeploymentCard({
 }) {
   const [triggering, setTriggering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const cron = deployment.schedules?.[0]?.schedule?.cron;
   const activeSchedule = deployment.schedules?.find(s => s.active);
 
   const handleTrigger = async () => {
@@ -234,19 +573,17 @@ function PrefectDeploymentCard({
         </button>
       </div>
       {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
-      {runs.length > 0 && (
-        <div className="border-t border-slate-100 pt-2">
-          {runs.slice(0, 5).map(r => <PrefectRunRow key={r.id} run={r} />)}
-        </div>
-      )}
-      {runs.length === 0 && (
-        <p className="text-xs text-slate-400 border-t border-slate-100 pt-2">No recent runs</p>
-      )}
+      <div className="border-t border-slate-100 pt-2">
+        {runs.length > 0
+          ? runs.slice(0, 5).map(r => <PrefectRunRow key={r.id} run={r} />)
+          : <p className="text-xs text-slate-400">No recent runs</p>
+        }
+      </div>
     </div>
   );
 }
 
-function PrefectPanel() {
+function DeploymentsTab() {
   const [deployments, setDeployments] = useState<PrefectDeployment[]>([]);
   const [runs, setRuns] = useState<PrefectFlowRun[]>([]);
   const [loading, setLoading] = useState(true);
@@ -276,14 +613,14 @@ function PrefectPanel() {
     return () => clearInterval(t);
   }, [load]);
 
-  const runsForDeployment = (depId: string) =>
-    runs.filter(r => r.deployment_id === depId);
+  const runsForDeployment = (depId: string) => runs.filter(r => r.deployment_id === depId);
 
   if (loading) {
     return (
       <div className="animate-pulse space-y-3">
-        <div className="h-24 bg-slate-100 rounded-lg" />
-        <div className="h-24 bg-slate-100 rounded-lg" />
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} className="h-24 bg-slate-100 rounded-lg" />
+        ))}
       </div>
     );
   }
@@ -318,75 +655,27 @@ function PrefectPanel() {
   );
 }
 
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+type Tab = 'activity' | 'ai-runs' | 'deployments';
+
 export default function JobsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-
-  const [items, setItems] = useState<PipelineJob[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [prefectOn, setPrefectOn] = useState(false);
   const [launcherOpen, setLauncherOpen] = useState(false);
-  const [prefectEnabled, setPrefectEnabled] = useState(false);
 
-  const activeTab = (searchParams.get('tab') as 'local' | 'prefect') ?? 'local';
-  const setTab = (t: string) => {
+  const activeTab = (searchParams.get('tab') as Tab) ?? 'activity';
+  const setTab = (t: Tab) => {
     const next = new URLSearchParams(searchParams);
     next.set('tab', t);
-    next.delete('page');
     setSearchParams(next);
   };
 
-  const status = searchParams.get('status') ?? '';
-  const page = parseInt(searchParams.get('page') ?? '1', 10);
-
-  // Auto-refresh interval ref
-  const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const fetchData = useCallback(() => {
-    setError(null);
-    api
-      .getJobs({ status: status || undefined, page, limit: LIMIT })
-      .then((data) => {
-        setItems(data.items);
-        setTotal(data.total);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err.message);
-        setLoading(false);
-      });
-  }, [status, page]);
-
   useEffect(() => {
-    api.getPrefectStatus().then(s => setPrefectEnabled(s.enabled)).catch(() => {});
+    api.getPrefectStatus().then(s => setPrefectOn(s.enabled)).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    setLoading(true);
-    fetchData();
-  }, [fetchData]);
-
-  // Auto-refresh every 5s if any job is running
-  useEffect(() => {
-    const hasRunning = items.some(j => j.status === 'running' || j.status === 'queued');
-    if (hasRunning) {
-      refreshTimer.current = setInterval(fetchData, 5000);
-    }
-    return () => {
-      if (refreshTimer.current) clearInterval(refreshTimer.current);
-    };
-  }, [items, fetchData]);
-
-  function updateParam(key: string, value: string) {
-    const next = new URLSearchParams(searchParams);
-    if (value) next.set(key, value);
-    else next.delete(key);
-    if (key !== 'page') next.delete('page');
-    setSearchParams(next);
-  }
-
-  // Open launcher if ?new=1 is in the URL
   useEffect(() => {
     if (searchParams.get('new') === '1') {
       setLauncherOpen(true);
@@ -398,16 +687,16 @@ export default function JobsPage() {
 
   const defaultCompany = searchParams.get('company') ?? undefined;
 
+  const tabs: Array<{ id: Tab; label: string; show?: boolean }> = [
+    { id: 'activity', label: 'Activity' },
+    { id: 'ai-runs', label: 'AI Runs' },
+    { id: 'deployments', label: 'Deployments', show: prefectOn },
+  ];
+
   return (
     <div className="p-4 sm:p-8">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Pipeline</h1>
-          {!loading && activeTab === 'local' && (
-            <p className="text-sm text-slate-500 mt-0.5">{total.toLocaleString()} local jobs</p>
-          )}
-        </div>
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-2xl font-bold text-slate-900">Pipelines</h1>
         <button
           onClick={() => setLauncherOpen(true)}
           className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
@@ -416,96 +705,34 @@ export default function JobsPage() {
         </button>
       </div>
 
-      {/* Tab bar (only shown when Prefect is enabled) */}
-      {prefectEnabled && (
-        <div className="flex border-b border-slate-200 mb-6">
+      <div className="flex border-b border-slate-200 mb-6 gap-1">
+        {tabs.filter(t => t.show !== false).map(t => (
           <button
-            onClick={() => setTab('local')}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${activeTab === 'local' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px ${
+              activeTab === t.id
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
           >
-            Local Jobs
+            {t.label}
           </button>
-          <button
-            onClick={() => setTab('prefect')}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${activeTab === 'prefect' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
-          >
-            Prefect Scheduler
-          </button>
-        </div>
-      )}
-
-      {/* Prefect panel */}
-      {prefectEnabled && activeTab === 'prefect' && <PrefectPanel />}
-
-      {/* Filter bar — only for local jobs */}
-      {activeTab === 'local' && (
-      <div className="flex flex-wrap gap-3 mb-6">
-        <select
-          value={status}
-          onChange={(e) => updateParam('status', e.target.value)}
-          className="filter-input"
-        >
-          <option value="">All statuses</option>
-          <option value="queued">Queued</option>
-          <option value="running">Running</option>
-          <option value="completed">Completed</option>
-          <option value="failed">Failed</option>
-          <option value="cancelled">Cancelled</option>
-        </select>
+        ))}
       </div>
-      )}
 
-      {/* Local job list */}
-      {activeTab === 'local' && (
-        error ? (
-          <div className="card p-6 text-center text-red-600">
-            <p className="font-medium">Failed to load jobs</p>
-            <p className="text-sm mt-1 text-red-500">{error}</p>
-            <button onClick={fetchData} className="mt-3 btn-secondary">Retry</button>
-          </div>
-        ) : loading ? (
-          <div className="space-y-3">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="card p-4 animate-pulse">
-                <div className="h-4 bg-slate-200 rounded w-16 mb-2" />
-                <div className="h-5 bg-slate-200 rounded w-2/3 mb-1" />
-                <div className="h-3 bg-slate-200 rounded w-1/3" />
-              </div>
-            ))}
-          </div>
-        ) : items.length === 0 ? (
-          <div className="card">
-            <EmptyState />
-          </div>
-        ) : (
-          <>
-            <div className="space-y-3">
-              {items.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  onClick={() => navigate(`/jobs/${job.id}`)}
-                />
-              ))}
-            </div>
-            <div className="mt-4">
-              <Pagination
-                page={page}
-                total={total}
-                limit={LIMIT}
-                onPageChange={(p) => updateParam('page', String(p))}
-              />
-            </div>
-          </>
-        )
-      )}
+      {activeTab === 'activity' && <ActivityTab prefectEnabled={prefectOn} />}
+      {activeTab === 'ai-runs' && <AiRunsTab />}
+      {activeTab === 'deployments' && prefectOn && <DeploymentsTab />}
 
-      {/* Job Launcher Modal */}
       <JobLauncher
         open={launcherOpen}
-        onClose={() => setLauncherOpen(false)}
-        onCreated={(jobId) => navigate(`/jobs/${jobId}`)}
         defaultCompany={defaultCompany}
+        onClose={() => setLauncherOpen(false)}
+        onCreated={jobId => {
+          setLauncherOpen(false);
+          navigate(`/jobs/${jobId}`);
+        }}
       />
     </div>
   );

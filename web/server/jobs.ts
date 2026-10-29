@@ -25,6 +25,7 @@ const __dirname = path.dirname(__filename);
 
 export interface JobConfig {
   job_type: 'sync' | 'analyse';
+  account?: string | null;
   stages?: string[] | null;
   company?: string | null;
   label?: string | null;
@@ -287,7 +288,11 @@ const STAGE_DEPLOYMENTS: Record<string, string> = {
 // Returns null if the job should run locally.
 function resolvePrefectDeployment(config: JobConfig): string | null {
   if (!prefectEnabled()) return null;
-  if (config.job_type === 'sync') return 'ingest';
+  if (config.job_type === 'sync') {
+    // Account-specific sync runs locally — Prefect ingest deployment accepts no parameters.
+    if (config.account) return null;
+    return 'ingest';
+  }
   if (config.job_type === 'analyse') {
     if (config.company) return 'company-ai';
     // Single-stage global run → use the dedicated per-stage deployment.
@@ -317,6 +322,7 @@ export async function createJob(config: JobConfig): Promise<PipelineJob> {
     if (deployment) {
       const parameters: Record<string, unknown> = {};
       const isPerStageDeployment = Object.values(STAGE_DEPLOYMENTS).includes(deploymentName);
+      if (config.account) parameters.account = config.account;
       if (config.company) parameters.domain = config.company;
       // Per-stage deployments don't accept a 'stages' param — they are single-stage by design.
       if (config.stages?.length && !isPerStageDeployment) parameters.stages = config.stages;
@@ -573,7 +579,9 @@ async function processQueue(): Promise<void> {
 
 function buildArgs(config: JobConfig): string[] {
   if (config.job_type === 'sync') {
-    return ['sync'];
+    const args = ['sync'];
+    if (config.account) args.push('--account', config.account);
+    return args;
   }
 
   const args = ['analyse'];

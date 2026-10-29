@@ -181,7 +181,7 @@ def _get_new_emails_for_company(
     # Get threads needing processing (same logic as _get_threads_to_process)
     thread_rows = fetchall(
         conn,
-        """SELECT DISTINCT e.thread_id
+        """SELECT e.thread_id
            FROM emails e
            WHERE e.thread_id IS NOT NULL
              AND (
@@ -203,7 +203,8 @@ def _get_new_emails_for_company(
                  SELECT DISTINCT e2.thread_id FROM emails e2
                  WHERE e2.from_address LIKE ? OR e2.to_addresses LIKE ? OR e2.cc_addresses LIKE ?
              )
-           ORDER BY e.date DESC
+           GROUP BY e.thread_id
+           ORDER BY MAX(e.date) DESC
            LIMIT 20""",
         (like, like, like),
     )

@@ -18,7 +18,8 @@ from email_manager.ingestion.threading import insert_email_references
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 # System CA bundle (includes proxy MITM CA when running behind a proxy).
-_SYSTEM_CA_CERTS = "/etc/ssl/certs/ca-certificates.crt"
+import os as _os
+_SYSTEM_CA_CERTS = _os.environ.get("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
 
 
 def _is_connection_error(e: Exception) -> bool:
@@ -63,7 +64,14 @@ def _build_bearer_token_service(bearer_token: str, api: str = "gmail", version: 
     from googleapiclient.discovery import build
 
     creds = _BearerTokenCredentials(bearer_token)
-    http = httplib2.Http(ca_certs=_SYSTEM_CA_CERTS)
+    # Route through Prokura proxy at 127.0.0.1:8080 so the placeholder bearer
+    # token gets substituted with the real credential before reaching Gmail.
+    proxy_info = httplib2.ProxyInfo(
+        httplib2.socks.PROXY_TYPE_HTTP,
+        "127.0.0.1",
+        8080,
+    )
+    http = httplib2.Http(ca_certs=_SYSTEM_CA_CERTS, proxy_info=proxy_info)
     authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http)
     return build(api, version, http=authed_http)
 

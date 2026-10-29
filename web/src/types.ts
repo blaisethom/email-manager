@@ -102,6 +102,7 @@ export interface ContactSummary {
   sent_count: number;
   received_count: number;
   last_seen: string | null;
+  summary: string | null;
 }
 
 export interface Contact {
@@ -321,6 +322,27 @@ export interface ProcessingRun {
   llm_calls: number;
   total_llm_ms: number;
   error: string | null;
+}
+
+export interface ProcessingRunSummary extends ProcessingRun {
+  company_domain: string;
+  prompt_hash: string | null;
+}
+
+export interface PipelineRunsResponse {
+  items: ProcessingRunSummary[];
+  total: number;
+}
+
+export interface PipelineRunsStats {
+  by_stage: Array<{
+    stage: string;
+    run_count: number;
+    total_input: number;
+    total_output: number;
+    total_llm_calls: number;
+    error_count: number;
+  }>;
 }
 
 export interface LlmCallsByStage {

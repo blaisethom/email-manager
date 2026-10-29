@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 3000,
-    allowedHosts: ['emailer.agent.ribiseln.com'],
+    allowedHosts: ['emailer.agent.ribiseln.com', 'crm.agent.ribiseln.com'],
     proxy: {
       '/api': {
         target: 'http://localhost:3001',

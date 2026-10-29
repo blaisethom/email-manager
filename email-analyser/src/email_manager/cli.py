@@ -4348,6 +4348,72 @@ def prep_index(ctx: click.Context, force: bool) -> None:
     _run_prep(ctx, ["build_search_index"], force=force)
 
 
+# ── zoom group ────────────────────────────────────────────────────────────
+
+
+@cli.group()
+def zoom() -> None:
+    """Zoom meeting notes and recordings sync."""
+
+
+@zoom.command("sync")
+@click.option("--token", default=None, help="Override bearer token (default: ZOOM_TOKEN placeholder)")
+@click.option("--meetings/--no-meetings", default=True, show_default=True, help="Sync past meeting metadata")
+@click.option("--recordings/--no-recordings", default=True, show_default=True, help="Sync cloud recording metadata")
+@click.option("--from-date", default=None, help="For recordings only: start date YYYY-MM-DD")
+@click.option("--to-date", default=None, help="For recordings only: end date YYYY-MM-DD")
+@click.pass_context
+def zoom_sync(
+    ctx: click.Context,
+    token: str | None,
+    meetings: bool,
+    recordings: bool,
+    from_date: str | None,
+    to_date: str | None,
+) -> None:
+    """Sync Zoom past meetings and cloud recordings."""
+    from email_manager.integrations.zoom import ZoomClient, sync_meetings, sync_recordings
+    from email_manager.db import get_db
+    import datetime as dt
+
+    config = ctx.obj["config"]
+    console = ctx.obj.get("console") or Console()
+    conn = get_db(config)
+
+    bearer = token or "ZOOM_TOKEN"
+    client = ZoomClient(bearer_token=bearer)
+
+    console.print("[bold]Zoom sync[/bold]")
+
+    if meetings:
+        try:
+            n = sync_meetings(conn, client, console=console)
+            console.print(f"  Meetings synced: {n}")
+        except RuntimeError as exc:
+            console.print(f"[red]Meetings failed:[/red] {exc}")
+
+    if recordings:
+        if not from_date:
+            from_date = (dt.date.today() - dt.timedelta(days=90)).isoformat()
+        if not to_date:
+            to_date = dt.date.today().isoformat()
+        try:
+            r = sync_recordings(conn, client, from_date=from_date, to_date=to_date, console=console)
+            console.print(f"  Recordings synced: {r}")
+        except RuntimeError as exc:
+            console.print(f"[red]Recordings failed:[/red] {exc}")
+
+
+@zoom.command("recordings")
+@click.option("--from-date", default=None)
+@click.option("--to-date", default=None)
+@click.option("--token", default=None)
+@click.pass_context
+def zoom_recordings_cmd(ctx: click.Context, from_date: str | None, to_date: str | None, token: str | None) -> None:
+    """Sync only Zoom cloud recording metadata."""
+    ctx.invoke(zoom_sync, token=token, meetings=False, recordings=True, from_date=from_date, to_date=to_date)
+
+
 # ── admin group ───────────────────────────────────────────────────────────
 
 

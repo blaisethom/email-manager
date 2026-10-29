@@ -127,11 +127,18 @@ export async function listOrganizations(db: Database, opts: OrgListOptions): Pro
     LEFT JOIN hubspot_companies hc ON hc.id = rhs.hubspot_id
   `;
 
-  const totalRow = await db.queryOne<{ cnt: number }>(
-    `${ORG_LIST_CTE} SELECT COUNT(*) AS cnt ${baseFrom} ${whereClause}`,
+  // Single CTE pass: total count + staleness counts together to avoid running the expensive join twice.
+  const countRow = await db.queryOne<{ cnt: number; stale: number; up_to_date: number; never_analysed: number }>(
+    `${ORG_LIST_CTE}
+     SELECT
+       COUNT(*) AS cnt,
+       SUM(CASE WHEN ec.staleness_status = 'stale' THEN 1 ELSE 0 END) AS stale,
+       SUM(CASE WHEN ec.staleness_status = 'up_to_date' THEN 1 ELSE 0 END) AS up_to_date,
+       SUM(CASE WHEN ec.staleness_status = 'never' OR ec.staleness_status IS NULL THEN 1 ELSE 0 END) AS never_analysed
+     ${baseFrom} ${whereClause}`,
     ...params
   );
-  const total = Number(totalRow?.cnt ?? 0);
+  const total = Number(countRow?.cnt ?? 0);
 
   const rows = await db.query<DbRow & {
     org_id: number;
@@ -218,18 +225,6 @@ export async function listOrganizations(db: Database, opts: OrgListOptions): Pro
     return item;
   });
 
-  // Counts for the status pills. Same WHERE shape but only counts staleness buckets.
-  const staleCounts = await db.queryOne<{ stale: number; up_to_date: number; never_analysed: number }>(
-    `${ORG_LIST_CTE}
-     SELECT
-       SUM(CASE WHEN ec.staleness_status = 'stale' THEN 1 ELSE 0 END) AS stale,
-       SUM(CASE WHEN ec.staleness_status = 'up_to_date' THEN 1 ELSE 0 END) AS up_to_date,
-       SUM(CASE WHEN ec.staleness_status = 'never' OR ec.staleness_status IS NULL THEN 1 ELSE 0 END) AS never_analysed
-     ${baseFrom}
-     ${whereClause}`,
-    ...params
-  );
-
   const allLabels = (
     await db.query<{ label: string }>('SELECT DISTINCT label FROM company_labels ORDER BY label')
   ).map(r => r.label);
@@ -238,9 +233,9 @@ export async function listOrganizations(db: Database, opts: OrgListOptions): Pro
     items,
     total,
     labels: allLabels,
-    stale_count: Number(staleCounts?.stale ?? 0),
-    up_to_date_count: Number(staleCounts?.up_to_date ?? 0),
-    never_analysed_count: Number(staleCounts?.never_analysed ?? 0),
+    stale_count: Number(countRow?.stale ?? 0),
+    up_to_date_count: Number(countRow?.up_to_date ?? 0),
+    never_analysed_count: Number(countRow?.never_analysed ?? 0),
   };
 }
 

@@ -26,9 +26,14 @@ const __dirname = path.dirname(__filename);
 
 const db: Database = createDb();
 
-// Ensure indexes exist for expensive queries (SQLite only)
+// Ensure indexes exist for expensive queries
 if (db.backend === 'sqlite') {
   db.exec('CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder, from_address)');
+  // Covers loadLastAnalysed in entities.ts: LOWER(company_domain) IN (...) AND mode LIKE 'staged:%' AND error IS NULL
+  db.exec('CREATE INDEX IF NOT EXISTS idx_pr_domain_lower ON processing_runs(LOWER(company_domain), mode, error, started_at)');
+}
+if (db.backend === 'postgres') {
+  db.exec('CREATE INDEX IF NOT EXISTS idx_pr_domain_lower ON processing_runs(LOWER(company_domain), mode, error, started_at)');
 }
 
 // Ensure tables exist (may not yet if Python migration hasn't run)
@@ -464,8 +469,9 @@ app.get('/api/companies/:id', async (req: Request, res: Response) => {
   );
 
   const contacts = await db.query(
-    `SELECT ct.id, ct.email, ct.name, ct.email_count, ct.sent_count, ct.received_count, ct.last_seen
+    `SELECT ct.id, ct.email, ct.name, ct.email_count, ct.sent_count, ct.received_count, ct.last_seen, cm.summary
      FROM contacts ct INNER JOIN company_contacts cc ON cc.contact_email = ct.email
+     LEFT JOIN contact_memories cm ON cm.email = ct.email
      WHERE cc.company_id = ? ORDER BY ct.email_count DESC LIMIT 50`, id
   );
 
@@ -1839,6 +1845,7 @@ app.post('/api/jobs', async (req: Request, res: Response) => {
 
   const config: JobConfig = {
     job_type: jobType,
+    account: body.account ?? null,
     stages: body.stages ?? null,
     company: body.company ?? null,
     label: body.label ?? null,
@@ -2201,10 +2208,225 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
+// ── /api/zoom ─────────────────────────────────────────────────────────────
+
+app.get('/api/zoom/notes', async (req: Request, res: Response) => {
+  const q = (req.query.q as string) ?? '';
+  const from = (req.query.from as string) ?? '';
+  const to = (req.query.to as string) ?? '';
+  const sort = (req.query.sort as string) ?? 'start_time';
+  const order = (req.query.order as string) === 'asc' ? 'ASC' : 'DESC';
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 25));
+  const offset = (page - 1) * limit;
+
+  const allowedSorts: Record<string, string> = {
+    start_time: 'start_time',
+    summary_created_at: 'summary_created_at',
+    topic: 'topic',
+  };
+  const sortCol = allowedSorts[sort] ?? 'start_time';
+
+  const params: unknown[] = [];
+  const where: string[] = [];
+
+  if (q) {
+    where.push('(topic LIKE ? OR summary_title LIKE ? OR summary_overview LIKE ? OR next_steps LIKE ? OR notes_content LIKE ?)');
+    params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+  }
+  if (from) { where.push('start_time >= ?'); params.push(from); }
+  if (to) { where.push('start_time <= ?'); params.push(to + 'T23:59:59Z'); }
+
+  const whereClause = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
+
+  try {
+    const totalRow = await db.queryOne<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM zoom_meeting_notes ${whereClause}`,
+      ...params
+    );
+    const total = Number(totalRow?.cnt ?? 0);
+
+    const items = await db.query(
+      `SELECT id, meeting_uuid, meeting_id, host_email, topic,
+              start_time, end_time, duration_mins, total_person_mins,
+              participants_count, has_summary, notes_content,
+              summary_created_at, summary_title, summary_overview,
+              summary_details, next_steps, audio_vtt_url, join_url
+       FROM zoom_meeting_notes ${whereClause}
+       ORDER BY ${sortCol} ${order} NULLS LAST
+       LIMIT ? OFFSET ?`,
+      ...params, limit, offset
+    );
+
+    const enriched = items.map((n: any) => ({
+      ...n,
+      has_summary: !!n.has_summary,
+      summary_details: n.summary_details ? JSON.parse(n.summary_details) : [],
+      next_steps: n.next_steps ? JSON.parse(n.next_steps) : [],
+    }));
+
+    res.json({ items: enriched, total });
+  } catch (err: any) {
+    if (String(err).includes('does not exist') || String(err).includes('no such table')) {
+      res.json({ items: [], total: 0 });
+    } else {
+      res.status(500).json({ error: String(err) });
+    }
+  }
+});
+
+app.get('/api/zoom/recordings', async (req: Request, res: Response) => {
+  const q = (req.query.q as string) ?? '';
+  const from = (req.query.from as string) ?? '';
+  const to = (req.query.to as string) ?? '';
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 25));
+  const offset = (page - 1) * limit;
+
+  const params: unknown[] = [];
+  const where: string[] = [];
+
+  if (q) {
+    where.push('(topic LIKE ? OR file_type LIKE ?)');
+    params.push(`%${q}%`, `%${q}%`);
+  }
+  if (from) { where.push('start_time >= ?'); params.push(from); }
+  if (to) { where.push('start_time <= ?'); params.push(to + 'T23:59:59Z'); }
+
+  const whereClause = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
+
+  try {
+    const totalRow = await db.queryOne<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM zoom_recordings ${whereClause}`,
+      ...params
+    );
+    const total = Number(totalRow?.cnt ?? 0);
+
+    const items = await db.query(
+      `SELECT id, meeting_uuid, recording_id, meeting_id, host_email, topic,
+              start_time, duration_mins, file_type, file_size, status,
+              download_url, play_url
+       FROM zoom_recordings ${whereClause}
+       ORDER BY start_time DESC NULLS LAST
+       LIMIT ? OFFSET ?`,
+      ...params, limit, offset
+    );
+
+    res.json({ items, total });
+  } catch (err: any) {
+    if (String(err).includes('does not exist') || String(err).includes('no such table')) {
+      res.json({ items: [], total: 0 });
+    } else {
+      res.status(500).json({ error: String(err) });
+    }
+  }
+});
+
 // ── Start server ───────────────────────────────────────────────────────────
 
 registerReviewRoutes(app, db);
 registerConfigRoutes(app);
+
+// ── /api/pipeline-runs ────────────────────────────────────────────────────
+
+app.get('/api/pipeline-runs/stats', async (_req: Request, res: Response) => {
+  try {
+    const byStage = await db.query(`
+      SELECT
+        mode AS stage,
+        COUNT(*) AS run_count,
+        COALESCE(SUM(input_tokens), 0) AS total_input,
+        COALESCE(SUM(output_tokens), 0) AS total_output,
+        COALESCE(SUM(llm_calls), 0) AS total_llm_calls,
+        SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS error_count
+      FROM processing_runs
+      GROUP BY mode
+      ORDER BY run_count DESC
+    `);
+    res.json({ by_stage: byStage });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/pipeline-runs', async (req: Request, res: Response) => {
+  try {
+    const stage = (req.query.stage as string) ?? '';
+    const limit = Math.min(200, parseInt(req.query.limit as string, 10) || 50);
+    const offset = Math.max(0, parseInt(req.query.offset as string, 10) || 0);
+
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (stage) {
+      conditions.push('pr.mode = ?');
+      params.push(stage);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const [rows, countRow] = await Promise.all([
+      db.query(`
+        SELECT
+          pr.id, pr.company_domain, pr.mode, pr.model,
+          pr.started_at, pr.completed_at,
+          pr.events_created, pr.discussions_created, pr.discussions_updated, pr.actions_proposed,
+          pr.input_tokens, pr.output_tokens, pr.llm_calls, pr.error, pr.prompt_hash,
+          COALESCE((SELECT SUM(lc.duration_ms) FROM llm_calls lc WHERE lc.run_id = pr.id), 0) AS total_llm_ms
+        FROM processing_runs pr
+        ${where}
+        ORDER BY pr.started_at DESC
+        LIMIT ? OFFSET ?
+      `, ...params, limit, offset),
+      db.queryOne(`SELECT COUNT(*) AS n FROM processing_runs pr ${where}`, ...params),
+    ]);
+
+    res.json({ items: rows, total: Number(countRow?.n ?? 0) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/pipeline-runs/in-progress — companies with event_ledger activity but no completed processing_run
+app.get('/api/pipeline-runs/in-progress', async (_req: Request, res: Response) => {
+  try {
+    // Find thread_ids with recent event_ledger activity that have no staged:extract_events processing_run
+    // from_domain column is unpopulated — extract from from_address and join to companies.
+    // Exclude own-account domains (derived from emails.account_name where it contains '@').
+    const rows = await db.query(`
+      WITH own_domains AS (
+        SELECT LOWER(SPLIT_PART(account_name, '@', 2)) AS domain
+        FROM emails
+        WHERE account_name LIKE '%@%'
+        GROUP BY LOWER(SPLIT_PART(account_name, '@', 2))
+      )
+      SELECT
+        c.domain AS company_domain,
+        COUNT(DISTINCT el.thread_id) AS threads_done,
+        COUNT(DISTINCT el.id) AS events_committed,
+        MAX(el.created_at) AS last_checkpoint
+      FROM event_ledger el
+      JOIN emails e ON e.thread_id = el.thread_id
+      JOIN companies c ON LOWER(SPLIT_PART(e.from_address, '@', 2)) = LOWER(c.domain)
+      WHERE el.created_at::timestamptz >= NOW() - INTERVAL '24 hours'
+        AND LOWER(c.domain) NOT IN (SELECT domain FROM own_domains)
+        AND EXISTS (SELECT 1 FROM company_labels cl WHERE cl.company_id = c.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM processing_runs pr
+          WHERE pr.company_domain = c.domain
+            AND pr.mode = 'staged:extract_events'
+            AND pr.completed_at::timestamptz >= el.created_at::timestamptz - INTERVAL '1 minute'
+        )
+      GROUP BY c.domain
+      HAVING COUNT(DISTINCT el.thread_id) > 0
+      ORDER BY last_checkpoint DESC
+      LIMIT 20
+    `);
+    res.json({ items: rows });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // ── Prefect proxy routes ────────────────────────────────────────────────────
 

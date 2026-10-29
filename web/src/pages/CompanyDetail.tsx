@@ -777,6 +777,30 @@ function ThreadRow({ thread }: { thread: CompanyThread }) {
   );
 }
 
+function CopyContactsButton({ contacts }: { contacts: CompanyDetail['contacts'] }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    const text = contacts.map((ct) => {
+      const line = `${ct.name ?? ''}\t${ct.email}\t${ct.email_count} emails`.trimStart();
+      return ct.summary ? `${line}\n  ${ct.summary}` : line;
+    }).join('\n');
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="text-xs text-slate-400 hover:text-slate-600 transition-colors"
+    >
+      {copied ? 'Copied ✓' : 'Copy'}
+    </button>
+  );
+}
+
 function StaleBanner({ data }: { data: CompanyDetail }) {
   const navigate = useNavigate();
   const [launching, setLaunching] = useState(false);
@@ -1005,12 +1029,15 @@ export default function CompanyDetailPage() {
           {/* Contacts */}
           {data.contacts.length > 0 && (
             <div className="card p-6 mb-6">
-              <h2 className="text-base font-semibold text-slate-900 mb-3">
-                Contacts
-                <span className="ml-2 text-sm font-normal text-slate-500">
-                  ({data.contacts.length})
-                </span>
-              </h2>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-base font-semibold text-slate-900">
+                  Contacts
+                  <span className="ml-2 text-sm font-normal text-slate-500">
+                    ({data.contacts.length})
+                  </span>
+                </h2>
+                <CopyContactsButton contacts={data.contacts} />
+              </div>
               <div className="divide-y divide-slate-100">
                 {data.contacts.slice(0, 10).map((ct) => (
                   <Link

@@ -32,6 +32,8 @@ import type {
   PrefectFlowRun,
   PrefectLog,
   PipelineCompaniesResponse,
+  PipelineRunsResponse,
+  PipelineRunsStats,
 } from './types';
 
 const BASE = '/api';
@@ -535,6 +537,20 @@ export const api = {
       const text = await res.text().catch(() => res.statusText);
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
+  },
+
+  // ── Pipeline runs (processing_runs) ───────────────────────────────────────
+
+  getPipelineRuns(params: { stage?: string; limit?: number; offset?: number } = {}): Promise<PipelineRunsResponse> {
+    return fetchJson(`${BASE}/pipeline-runs${buildQuery(params as Record<string, string | number | undefined>)}`);
+  },
+
+  getPipelineRunStats(): Promise<PipelineRunsStats> {
+    return fetchJson(`${BASE}/pipeline-runs/stats`);
+  },
+
+  getPipelineRunsInProgress(): Promise<{ items: Array<{ company_domain: string; threads_done: number; events_committed: number; last_checkpoint: string }> }> {
+    return fetchJson(`${BASE}/pipeline-runs/in-progress`);
   },
 
   // ── Prefect ───────────────────────────────────────────────────────────────

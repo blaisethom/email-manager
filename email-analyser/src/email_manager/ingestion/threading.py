@@ -349,7 +349,7 @@ def _find_thread_for_email(
     rows = conn.execute(
         """SELECT DISTINCT e.thread_id
            FROM email_references er
-           JOIN emails e ON er.email_id = CAST(e.id AS TEXT)
+           JOIN emails e ON e.id = CAST(er.email_id AS INTEGER)
            WHERE er.referenced_id = ? AND e.thread_id IS NOT NULL""",
         (message_id,),
     ).fetchall()

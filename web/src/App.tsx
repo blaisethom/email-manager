@@ -16,6 +16,7 @@ import SearchPage from './pages/Search';
 import TasksPage from './pages/Tasks';
 import ReviewPage from './pages/Review';
 import ConfigPage from './pages/Config';
+import ZoomNotesPage from './pages/ZoomNotes';
 
 export default function App() {
   return (
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="jobs/:id" element={<JobDetailPage />} />
           <Route path="tasks" element={<TasksPage />} />
           <Route path="review" element={<ReviewPage />} />
+          <Route path="zoom" element={<ZoomNotesPage />} />
           <Route path="config" element={<ConfigPage />} />
         </Route>
       </Routes>
